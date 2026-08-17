@@ -9,8 +9,8 @@ class Policy():
 
     def get_action(self, obs):
         """
-        Generate the robot action (joint positions) based on the current observation. 
-        The observation will be provided as a dictionary.   
+        Generate the robot action (joint positions) based on the current observation.
+        The observation will be provided as a dictionary.
         """
         # Available Observations. Do not use more than these for your policy.
         joint_positions = obs["joint_positions"]
@@ -24,7 +24,7 @@ class Policy():
 
         act = None
         return act
-    
+
     def is_done(self):
         """
         Termination condition for the policy. The task will be evaluated when this returns True.

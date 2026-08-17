@@ -29,17 +29,28 @@ class Env():
 
     async def reset(self):
         """
-        Resets the simulation environment by loading the configuration, setting up the simulation, robot, and task, and resetting the world. 
+        Resets the simulation environment by loading the configuration, setting up the simulation, robot, and task, and resetting the world.
         This should be called at the beginning of each episode.
         """
         # Load configuration json files
         self.config = self.load_config()
         self.cameras = {}
 
+        # Parse robot configs: support "Robots" list (multi-arm) or legacy single-robot
+        robot_cfg = self.config.get("Robot_Config", {})
+        if "Robots" in robot_cfg:
+            self.robot_configs = robot_cfg["Robots"]
+        else:
+            # Backward compat: wrap legacy single-robot config as a list
+            self.robot_configs = [robot_cfg]
+
         # Setup simulation, robot, and task
         self.task_config = TaskConfig(self.config)
         self.app, self.world = await self.setup_bricksim(self.config)
-        self.robot, self.robot_pin = await self.setup_robot(self.config, self.world)
+        self.robots, self.robot_pins = await self.setup_robots(self.world)
+        # Legacy aliases (first robot)
+        self.robot = self.robots[0] if self.robots else None
+        self.robot_pin = self.robot_pins[0] if self.robot_pins else None
         self.topology, self.pre_placed_parts, self.to_place_placed = self.setup_task(self.task_config)
         await self.world.reset_async()
         self.apply_pose_offset_world("/World/Cube", 0, 0.3)
@@ -146,7 +157,10 @@ class Env():
         workspace_prim.GetAttribute("xformOp:scale").Set(Gf.Vec3d(storage_size[0], storage_size[1], storage_size[2]))
         workspace_prim.GetAttribute("xformOp:translate").Set(Gf.Vec3d(storage_pos[0], storage_pos[1], storage_pos[2]))
         workspace_prim.GetAttribute("xformOp:orient").Set(Gf.Quatd(storage_ori[0], storage_ori[1], storage_ori[2], storage_ori[3]))
-        workspace_prim.GetRelationship("lego:workspace_obstacles").AddTarget("/World/Robot/base")
+        # Register robot bases as workspace obstacles (so parts aren't placed under robots)
+        for rc in self.robot_configs:
+            base_path = f"{rc['Robot_Prim_Path']}/base_link"
+            workspace_prim.GetRelationship("lego:workspace_obstacles").AddTarget(base_path)
         
         set_camera_view(
             eye=np.array([-0.40, 1.0, 0.60]),
@@ -155,106 +169,184 @@ class Env():
         )
         return app, world
 
-    async def setup_robot(self, config, world):
+    async def setup_robots(self, world):
         """
-        Sets up the robot in the simulation environment by spawning the robot, setting its base pose, creating its articulation, and configuring its joints and cameras according to the provided configuration.
+        Sets up multiple robots in the simulation by spawning each from its config,
+        creating articulations, and configuring joints, grippers, and cameras.
         """
-        # Spawn the robot
-        robot_pin = Robot_Pin(os.path.join(self.root_dir, config["Robot_Config"]["Robot_URDF_Path"]), 
-                              os.path.join(self.root_dir, config["Robot_Config"]["Robot_Package_Dir"]))
-        robot_pin.home_q = np.array(config["Robot_Config"]["Joint_Home_Position"])
-        robot_prim_path = "/World/Robot"
-        add_reference_to_stage(usd_path=os.path.join(self.root_dir, config["Robot_Config"]["Robot_USD_Path"]), 
-                               prim_path=robot_prim_path)
-
-        # Set robot pose
-        robot_xf = SingleXFormPrim(prim_path=robot_prim_path, name="Robot")
-        robot_xf.set_world_pose(position=config["Robot_Config"]["Robot_Base_Frame"]["Position"],
-                                orientation=config["Robot_Config"]["Robot_Base_Frame"]["Orientation"])
-        robot_base_T = np.eye(4)
-        robot_base_T[:3, 3] = config["Robot_Config"]["Robot_Base_Frame"]["Position"]
-        robot_base_T[:3, :3] = R.from_quat(config["Robot_Config"]["Robot_Base_Frame"]["Orientation"][1:] + [config["Robot_Config"]["Robot_Base_Frame"]["Orientation"][0]]).as_matrix()
-        robot_pin.BASE_T = robot_base_T
-
-        # Create robot articulation
-        robot = SingleArticulation(prim_path=robot_prim_path, name="Robot")
-        world.scene.add(robot)
-
-        # Increase position solver iterations for better assembly stability (32 -> 64)
+        robots = []
+        robot_pins = []
         stage = get_current_stage()
-        stage.GetPrimAtPath("/World/Robot").CreateAttribute("physxRigidBody:solverPositionIterationCount", Sdf.ValueTypeNames.Int).Set(64)
-        
-        # Modify robot joint physics if specified
-        if("Joints_Physics" in config["Robot_Config"].keys()):
-            for joint_name in config["Robot_Config"]["Joints_Physics"].keys():
-                max_force = config["Robot_Config"]["Joints_Physics"][joint_name]["Max_Force"] 
-                damping = config["Robot_Config"]["Joints_Physics"][joint_name]["Damping"] 
-                stiffness = config["Robot_Config"]["Joints_Physics"][joint_name]["Stiffness"] 
-                joint_prim = stage.GetPrimAtPath(joint_name)
-                joint_prim.GetAttribute("drive:angular:physics:maxForce").Set(max_force)
-                joint_prim.GetAttribute("drive:angular:physics:damping").Set(damping)
-                joint_prim.GetAttribute("drive:angular:physics:stiffness").Set(stiffness)
 
-        # Modify gripper properties if specified
-        if("Gripper_Config" in config["Robot_Config"].keys()):
-            # Apply new physics material for gripper fingertips if specified
-            if("Material" in config["Robot_Config"]["Gripper_Config"].keys()):
-                pad_material = PhysicsMaterial(prim_path="/World/PhysicsMaterials/FingerPad",
-                                               static_friction=config["Robot_Config"]["Gripper_Config"]["Material"]["Static_Friction"],
-                                               dynamic_friction=config["Robot_Config"]["Gripper_Config"]["Material"]["Dynamic_Friction"],
-                                               restitution=config["Robot_Config"]["Gripper_Config"]["Material"]["Restitution"],)
-                
-                for finger_prim_name in config["Robot_Config"]["Gripper_Config"]["Material"]["Link_Instance_Names"]:
-                    try:    
-                        # Unset instanceable
-                        stage.GetPrimAtPath(finger_prim_name).SetInstanceable(False)
-                        # Set physics material for fingertip pads
-                        SingleGeometryPrim(prim_path=finger_prim_name).apply_physics_material(pad_material)
+        # Per-arm dof_name → dof index maps (built lazily after world is ready)
+        self._arm_dof_maps = None
+
+        for i, rc in enumerate(self.robot_configs):
+            name = rc.get("Name", f"robot_{i}")
+            prim_path = rc["Robot_Prim_Path"]
+
+            # --- Pinocchio model ---
+            ee_frames = rc.get("EE_Frames", ("tip_l", "tip_r"))
+            rp = Robot_Pin(
+                os.path.join(self.root_dir, rc["Robot_URDF_Path"]),
+                os.path.join(self.root_dir, rc["Robot_Package_Dir"]),
+                ee_frames=ee_frames,
+            )
+            rp.home_q = np.array(rc["Joint_Home_Position"])
+
+            # Base transform
+            pos = rc["Robot_Base_Frame"]["Position"]
+            ori = rc["Robot_Base_Frame"]["Orientation"]
+            base_T = np.eye(4)
+            base_T[:3, 3] = pos
+            base_T[:3, :3] = R.from_quat(ori[1:] + [ori[0]]).as_matrix()
+            rp.BASE_T = base_T
+
+            # --- USD reference ---
+            add_reference_to_stage(
+                usd_path=os.path.join(self.root_dir, rc["Robot_USD_Path"]),
+                prim_path=prim_path,
+            )
+
+            # --- Set base pose ---
+            robot_xf = SingleXFormPrim(prim_path=prim_path, name=name)
+            robot_xf.set_world_pose(position=pos, orientation=ori)
+
+            # --- Articulation ---
+            robot = SingleArticulation(prim_path=prim_path, name=name)
+            world.scene.add(robot)
+
+            # Solver iterations
+            stage.GetPrimAtPath(prim_path).CreateAttribute(
+                "physxRigidBody:solverPositionIterationCount", Sdf.ValueTypeNames.Int
+            ).Set(64)
+
+            # --- Joint physics ---
+            if rc.get("Joints_Physics"):
+                for joint_path, jp in rc["Joints_Physics"].items():
+                    joint_prim = stage.GetPrimAtPath(joint_path)
+                    if joint_prim.IsValid():
+                        joint_prim.GetAttribute("drive:angular:physics:maxForce").Set(jp["Max_Force"])
+                        joint_prim.GetAttribute("drive:angular:physics:damping").Set(jp["Damping"])
+                        joint_prim.GetAttribute("drive:angular:physics:stiffness").Set(jp["Stiffness"])
+            else:
+                # Auto-configure drives for all joints by traversing the prim hierarchy
+                from pxr import UsdPhysics
+                root_prim = stage.GetPrimAtPath(prim_path)
+                if root_prim.IsValid():
+                    for prim in Usd.PrimRange(root_prim):
+                        if prim.IsA(UsdPhysics.RevoluteJoint) or prim.IsA(UsdPhysics.PrismaticJoint):
+                            try:
+                                if prim.IsA(UsdPhysics.RevoluteJoint):
+                                    prim.GetAttribute("drive:angular:physics:maxForce").Set(50.0)
+                                    prim.GetAttribute("drive:angular:physics:damping").Set(5.0)
+                                    prim.GetAttribute("drive:angular:physics:stiffness").Set(200.0)
+                                    print(f"[setup] {name}: configured revolute drive for {prim.GetPath()}", flush=True)
+                                else:
+                                    prim.GetAttribute("drive:linear:physics:maxForce").Set(10.0)
+                                    prim.GetAttribute("drive:linear:physics:damping").Set(2.0)
+                                    prim.GetAttribute("drive:linear:physics:stiffness").Set(50.0)
+                                    print(f"[setup] {name}: configured prismatic drive for {prim.GetPath()}", flush=True)
+                            except Exception as e:
+                                print(f"[setup] WARNING: failed to configure drive for {prim.GetPath()}: {e}", flush=True)
+
+            # --- Gripper physics material ---
+            gc = rc.get("Gripper_Config", {})
+            if gc.get("Material"):
+                mat = gc["Material"]
+                pad_material = PhysicsMaterial(
+                    prim_path=f"/World/PhysicsMaterials/FingerPad_{name}",
+                    static_friction=mat["Static_Friction"],
+                    dynamic_friction=mat["Dynamic_Friction"],
+                    restitution=mat["Restitution"],
+                )
+                for link_path in mat.get("Link_Instance_Names", []):
+                    try:
+                        stage.GetPrimAtPath(link_path).SetInstanceable(False)
+                        SingleGeometryPrim(prim_path=link_path).apply_physics_material(pad_material)
                     except Exception as e:
-                        print(e)
-                        raise TypeError("Config gripper material failed!")
-        
-        # Setup Cameras
-        if("Camera_Config" in config["Robot_Config"].keys()):
-            for cam_name in config["Robot_Config"]["Camera_Config"].keys():
-                cam_path = config["Robot_Config"]["Camera_Config"][cam_name]["Prim_Path"]
+                        print(f"[setup] WARNING: Gripper material failed for {link_path}: {e}")
+
+            # --- Cameras ---
+            cc = rc.get("Camera_Config", {})
+            for cam_key, cam_cfg in cc.items():
+                cam_path = cam_cfg["Prim_Path"]
+                cam_name_key = f"{name}_{cam_key}"
                 prim = stage.GetPrimAtPath(cam_path) if stage else None
                 if not prim or not prim.IsValid():
-                    print(f"[setup] WARNING: {cam_name} not found at {cam_path!r}. "
-                            f"Skipping — check that the robot USD authors it.")
-
-                # Wrap each USD camera as an Isaac Sim Camera sensor. Resolution
-                # is the sensor buffer size (not authored on the USD prim).
+                    print(f"[setup] WARNING: {cam_name_key} not found at {cam_path!r}. Skipping.")
+                    continue
                 cam = Camera(
                     prim_path=cam_path,
-                    name=cam_name,
-                    resolution=(config["Robot_Config"]["Camera_Config"][cam_name]["Resolution"][0], config["Robot_Config"]["Camera_Config"][cam_name]["Resolution"][1]),
-                    frequency=config["Robot_Config"]["Camera_Config"][cam_name]["FPS"],
+                    name=cam_name_key,
+                    resolution=(cam_cfg["Resolution"][0], cam_cfg["Resolution"][1]),
+                    frequency=cam_cfg["FPS"],
                 )
                 cam.initialize()
                 cam.add_distance_to_image_plane_to_frame()
-                self.cameras[cam_name] = cam
+                self.cameras[cam_name_key] = cam
 
-        # Set initial robot joint positions and velocities
-        robot.set_joint_positions(robot_pin.home_q)
-        robot.set_joint_velocities(np.zeros(robot_pin.nq))
+            # --- Initial state ---
+            robot.set_joint_positions(rp.home_q)
+            robot.set_joint_velocities(np.zeros(rp.nq))
+
+            robots.append(robot)
+            robot_pins.append(rp)
+
+        # --- Global joint bookkeeping ---
+        self.global_joint_order = []
+        self.arm_joint_slices = {}   # arm_name -> (start, length)
+        self._arm_configs = self.robot_configs
+
+        for i, rc in enumerate(self.robot_configs):
+            name = rc.get("Name", f"robot_{i}")
+            order = rc.get("Joint_Order", robot_pins[i].controllable_joints)
+            start = len(self.global_joint_order)
+            for jname in order:
+                self.global_joint_order.append(f"{name}_{jname}")
+            self.arm_joint_slices[name] = (start, len(order))
+
         await self.step()
-        return robot, robot_pin
-    
-    def robot_apply_action(self, q_cmd, input_joint_orders=["Lift", "torso_flip", 
-                                                            "L_arm_j1", "L_arm_j2", "L_arm_j3", "L_arm_j4", "L_arm_j5", "L_arm_j6", "L_arm_j7", "L_gripper_joint", "L_gripper_joint_01",
-                                                            "R_arm_j1", "R_arm_j2", "R_arm_j3", "R_arm_j4", "R_arm_j5", "R_arm_j6", "R_arm_j7", "R_gripper_joint", "R_gripper_joint_01",
-                                                            "head_j1", "head_j2", "head_j3"]):
+        return robots, robot_pins
+
+    def _ensure_dof_maps(self):
+        """Build per-arm dof_name → dof index maps (deferred until world is ready)."""
+        if self._arm_dof_maps is not None:
+            return
+        self._arm_dof_maps = []
+        for i, robot in enumerate(self.robots):
+            if robot.dof_names is None:
+                raise RuntimeError(f"robot.dof_names is None — articulation not ready. "
+                                   "Make sure the world has been reset/played.")
+            dof_map = {dn: idx for idx, dn in enumerate(robot.dof_names)}
+            name = self.robot_configs[i].get("Name", f"robot_{i}")
+            print(f"[Env] arm={name} dof_names={robot.dof_names}", flush=True)
+            print(f"[Env] arm={name} dof_map={dof_map}", flush=True)
+            self._arm_dof_maps.append(dof_map)
+
+    def robot_apply_action(self, q_cmd, input_joint_orders=None):
         """
-        Applies the given joint position command to the robot. The input q_cmd is expected to be in the order of input_joint_orders, and will be reordered to match the robot's joint order before being applied.
+        Applies the given joint position command to all robots. The input q_cmd
+        is expected to be in the order of input_joint_orders (defaults to
+        self.global_joint_order), and is dispatched to each arm's articulation.
         """
-        # Reorder q_cmd to match the robot's joint order
-        q_reordered = np.zeros(self.robot_pin.nq)
-        for i, joint_name in enumerate(self.robot.dof_names):
-            if joint_name in input_joint_orders:
-                idx = input_joint_orders.index(joint_name)
-                q_reordered[i] = q_cmd[idx]
-        self.robot.apply_action(ArticulationAction(joint_positions=q_reordered))
+        self._ensure_dof_maps()
+        if input_joint_orders is None:
+            input_joint_orders = self.global_joint_order
+
+        for i, robot in enumerate(self.robots):
+            rc = self.robot_configs[i]
+            name = rc.get("Name", f"robot_{i}")
+            joint_order = rc.get("Joint_Order", self.robot_pins[i].controllable_joints)
+            dof_map = self._arm_dof_maps[i]
+
+            q_i = np.zeros(self.robot_pins[i].nq)
+            for jname in joint_order:
+                logical = f"{name}_{jname}"
+                if logical in input_joint_orders and jname in dof_map:
+                    q_i[dof_map[jname]] = q_cmd[input_joint_orders.index(logical)]
+
+            robot.apply_action(ArticulationAction(joint_positions=q_i))
         
     async def step(self):
         """
@@ -278,17 +370,19 @@ class Env():
 
     async def get_robot_ready(self):
         """
-        Moves the robot to its home position with a predefined joint configuration. 
-        This can be called after play() to set the robot to a known starting state before executing any policies.
+        Moves all robots to their home positions. Each arm ramps from its
+        current pose to home_q over ~240 steps.
         """
-        for _ in range(180):
-            self.robot_apply_action(np.array([0.2, 0.5, 
-                                              0, 1.57, 0, 0, 0, 0, 0, 0, 0,
-                                              0, -1.57, 0, 0, 0, 0, 0, 0, 0,
-                                              0, 0, 0]))
-            await self.step()
-        for _ in range(60):
-            self.robot_apply_action(self.robot_pin.home_q)
+        # Ramp each arm toward home
+        for _ in range(240):
+            q_cmd = np.zeros(len(self.global_joint_order), dtype=np.float32)
+            for i, (rp, rc) in enumerate(zip(self.robot_pins, self.robot_configs)):
+                name = rc.get("Name", f"robot_{i}")
+                start, length = self.arm_joint_slices[name]
+                joint_order = rc.get("Joint_Order", rp.controllable_joints)
+                home = rp.home_q[:len(joint_order)]
+                q_cmd[start:start + length] = home
+            self.robot_apply_action(q_cmd)
             await self.step()
 
     def apply_pose_offset_world(self, prim_path, x_offset, y_offset):
@@ -344,37 +438,47 @@ class Env():
 
     def get_prim_robot_T(self, prim_path):
         """
-        Retrieves the transform of the specified prim in the robot base frame as a 4x4 homogeneous transformation matrix.
-        The prim is identified by its path in the USD stage. The robot base frame is defined by the robot's BASE_T.
+        Retrieves the transform of the specified prim in the first robot's base frame.
+        (Legacy — use get_prim_arm_T for multi-arm.)
         """
-        world_to_robot_T = self.robot_pin.BASE_T
+        return self.get_prim_arm_T(prim_path, arm_idx=0)
+
+    def get_prim_arm_T(self, prim_path, arm_idx=0):
+        """
+        Retrieves the transform of the specified prim in the specified arm's base frame.
+        arm_idx: index into self.robot_pins
+        """
         T = self.get_prim_world_T(prim_path)
-        T = world_T_to_robot_T(T, world_to_robot_T)
+        T = world_T_to_robot_T(T, self.robot_pins[arm_idx].BASE_T)
         return T
     
     def get_observations(self):
         """
-        Retrieves the current observations from the environment, including the robot's joint positions and images from the cameras.
-        
-        Returns:
-            obs: a dictionary containing the robot's joint positions and camera images.
+        Retrieves the current observations from the environment, including
+        all robots' joint positions (concatenated in global_joint_order) and
+        per-arm camera images.
         """
+        self._ensure_dof_maps()
         obs = {}
-        output_joint_orders = ["Lift", "torso_flip",  
-                               "L_arm_j1", "L_arm_j2", "L_arm_j3", "L_arm_j4", "L_arm_j5", "L_arm_j6", "L_arm_j7", "L_gripper_joint", "L_gripper_joint_01",
-                               "R_arm_j1", "R_arm_j2", "R_arm_j3", "R_arm_j4", "R_arm_j5", "R_arm_j6", "R_arm_j7", "R_gripper_joint", "R_gripper_joint_01",
-                               "head_j1", "head_j2", "head_j3"]
-        q_raw = self.robot.get_joint_positions()
-        q_ordered = np.zeros(self.robot_pin.nq, dtype=np.float32)
-        for i, joint_name in enumerate(output_joint_orders):
-            if joint_name in self.robot.dof_names:
-                q_ordered[i] = q_raw[self.robot.dof_names.index(joint_name)]
-        obs["joint_positions"] = q_ordered
+
+        # Joint positions: concatenate all arms in global_joint_order
+        q_all = np.zeros(len(self.global_joint_order), dtype=np.float32)
+        for i, robot in enumerate(self.robots):
+            rc = self.robot_configs[i]
+            name = rc.get("Name", f"robot_{i}")
+            start, length = self.arm_joint_slices[name]
+            joint_order = rc.get("Joint_Order", self.robot_pins[i].controllable_joints)
+            dof_map = self._arm_dof_maps[i]
+            q_raw = robot.get_joint_positions()
+            for k, jname in enumerate(joint_order):
+                if jname in dof_map:
+                    q_all[start + k] = q_raw[dof_map[jname]]
+        obs["joint_positions"] = q_all
+
+        # Images: per-arm keys
         obs["images"] = {}
-        obs["images"]["head_rgb"] = self.cameras["Head_Camera"].get_rgb()
-        obs["images"]["head_depth"] = self.cameras["Head_Camera"].get_depth()
-        obs["images"]["wrist_right_rgb"] = self.cameras["Wrist_Right_Camera"].get_rgb()
-        obs["images"]["wrist_right_depth"] = self.cameras["Wrist_Right_Camera"].get_depth()
-        obs["images"]["wrist_left_rgb"] = self.cameras["Wrist_Left_Camera"].get_rgb()
-        obs["images"]["wrist_left_depth"] = self.cameras["Wrist_Left_Camera"].get_depth()
+        for cam_key, cam in self.cameras.items():
+            obs["images"][f"{cam_key}_rgb"] = cam.get_rgb()
+            obs["images"][f"{cam_key}_depth"] = cam.get_depth()
+
         return obs

@@ -11,59 +11,74 @@
     },
 
     "Robot_Config": {
-        "Robot_Package_Dir": "../robot_assets/DexMate",
-        "Robot_URDF_Path": "../robot_assets/DexMate/vega_1u_gripper.urdf",
-        "Robot_USD_Path": "../robot_assets/DexMate/vega_1u_gripper.usda",
-        "Joint_Home_Position": [0.2, 0.5, 
-                                0, 1.2, 1.4, -1.57, -1.57, 1, -0.35, 0.2, 0,
-                                0, -1.2, -1.4, -1.57, 1.57, -1, 0.35, 0.2, 0,
-                                0, 0, 0],
-        "Robot_Base_Frame": {
-            "Position": [0, -0.6, -0.55],
-            "Orientation": [0.7071, 0, 0, 0.7071]
-        },
-        "Joints_Physics": {
-            "/World/Robot/R_ee_link/joints/R_gripper_joint": {
-                "Max_Force": 0.1,
-                "Damping": 1.0,
-                "Stiffness": 100.0
+        "Robots": [
+            {
+                "Name": "piper_0",
+                "Robot_Package_Dir": "../robot_assets/piper_l",
+                "Robot_URDF_Path": "../robot_assets/piper_l/piper_l_gripper_d435.urdf",
+                "Robot_USD_Path": "../robot_assets/piper_l/USD/piper_l_gripper_d435.usd",
+                "Robot_Prim_Path": "/World/Robot_0",
+                "EE_Frames": ["link6"],
+                "Joint_Order": ["joint1", "joint2", "joint3", "joint4", "joint5", "joint6", "gripper_joint1", "gripper_joint2"],
+                "Joint_Home_Position": [0, 0.79, 0, -1.57, 0, 1.57, 0.02, 0.02],
+                "Robot_Base_Frame": {
+                    "Position": [0.15, -0.25, 0.0],
+                    "Orientation": [0.7071, 0, 0, 0.7071]
+                },
+                "Joints_Physics": {},
+                "Camera_Config": {
+                    "Wrist_Camera": {
+                        "FPS": 30,
+                        "Resolution": [640, 480],
+                        "Prim_Path": "/World/Robot_0/d435_camera_link/camera_link/camera_link/Camera"
+                    }
+                },
+                "Gripper_Config": {
+                    "Material": {
+                        "Static_Friction": 1.5,
+                        "Dynamic_Friction": 1.3,
+                        "Restitution": 0.0,
+                        "Link_Instance_Names": [
+                            "/World/Robot_0/gripper_link1",
+                            "/World/Robot_0/gripper_link2"
+                        ]
+                    }
+                }
             },
-            "/World/Robot/L_ee_link/joints/L_gripper_joint": {
-                "Max_Force": 0.1,
-                "Damping": 1.0,
-                "Stiffness": 100.0
+            {
+                "Name": "piper_1",
+                "Robot_Package_Dir": "../robot_assets/piper_l",
+                "Robot_URDF_Path": "../robot_assets/piper_l/piper_l_gripper_d435.urdf",
+                "Robot_USD_Path": "../robot_assets/piper_l/USD/piper_l_gripper_d435.usd",
+                "Robot_Prim_Path": "/World/Robot_1",
+                "EE_Frames": ["link6"],
+                "Joint_Order": ["joint1", "joint2", "joint3", "joint4", "joint5", "joint6", "gripper_joint1", "gripper_joint2"],
+                "Joint_Home_Position": [0, 0.79, 0, -1.57, 0, 1.57, 0.02, 0.02],
+                "Robot_Base_Frame": {
+                    "Position": [-0.15, -0.25, 0.0],
+                    "Orientation": [0.7071, 0, 0, 0.7071]
+                },
+                "Joints_Physics": {},
+                "Camera_Config": {
+                    "Wrist_Camera": {
+                        "FPS": 30,
+                        "Resolution": [640, 480],
+                        "Prim_Path": "/World/Robot_1/d435_camera_link/camera_link/camera_link/Camera"
+                    }
+                },
+                "Gripper_Config": {
+                    "Material": {
+                        "Static_Friction": 1.5,
+                        "Dynamic_Friction": 1.3,
+                        "Restitution": 0.0,
+                        "Link_Instance_Names": [
+                            "/World/Robot_1/gripper_link1",
+                            "/World/Robot_1/gripper_link2"
+                        ]
+                    }
+                }
             }
-        },
-        "Camera_Config": {
-            "Head_Camera": {
-                "FPS": 30,
-                "Resolution": [640, 480],
-                "Prim_Path": "/World/Robot/zed_depth_frame/headcam"
-            },
-            "Wrist_Left_Camera": {
-                "FPS": 30,
-                "Resolution": [640, 480],
-                "Prim_Path": "/World/Robot/L_ee_link/gripper_link/L_wristcam"
-            },
-            "Wrist_Right_Camera": {
-                "FPS": 30,
-                "Resolution": [640, 480],
-                "Prim_Path": "/World/Robot/R_ee_link/gripper_link/R_wristcam"
-            }
-        },
-        "Gripper_Config": {
-           "Material": {
-                "Static_Friction": 1.5,
-                "Dynamic_Friction": 1.3,
-                "Restitution": 0.0,
-                "Link_Instance_Names": [
-                    "/World/Robot/R_ee_link/gripper_active_link/gripper_active_link",
-                    "/World/Robot/R_ee_link/gripper_passive_link/left_gripper_passive_link",
-                    "/World/Robot/L_ee_link/gripper_active_link/gripper_active_link",
-                    "/World/Robot/L_ee_link/gripper_passive_link/left_gripper_passive_link"
-                ]
-            }
-        }
+        ]
     },
 
     "Env_Config":{
