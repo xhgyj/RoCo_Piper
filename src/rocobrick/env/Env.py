@@ -35,6 +35,7 @@ class Env():
         # Load configuration json files
         self.config = self.load_config()
         self.cameras = {}
+        self.camera_specs = {}
 
         # Parse robot configs: support "Robots" list (multi-arm) or legacy single-robot
         robot_cfg = self.config.get("Robot_Config", {})
@@ -168,7 +169,58 @@ class Env():
             target=np.array([0.0, -0.20, 0.30]),
             camera_prim_path="/OmniverseKit_Persp",
         )
+        self._setup_environment_cameras(config)
         return app, world
+
+    def _setup_environment_cameras(self, config):
+        """Create fixed scene cameras used for data collection and review."""
+        for cam_key, cam_cfg in config.get("Env_Config", {}).get(
+            "Camera_Config", {}
+        ).items():
+            position = np.asarray(cam_cfg["Position"], dtype=np.float64)
+            target = np.asarray(cam_cfg["Target"], dtype=np.float64)
+            cam = Camera(
+                prim_path=cam_cfg["Prim_Path"],
+                name=cam_key,
+                resolution=(cam_cfg["Resolution"][0], cam_cfg["Resolution"][1]),
+                frequency=cam_cfg["FPS"],
+            )
+            # Camera's constructor interprets orientations in its "world"
+            # camera convention (+X forward).  _look_at_wxyz returns a USD
+            # camera transform (+Y up, -Z forward), so set the pose explicitly
+            # with the matching axes convention.  Passing this quaternion to
+            # the constructor makes Isaac Sim convert it a second time and
+            # points the camera towards the ceiling.
+            cam.set_world_pose(
+                position=position,
+                orientation=self._look_at_wxyz(position, target),
+                camera_axes="usd",
+            )
+            if "Focal_Length" in cam_cfg:
+                cam.prim.GetAttribute("focalLength").Set(float(cam_cfg["Focal_Length"]))
+            if "Clipping_Range" in cam_cfg:
+                cam.set_clipping_range(*cam_cfg["Clipping_Range"])
+            self.cameras[cam_key] = cam
+            self.camera_specs[cam_key] = cam_cfg
+
+    @staticmethod
+    def _look_at_wxyz(eye, target, up=(0.0, 0.0, 1.0)):
+        """Return a USD camera orientation looking from eye to target."""
+        forward = np.asarray(target, dtype=np.float64) - np.asarray(eye, dtype=np.float64)
+        forward /= np.linalg.norm(forward)
+        up = np.asarray(up, dtype=np.float64)
+        right = np.cross(forward, up)
+        if np.linalg.norm(right) < 1e-6:
+            right = np.array([1.0, 0.0, 0.0])
+        right /= np.linalg.norm(right)
+        cam_up = np.cross(right, forward)
+        cam_up /= np.linalg.norm(cam_up)
+        rotation = np.column_stack((right, cam_up, -forward))
+        quat_xyzw = R.from_matrix(rotation).as_quat()
+        return np.asarray(
+            [quat_xyzw[3], quat_xyzw[0], quat_xyzw[1], quat_xyzw[2]],
+            dtype=np.float64,
+        )
 
     async def setup_robots(self, world):
         """
@@ -288,6 +340,12 @@ class Env():
                     name=cam_name_key,
                     resolution=(cam_cfg["Resolution"][0], cam_cfg["Resolution"][1]),
                     frequency=cam_cfg["FPS"],
+                )
+                # Wrist poses are authored in USD camera axes (-Z forward).
+                # Camera(...) defaults to the Isaac "world" convention and
+                # would otherwise rotate this pose, leaving a valid render
+                # product that only sees a nearly uniform grey background.
+                cam.set_local_pose(
                     translation=np.asarray(
                         cam_cfg.get("Local_Position", [0.0, 0.0, 0.0]),
                         dtype=np.float64,
@@ -296,8 +354,16 @@ class Env():
                         cam_cfg.get("Local_Orientation", [1.0, 0.0, 0.0, 0.0]),
                         dtype=np.float64,
                     ),
+                    camera_axes="usd",
                 )
+                if "Focal_Length" in cam_cfg:
+                    cam.prim.GetAttribute("focalLength").Set(
+                        float(cam_cfg["Focal_Length"])
+                    )
+                if "Clipping_Range" in cam_cfg:
+                    cam.set_clipping_range(*cam_cfg["Clipping_Range"])
                 self.cameras[cam_name_key] = cam
+                self.camera_specs[cam_name_key] = cam_cfg
 
             # --- Initial state ---
             robot.set_joint_positions(rp.home_q)

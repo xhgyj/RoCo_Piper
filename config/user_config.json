@@ -33,7 +33,9 @@
                         "Mount_Prim_Path": "/World/Robot_0/camera_stand_link",
                         "Prim_Path": "/World/Robot_0/camera_stand_link/Wrist_Camera",
                         "Local_Position": [-0.0390961, -0.0105, 0.01605003],
-                        "Local_Orientation": [0.17450021, 0.0, -0.98465714, 0.0]
+                        "Local_Orientation": [0.17450021, 0.0, -0.98465714, 0.0],
+                        "Focal_Length": 14.0,
+                        "Clipping_Range": [0.01, 10.0]
                     }
                 },
                 "Gripper_Config": {
@@ -69,7 +71,9 @@
                         "Mount_Prim_Path": "/World/Robot_1/camera_stand_link",
                         "Prim_Path": "/World/Robot_1/camera_stand_link/Wrist_Camera",
                         "Local_Position": [-0.0390961, -0.0105, 0.01605003],
-                        "Local_Orientation": [0.17450021, 0.0, -0.98465714, 0.0]
+                        "Local_Orientation": [0.17450021, 0.0, -0.98465714, 0.0],
+                        "Focal_Length": 14.0,
+                        "Clipping_Range": [0.01, 10.0]
                     }
                 },
                 "Gripper_Config": {
@@ -88,6 +92,17 @@
     },
 
     "Env_Config":{
+        "Camera_Config": {
+            "Global_Camera": {
+                "FPS": 30,
+                "Resolution": [960, 540],
+                "Prim_Path": "/World/Global_Camera",
+                "Position": [0.0, 1.05, 0.95],
+                "Target": [0.0, -0.12, 0.24],
+                "Focal_Length": 16.0,
+                "Clipping_Range": [0.01, 10.0]
+            }
+        },
         "Storage_Config": {
             "Size": [0.2, 0.1, 0.1],
             "Position": [0.0, 0, 0.05],

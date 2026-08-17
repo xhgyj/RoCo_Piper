@@ -15,11 +15,13 @@ PREPLACE_HEIGHT = 0.06
 PRESS_DEPTH = 0.003
 FINGERTIP_CLEARANCE = 0.002
 MAX_JOINT_STEP = 0.006
+MAX_GRIPPER_STEP = 0.0005
 MAX_STATE_STEPS = 600
 SETTLE_STEPS = 12
 GRIPPER_WAIT_STEPS = 45
 POSITION_TOLERANCE = 0.012
 ROTATION_TOLERANCE = 0.30
+IK_ROTATION_WEIGHT = 0.05
 HOME_TOLERANCE = 0.08
 TRACKING_COMPENSATION = 0.35
 MAX_TRACKING_COMPENSATION = 0.15
@@ -158,13 +160,25 @@ class Policy:
         self.waypoints = {}
         self.waypoints["home"] = self.env.robot_pins[self.active_arm].home_q.copy()
         seed = self.waypoints["home"]
-        self.waypoints["pregrasp"] = self._solve(pregrasp_world, seed)
-        self.waypoints["grasp"] = self._solve(grasp_world, self.waypoints["pregrasp"])
+        self.waypoints["pregrasp"] = self._with_gripper(
+            self._solve(pregrasp_world, seed, "plan_pregrasp"),
+            close=False,
+            task=task,
+        )
+        self.waypoints["grasp"] = self._with_gripper(
+            self._solve(
+                grasp_world, self.waypoints["pregrasp"], "plan_grasp"
+            ),
+            close=False,
+            task=task,
+        )
         self.waypoints["close_gripper"] = self._with_gripper(
             self.waypoints["grasp"], close=True, task=task
         )
         self.waypoints["lift"] = self._with_gripper(
-            self._solve(pregrasp_world, self.waypoints["grasp"]),
+            self._solve(
+                pregrasp_world, self.waypoints["grasp"], "plan_lift"
+            ),
             close=True,
             task=task,
         )
@@ -203,7 +217,7 @@ class Policy:
                 {self.env.robot_pins[arm_idx].ee_frames[0]: target_arm},
                 self.env.robot_pins[arm_idx].home_q,
                 self.env.robot_pins[arm_idx].controllable_joints,
-                ROT_WEIGHT=0.25,
+                ROT_WEIGHT=IK_ROTATION_WEIGHT,
             )
             cost = np.linalg.norm(q[:6] - self.env.robot_pins[arm_idx].home_q[:6])
             cost += 10.0 * np.linalg.norm(log["final_error"][:3])
@@ -214,23 +228,49 @@ class Policy:
         pregrasp[:3, 3] += brick[:3, 2] * PREGRASP_HEIGHT
         return grasp, pregrasp
 
-    def _solve(self, world_target, seed):
+    def _solve(self, world_target, seed, planning_stage="planning"):
         rp = self.env.robot_pins[self.active_arm]
         arm_target = np.linalg.inv(rp.BASE_T) @ world_target
         q, log = rp.IK(
             {rp.ee_frames[0]: arm_target}, seed, rp.controllable_joints,
-            ROT_WEIGHT=0.25,
+            ROT_WEIGHT=IK_ROTATION_WEIGHT,
         )
-        pos_error = np.linalg.norm(log["final_error"][:3])
+        # ``log6`` translation is coupled to its rotation component.  It is
+        # therefore not a Cartesian distance when the target orientation has
+        # not converged, and previously rejected usable Piper solutions before
+        # the first command was sent.  Validate the returned solution with FK.
+        ee = rp.ee_frames[0]
+        solved = rp.FK(q, [ee])[ee]
+        pos_error = np.linalg.norm(solved[:3, 3] - arm_target[:3, 3])
+        rot_error = np.linalg.norm(
+            Rotation.from_matrix(
+                solved[:3, :3].T @ arm_target[:3, :3]
+            ).as_rotvec()
+        )
+        print(
+            f"[Expert] {planning_stage}: IK position={pos_error:.4f} m "
+            f"rotation={rot_error:.3f} rad"
+        )
         if pos_error > 0.025:
-            self._fail(f"IK position error {pos_error:.4f} m")
+            self._fail(
+                f"IK position error {pos_error:.4f} m",
+                stage=planning_stage,
+            )
         return q
 
     def _advance(self, actual):
         self.state_steps += 1
         arm_q = actual[self.active_arm]
         if self.state_steps > MAX_STATE_STEPS:
-            self._fail(f"state timeout after {MAX_STATE_STEPS} steps")
+            reason = f"state timeout after {MAX_STATE_STEPS} steps"
+            target = self.targets.get(self.state)
+            if target is not None:
+                pos_error, rot_error = self._pose_errors(arm_q, target)
+                reason += (
+                    f" (position={pos_error:.4f} m, "
+                    f"rotation={rot_error:.3f} rad)"
+                )
+            self._fail(reason)
             return
 
         if self.state == "home" and self._joint_settled(arm_q, self.waypoints["home"]):
@@ -322,19 +362,25 @@ class Policy:
         press[:3, 3] -= desired_brick[:3, 2] * PRESS_DEPTH
         self.targets.update({"preplace": preplace, "place": place, "press": press})
         self.waypoints["preplace"] = self._with_gripper(
-            self._solve(preplace, actual_q), close=True, task=task
+            self._solve(preplace, actual_q, "plan_preplace"), close=True, task=task
         )
         self.waypoints["place"] = self._with_gripper(
-            self._solve(place, self.waypoints["preplace"]), close=True, task=task
+            self._solve(
+                place, self.waypoints["preplace"], "plan_place"
+            ), close=True, task=task
         )
         self.waypoints["press"] = self._with_gripper(
-            self._solve(press, self.waypoints["place"]), close=True, task=task
+            self._solve(
+                press, self.waypoints["place"], "plan_press"
+            ), close=True, task=task
         )
         self.waypoints["open_gripper"] = self._with_gripper(
             self.waypoints["press"], close=False, task=task
         )
         self.waypoints["retreat"] = self._with_gripper(
-            self._solve(preplace, self.waypoints["press"]), close=False, task=task
+            self._solve(
+                preplace, self.waypoints["press"], "plan_retreat"
+            ), close=False, task=task
         )
         self.waypoints["back_home"] = self.env.robot_pins[self.active_arm].home_q.copy()
 
@@ -362,15 +408,21 @@ class Policy:
         return rp.BASE_T @ rp.FK(q, [ee])[ee]
 
     def _pose_settled(self, q, target_world):
-        actual = self._tcp_world(q)
-        pos_error = np.linalg.norm(actual[:3, 3] - target_world[:3, 3])
-        rot_error = np.linalg.norm(
-            Rotation.from_matrix(actual[:3, :3].T @ target_world[:3, :3]).as_rotvec()
-        )
+        pos_error, rot_error = self._pose_errors(q, target_world)
         return self._stable(
             pos_error < POSITION_TOLERANCE
             and rot_error < ROTATION_TOLERANCE
         )
+
+    def _pose_errors(self, q, target_world):
+        actual = self._tcp_world(q)
+        pos_error = np.linalg.norm(actual[:3, 3] - target_world[:3, 3])
+        rot_error = np.linalg.norm(
+            Rotation.from_matrix(
+                actual[:3, :3].T @ target_world[:3, :3]
+            ).as_rotvec()
+        )
+        return pos_error, rot_error
 
     def _joint_settled(self, q, goal):
         return self._stable(np.max(np.abs(q[:6] - goal[:6])) < HOME_TOLERANCE)
@@ -391,7 +443,7 @@ class Policy:
                 result[idx] = GRIPPER_CLOSE_J1 if close else open_width
             elif name == "gripper_joint2":
                 idx = rp.pin_model.joints[rp.pin_model.getJointId(name)].idx_q
-                result[idx] = GRIPPER_J2
+                result[idx] = GRIPPER_J2 if close else -open_width
         return result
 
     def _enter(self, state):
@@ -401,19 +453,22 @@ class Policy:
         self.state_steps = 0
         self.settle_count = 0
 
-    def _fail(self, reason):
+    def _fail(self, reason, stage=None):
         if self.result.done:
             return
         self.result.done = True
         self.result.success = False
-        self.result.failure_stage = self.state
+        self.result.failure_stage = stage or self.state
         self.result.failure_reason = reason
-        print(f"[Expert] FAILED in {self.state}: {reason}")
+        print(f"[Expert] FAILED in {self.result.failure_stage}: {reason}")
 
     @staticmethod
     def _interp(current, goal):
         delta = np.asarray(goal) - np.asarray(current)
-        largest = np.max(np.abs(delta))
-        if largest <= MAX_JOINT_STEP:
+        limits = np.full(delta.shape, MAX_JOINT_STEP, dtype=float)
+        if delta.size > 6:
+            limits[6:] = MAX_GRIPPER_STEP
+        scale = np.max(np.abs(delta) / limits)
+        if scale <= 1.0:
             return np.asarray(goal).copy()
-        return np.asarray(current) + delta / largest * MAX_JOINT_STEP
+        return np.asarray(current) + delta / scale

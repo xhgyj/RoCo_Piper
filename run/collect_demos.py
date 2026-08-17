@@ -2,6 +2,7 @@
 """Collect successful scripted-expert episodes in LeRobot v3 format."""
 
 import argparse
+import json
 import os
 from pathlib import Path
 
@@ -21,6 +22,22 @@ def _arguments():
     parser.add_argument("--fps", type=int, default=30)
     parser.add_argument("--max-frames", type=int, default=3600)
     parser.add_argument("--no-video", action="store_true")
+    parser.add_argument(
+        "--review-dir",
+        default=None,
+        help="Optional directory for human-review MP4 previews and metadata.",
+    )
+    parser.add_argument(
+        "--review-stride",
+        type=int,
+        default=4,
+        help="Write one review frame every N collected frames.",
+    )
+    parser.add_argument(
+        "--cameras",
+        default="Global_Camera",
+        help="Comma-separated camera keys to record, or 'all'.",
+    )
     return parser.parse_args()
 
 
@@ -44,7 +61,19 @@ def _rgb_frame(value, expected_size):
     return np.ascontiguousarray(image)
 
 
-def _features(env, use_videos):
+def _selected_camera_keys(env, cameras_arg):
+    if cameras_arg == "all":
+        return sorted(env.cameras)
+    selected = [key.strip() for key in cameras_arg.split(",") if key.strip()]
+    missing = [key for key in selected if key not in env.cameras]
+    if missing:
+        raise RuntimeError(
+            f"requested cameras are missing: {missing}; available={sorted(env.cameras)}"
+        )
+    return selected
+
+
+def _features(env, use_videos, camera_keys):
     features = {
         "observation.state": {
             "dtype": "float32",
@@ -58,11 +87,10 @@ def _features(env, use_videos):
         },
     }
     image_dtype = "video" if use_videos else "image"
-    for arm_cfg in env.robot_configs:
-        arm_name = arm_cfg.get("Name")
-        camera_cfg = arm_cfg["Camera_Config"]["Wrist_Camera"]
+    for cam_key in camera_keys:
+        camera_cfg = env.camera_specs[cam_key]
         width, height = camera_cfg["Resolution"]
-        features[f"observation.images.{arm_name}_wrist"] = {
+        features[f"observation.images.{_camera_feature_name(cam_key)}"] = {
             "dtype": image_dtype,
             "shape": (height, width, 3),
             "names": ["height", "width", "channels"],
@@ -70,20 +98,118 @@ def _features(env, use_videos):
     return features
 
 
-def _camera_frames(env, obs):
+def _camera_frames(env, obs, camera_keys):
     frames = {}
-    for arm_cfg in env.robot_configs:
-        arm_name = arm_cfg.get("Name")
-        camera_cfg = arm_cfg["Camera_Config"]["Wrist_Camera"]
-        source_key = f"{arm_name}_Wrist_Camera_rgb"
+    for cam_key in camera_keys:
+        camera_cfg = env.camera_specs[cam_key]
+        source_key = f"{cam_key}_rgb"
         if source_key not in obs["images"]:
             raise RuntimeError(
                 f"missing {source_key}; camera health={env.camera_health()}"
             )
-        frames[f"observation.images.{arm_name}_wrist"] = _rgb_frame(
+        frames[f"observation.images.{_camera_feature_name(cam_key)}"] = _rgb_frame(
             obs["images"][source_key], camera_cfg["Resolution"]
         )
     return frames
+
+
+def _camera_feature_name(cam_key):
+    name = cam_key
+    if name.endswith("_Wrist_Camera"):
+        name = f"{name[:-len('_Wrist_Camera')]}_wrist"
+    elif name.endswith("_Camera"):
+        name = name[:-len("_Camera")]
+    return name.lower()
+
+
+def _matrix_list(value):
+    return np.asarray(value, dtype=float).tolist()
+
+
+def _task_metadata(env, expert, health, camera_keys):
+    tasks = []
+    for task in expert.plan:
+        tasks.append({
+            "stud_path": task["stud_path"],
+            "hole_path": task["hole_path"],
+            "stud_iface": task["stud_iface"],
+            "hole_iface": task["hole_iface"],
+            "offset": list(task["offset"]),
+            "yaw": task["yaw"],
+            "dimensions": task["dimensions"],
+            "stud_world_T": _matrix_list(env.get_prim_world_T(task["stud_path"])),
+            "hole_initial_world_T": _matrix_list(
+                env.get_prim_world_T(task["hole_path"])
+            ),
+        })
+    return {
+        "camera_health": health,
+        "camera_specs": {
+            key: env.camera_specs[key]
+            for key in camera_keys
+        },
+        "tasks": tasks,
+        "global_joint_order": env.global_joint_order,
+    }
+
+
+class ReviewRecorder:
+    def __init__(self, root, fps, stride):
+        self.root = None if root is None else Path(root)
+        self.fps = fps
+        self.stride = max(1, stride)
+        self.writer = None
+        self.tmp_path = None
+        self.frame_count = 0
+        if self.root is not None:
+            self.root.mkdir(parents=True, exist_ok=True)
+
+    def start_attempt(self, attempt):
+        if self.root is None:
+            return
+        import imageio.v2 as imageio
+
+        self.tmp_path = self.root / f".attempt_{attempt:06d}.mp4"
+        self.writer = imageio.get_writer(
+            self.tmp_path,
+            fps=max(1, round(self.fps / self.stride)),
+            macro_block_size=1,
+        )
+        self.frame_count = 0
+
+    def add(self, frames):
+        if self.writer is None:
+            return
+        if self.frame_count % self.stride == 0:
+            ordered = [frames[key] for key in sorted(frames)]
+            if ordered:
+                self.writer.append_data(np.concatenate(ordered, axis=1))
+        self.frame_count += 1
+
+    def save_success(self, episode_id, metadata):
+        if self.root is None:
+            return
+        self._close()
+        video_path = self.root / f"episode_{episode_id:06d}.mp4"
+        meta_path = self.root / f"episode_{episode_id:06d}.json"
+        if self.tmp_path is not None and self.tmp_path.exists():
+            self.tmp_path.replace(video_path)
+        meta_path.write_text(
+            json.dumps(metadata, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        self.tmp_path = None
+
+    def discard(self):
+        self._close()
+        if self.tmp_path is not None and self.tmp_path.exists():
+            self.tmp_path.unlink()
+        self.tmp_path = None
+
+    def _close(self):
+        if self.writer is not None:
+            self.writer.close()
+            self.writer = None
 
 
 async def main():
@@ -103,13 +229,18 @@ async def main():
     await env.reset()
     await env.play()
     await env.get_robot_ready()
+    camera_keys = _selected_camera_keys(env, args.cameras)
     use_videos = not args.no_video
+    review_root = None
+    if args.review_dir:
+        review_root = (script_dir / args.review_dir).resolve()
+    reviewer = ReviewRecorder(review_root, args.fps, args.review_stride)
     dataset = LeRobotDataset.create(
         repo_id=args.repo_id,
         fps=args.fps,
         root=output,
         robot_type="dual_piper_l",
-        features=_features(env, use_videos),
+        features=_features(env, use_videos, camera_keys),
         use_videos=use_videos,
     )
 
@@ -123,13 +254,19 @@ async def main():
                 await env.play()
                 await env.get_robot_ready()
 
-            health = env.camera_health()
-            if len(health) != len(env.robot_configs) or not all(
-                item["valid"] for item in health.values()
+            full_health = env.camera_health()
+            health = {key: full_health.get(key) for key in camera_keys}
+            if len(health) != len(camera_keys) or not all(
+                item is not None and item["valid"] for item in health.values()
             ):
-                raise RuntimeError(f"wrist cameras are not ready: {health}")
+                raise RuntimeError(
+                    f"selected cameras are not ready: {health}; "
+                    f"all camera health={full_health}"
+                )
 
             expert = Policy(env, strict_demo=True)
+            episode_metadata = _task_metadata(env, expert, health, camera_keys)
+            reviewer.start_attempt(attempts)
             frame_count = 0
             episode_error = None
             while not expert.is_done() and frame_count < args.max_frames:
@@ -142,9 +279,14 @@ async def main():
                         ),
                         "action": action,
                         "task": "assemble the configured brick structure",
-                        **_camera_frames(env, obs),
+                        **_camera_frames(env, obs, camera_keys),
                     }
                     dataset.add_frame(frame)
+                    reviewer.add({
+                        key: value
+                        for key, value in frame.items()
+                        if key.startswith("observation.images.")
+                    })
                 except Exception as exc:
                     episode_error = str(exc)
                     break
@@ -157,15 +299,24 @@ async def main():
             if expert.succeeded() and episode_error is None:
                 dataset.save_episode()
                 successes += 1
+                episode_metadata.update({
+                    "episode_index": successes,
+                    "attempt": attempts,
+                    "frames": frame_count,
+                    "expert_result": expert.episode_result(),
+                })
+                reviewer.save_success(successes, episode_metadata)
                 print(
                     f"[collector] saved success {successes}/{args.episodes} "
                     f"(attempt {attempts}, {frame_count} frames)"
                 )
             else:
+                reviewer.discard()
                 dataset.clear_episode_buffer(delete_images=True)
                 reason = episode_error or expert.episode_result()
                 print(f"[collector] discarded attempt {attempts}: {reason}")
     finally:
+        reviewer.discard()
         dataset.finalize()
 
     if successes < args.episodes:
