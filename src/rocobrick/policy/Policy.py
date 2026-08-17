@@ -14,11 +14,32 @@ PREGRASP_HEIGHT = 0.10
 PREPLACE_HEIGHT = 0.06
 PRESS_DEPTH = 0.003
 FINGERTIP_CLEARANCE = 0.002
-MAX_JOINT_STEP = 0.006
-MAX_GRIPPER_STEP = 0.0005
+# 30 Hz control: 0.012 rad/frame = 0.36 rad/s.  This remains well below
+# Piper's URDF velocity limits while halving the free-space travel time.
+MAX_JOINT_STEP = 0.012
+MAX_GRIPPER_STEP = 0.001
 MAX_STATE_STEPS = 600
-SETTLE_STEPS = 12
-GRIPPER_WAIT_STEPS = 45
+STATE_SETTLE_STEPS = {
+    "home": 2,
+    "pregrasp": 2,
+    "grasp": 5,
+    "lift": 3,
+    "preplace": 2,
+    "place": 5,
+    "retreat": 2,
+    "back_home": 2,
+}
+MIN_GRIPPER_CLOSE_STEPS = 6
+GRIPPER_STALL_STEPS = 4
+GRIPPER_STALL_DELTA = 0.00015
+GRIPPER_CLOSE_FRACTION = 0.6
+MAX_GRIPPER_CLOSE_STEPS = 45
+MIN_PRESS_STEPS = 6
+CONNECTION_STABLE_STEPS = 3
+MAX_PRESS_STEPS = 45
+MIN_GRIPPER_OPEN_STEPS = 6
+GRIPPER_OPEN_FRACTION = 0.5
+MAX_GRIPPER_OPEN_STEPS = 45
 POSITION_TOLERANCE = 0.012
 ROTATION_TOLERANCE = 0.30
 IK_ROTATION_WEIGHT = 0.05
@@ -57,6 +78,7 @@ class Policy:
         self.state = "done" if not self.plan else "home"
         self.state_steps = 0
         self.settle_count = 0
+        self.state_frame_counts: dict[str, int] = {}
         self.waypoints: dict[str, np.ndarray] = {}
         self.targets: dict[str, np.ndarray] = {}
         self.grasp_start_T = None
@@ -103,6 +125,7 @@ class Policy:
             "failure_reason": self.result.failure_reason,
             "completed_tasks": self.result.completed_tasks,
             "total_tasks": self.result.total_tasks,
+            "state_frames": dict(self.state_frame_counts),
         }
 
     def _build_plan(self):
@@ -260,6 +283,9 @@ class Policy:
 
     def _advance(self, actual):
         self.state_steps += 1
+        self.state_frame_counts[self.state] = (
+            self.state_frame_counts.get(self.state, 0) + 1
+        )
         arm_q = actual[self.active_arm]
         if self.state_steps > MAX_STATE_STEPS:
             reason = f"state timeout after {MAX_STATE_STEPS} steps"
@@ -281,8 +307,25 @@ class Policy:
             self._enter("grasp")
         elif self.state == "grasp" and self._pose_settled(arm_q, self.targets["grasp"]):
             self._enter("close_gripper")
-        elif self.state == "close_gripper" and self.state_steps >= GRIPPER_WAIT_STEPS:
-            self._enter("lift")
+        elif self.state == "close_gripper":
+            previous_q = self.previous_actual[self.active_arm]
+            stalled = self._gripper_stalled(arm_q, previous_q)
+            closed_enough = self._gripper_closed_enough(
+                arm_q, self.waypoints["grasp"]
+            )
+            command_closed = self._gripper_command_reached(
+                self.commands[self.active_arm],
+                self.waypoints["close_gripper"],
+            )
+            close_ready = (
+                self.state_steps >= MIN_GRIPPER_CLOSE_STEPS
+                and self._stable(
+                    (stalled and closed_enough) or command_closed,
+                    GRIPPER_STALL_STEPS,
+                )
+            )
+            if close_ready or self.state_steps >= MAX_GRIPPER_CLOSE_STEPS:
+                self._enter("lift")
         elif self.state == "lift" and self._pose_settled(
             arm_q, self.targets["pregrasp"]
         ):
@@ -297,13 +340,25 @@ class Policy:
             self._enter("place")
         elif self.state == "place" and self._pose_settled(arm_q, self.targets["place"]):
             self._enter("press")
-        elif self.state == "press" and self.state_steps >= GRIPPER_WAIT_STEPS:
-            if not self._verify_connection():
+        elif self.state == "press":
+            connected = self._verify_connection()
+            press_ready = (
+                self.state_steps >= MIN_PRESS_STEPS
+                and self._stable(connected, CONNECTION_STABLE_STEPS)
+            )
+            if press_ready:
+                self._enter("open_gripper")
+            elif self.state_steps >= MAX_PRESS_STEPS:
                 self._fail("BrickSim did not accept the requested connection")
                 return
-            self._enter("open_gripper")
-        elif self.state == "open_gripper" and self.state_steps >= GRIPPER_WAIT_STEPS:
-            self._enter("retreat")
+        elif self.state == "open_gripper":
+            open_goal = self.waypoints["open_gripper"]
+            open_ready = (
+                self.state_steps >= MIN_GRIPPER_OPEN_STEPS
+                and self._gripper_open_enough(arm_q, open_goal)
+            )
+            if open_ready or self.state_steps >= MAX_GRIPPER_OPEN_STEPS:
+                self._enter("retreat")
         elif self.state == "retreat" and self._pose_settled(
             arm_q, self.targets["preplace"]
         ):
@@ -318,6 +373,7 @@ class Policy:
                 self.result.success = True
                 self.state = "done"
                 print("[Expert] all requested connections verified")
+                print(f"[Expert] state frames: {self.state_frame_counts}")
             else:
                 self._prepare_task()
 
@@ -427,9 +483,56 @@ class Policy:
     def _joint_settled(self, q, goal):
         return self._stable(np.max(np.abs(q[:6] - goal[:6])) < HOME_TOLERANCE)
 
-    def _stable(self, condition):
+    def _stable(self, condition, required_steps=None):
         self.settle_count = self.settle_count + 1 if condition else 0
-        return self.settle_count >= SETTLE_STEPS
+        if required_steps is None:
+            required_steps = STATE_SETTLE_STEPS.get(self.state, 3)
+        return self.settle_count >= required_steps
+
+    @staticmethod
+    def _gripper_stalled(current_q, previous_q):
+        """Return true after the fingers stop closing against the brick."""
+        if len(current_q) <= 6 or len(previous_q) <= 6:
+            return True
+        delta = np.asarray(current_q[6:]) - np.asarray(previous_q[6:])
+        return np.max(np.abs(delta)) < GRIPPER_STALL_DELTA
+
+    @staticmethod
+    def _gripper_closed_enough(current_q, open_goal):
+        """Reject a false stall before the fingers have approached the brick."""
+        if len(current_q) <= 6 or len(open_goal) <= 6:
+            return True
+        current = np.abs(np.asarray(current_q[6:], dtype=float))
+        goal = np.abs(np.asarray(open_goal[6:], dtype=float))
+        active = goal > 1e-6
+        if not np.any(active):
+            return True
+        return bool(np.all(current[active] <= GRIPPER_CLOSE_FRACTION * goal[active]))
+
+    @staticmethod
+    def _gripper_command_reached(command_q, goal_q):
+        """Return true once the commanded finger positions reach their goal."""
+        if len(command_q) <= 6 or len(goal_q) <= 6:
+            return True
+        error = np.asarray(command_q[6:]) - np.asarray(goal_q[6:])
+        return bool(np.max(np.abs(error)) < 1e-6)
+
+    @staticmethod
+    def _gripper_open_enough(current_q, open_goal):
+        """Allow retreat once each finger has reached half its open target.
+
+        The retreat waypoint keeps commanding the fully open target, so the
+        fingers continue opening while the arm moves away from the brick.
+        """
+        if len(current_q) <= 6 or len(open_goal) <= 6:
+            return True
+        current = np.asarray(current_q[6:], dtype=float)
+        goal = np.asarray(open_goal[6:], dtype=float)
+        active = np.abs(goal) > 1e-6
+        if not np.any(active):
+            return True
+        progress = current[active] / goal[active]
+        return bool(np.all(progress >= GRIPPER_OPEN_FRACTION))
 
     def _with_gripper(self, q, close, task):
         result = q.copy()
@@ -461,6 +564,7 @@ class Policy:
         self.result.failure_stage = stage or self.state
         self.result.failure_reason = reason
         print(f"[Expert] FAILED in {self.result.failure_stage}: {reason}")
+        print(f"[Expert] state frames: {self.state_frame_counts}")
 
     @staticmethod
     def _interp(current, goal):

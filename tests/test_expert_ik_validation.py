@@ -1,8 +1,20 @@
 """Regression tests for expert IK solution validation."""
 
+import sys
 from types import SimpleNamespace
+from types import ModuleType
 
 import numpy as np
+
+# Policy's unit tests do not need the native BrickSim/Omniverse runtime.  Stub
+# only the imported symbols so this file also runs under ordinary pytest.
+core = ModuleType("bricksim.core")
+core.compute_connection_transform = lambda **kwargs: None
+core.lookup_physics_connection = lambda **kwargs: None
+ordering = ModuleType("bricksim.topology.ordering")
+ordering.bfs_sort_connections = lambda topology: topology
+sys.modules["bricksim.core"] = core
+sys.modules["bricksim.topology.ordering"] = ordering
 
 from rocobrick.policy.Policy import EpisodeResult, Policy
 
@@ -27,6 +39,8 @@ def _policy():
     policy.env = SimpleNamespace(robot_pins=[_Robot()])
     policy.active_arm = 0
     policy.state = "home"
+    policy.settle_count = 0
+    policy.state_frame_counts = {}
     policy.result = EpisodeResult()
     return policy
 
@@ -45,3 +59,46 @@ def test_solve_reports_planning_stage_for_unreachable_target():
     policy._solve(target, np.zeros(6), "plan_pregrasp")
     assert policy.result.done
     assert policy.result.failure_stage == "plan_pregrasp"
+
+
+def test_motion_settle_count_is_phase_specific():
+    policy = _policy()
+    assert not policy._stable(True)
+    assert policy._stable(True)  # home requires only two stable frames
+
+    policy.state = "grasp"
+    policy.settle_count = 0
+    for _ in range(4):
+        assert not policy._stable(True)
+    assert policy._stable(True)  # contact approach remains more conservative
+
+
+def test_gripper_contact_and_release_conditions():
+    previous = np.zeros(8)
+    moving = previous.copy()
+    moving[6:] = [0.001, -0.001]
+    assert not Policy._gripper_stalled(moving, previous)
+    assert Policy._gripper_stalled(moving, moving + 1e-5)
+
+    goal = np.zeros(8)
+    goal[6:] = [0.03, -0.03]
+    current = np.zeros(8)
+    current[6:] = [0.02, -0.02]
+    assert not Policy._gripper_closed_enough(current, goal)
+    current[6:] = [0.018, -0.018]
+    assert Policy._gripper_closed_enough(current, goal)
+    assert not Policy._gripper_command_reached(current, np.zeros(8))
+    assert Policy._gripper_command_reached(np.zeros(8), np.zeros(8))
+
+    current[6:] = [0.014, -0.014]
+    assert not Policy._gripper_open_enough(current, goal)
+    current[6:] = [0.015, -0.015]
+    assert Policy._gripper_open_enough(current, goal)
+
+
+def test_interpolation_uses_separate_arm_and_gripper_limits():
+    current = np.zeros(8)
+    goal = np.ones(8)
+    command = Policy._interp(current, goal)
+    assert np.max(np.abs(command[:6])) <= 0.012
+    assert np.max(np.abs(command[6:])) <= 0.001
