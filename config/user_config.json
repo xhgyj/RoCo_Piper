@@ -20,9 +20,9 @@
                 "Robot_Prim_Path": "/World/Robot_0",
                 "EE_Frames": ["link6"],
                 "Joint_Order": ["joint1", "joint2", "joint3", "joint4", "joint5", "joint6", "gripper_joint1", "gripper_joint2"],
-                "Joint_Home_Position": [0, 0.79, 0, -1.57, 0, 1.57, 0.02, 0.02],
+                "Joint_Home_Position": [0, 0.79, 0, -1.57, 0, 1.57, 0.04, 0.0],
                 "Robot_Base_Frame": {
-                    "Position": [0.15, -0.25, 0.0],
+                    "Position": [0.25, -0.25, 0.0],
                     "Orientation": [0.7071, 0, 0, 0.7071]
                 },
                 "Joints_Physics": {},
@@ -53,9 +53,9 @@
                 "Robot_Prim_Path": "/World/Robot_1",
                 "EE_Frames": ["link6"],
                 "Joint_Order": ["joint1", "joint2", "joint3", "joint4", "joint5", "joint6", "gripper_joint1", "gripper_joint2"],
-                "Joint_Home_Position": [0, 0.79, 0, -1.57, 0, 1.57, 0.02, 0.02],
+                "Joint_Home_Position": [0, 0.79, 0, -1.57, 0, 1.57, 0.04, 0.0],
                 "Robot_Base_Frame": {
-                    "Position": [-0.15, -0.25, 0.0],
+                    "Position": [-0.25, -0.25, 0.0],
                     "Orientation": [0.7071, 0, 0, 0.7071]
                 },
                 "Joints_Physics": {},
