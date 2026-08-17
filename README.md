@@ -71,6 +71,43 @@ Your objective is to build an intelligent robot policy capable of successfully c
 ### Example Policy
 We have provided a naive example policy in `src/rocobrick/policy/NaivePolicy.py` to demonstrate how to interact with BrickSim. You can test it by running the `demo.py` script.
 
+### Piper scripted expert and ACT demonstrations
+
+The Piper entry policy uses a dedicated fingertip TCP (`grasp_tcp`) and
+verifies both brick lift and the requested BrickSim connection before it marks
+an episode successful.  It can run without cameras:
+
+```bash
+uv run bricksim ./run/demo.py
+```
+
+The collector requires both wrist RGB cameras to pass their health checks and
+only commits complete successful episodes.  Its default output directory is
+ignored by git:
+
+```bash
+uv run bricksim ./run/collect_demos.py \
+  --episodes 100 \
+  --repo-id local/roco-piper-act \
+  --output ../datasets/roco_piper_act
+```
+
+Check that LeRobot can load the result before training:
+
+```bash
+uv run python -c "from lerobot.datasets.lerobot_dataset import LeRobotDataset; print(LeRobotDataset('local/roco-piper-act', root='datasets/roco_piper_act'))"
+```
+
+Train the installed LeRobot ACT policy against the local dataset:
+
+```bash
+uv run lerobot-train \
+  --policy.type=act \
+  --dataset.repo_id=local/roco-piper-act \
+  --dataset.root=datasets/roco_piper_act \
+  --output_dir=outputs/act_roco_piper
+```
+
 ### ⚠️ Rules & Restrictions
 
 > **What You Can Do:**

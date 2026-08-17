@@ -53,6 +53,7 @@ class Env():
         self.robot_pin = self.robot_pins[0] if self.robot_pins else None
         self.topology, self.pre_placed_parts, self.to_place_placed = self.setup_task(self.task_config)
         await self.world.reset_async()
+        await self._initialize_cameras()
         self.apply_pose_offset_world("/World/Cube", 0, 0.3)
         await self.step()
 
@@ -268,22 +269,34 @@ class Env():
                         print(f"[setup] WARNING: Gripper material failed for {link_path}: {e}")
 
             # --- Cameras ---
+            # The generated Piper sensor USD contains no UsdGeom.Camera prim.
+            # Create one explicitly below the wrist mount and initialize it only
+            # after world.reset_async(); initializing render products before the
+            # reset leaves them detached on Isaac Sim 5.1.
             cc = rc.get("Camera_Config", {})
             for cam_key, cam_cfg in cc.items():
                 cam_path = cam_cfg["Prim_Path"]
                 cam_name_key = f"{name}_{cam_key}"
-                prim = stage.GetPrimAtPath(cam_path) if stage else None
-                if not prim or not prim.IsValid():
-                    print(f"[setup] WARNING: {cam_name_key} not found at {cam_path!r}. Skipping.")
+                mount_path = cam_cfg.get("Mount_Prim_Path")
+                mount = stage.GetPrimAtPath(mount_path) if mount_path else None
+                if mount_path and (not mount or not mount.IsValid()):
+                    print(f"[setup] WARNING: {cam_name_key} mount not found at "
+                          f"{mount_path!r}. Skipping.")
                     continue
                 cam = Camera(
                     prim_path=cam_path,
                     name=cam_name_key,
                     resolution=(cam_cfg["Resolution"][0], cam_cfg["Resolution"][1]),
                     frequency=cam_cfg["FPS"],
+                    translation=np.asarray(
+                        cam_cfg.get("Local_Position", [0.0, 0.0, 0.0]),
+                        dtype=np.float64,
+                    ),
+                    orientation=np.asarray(
+                        cam_cfg.get("Local_Orientation", [1.0, 0.0, 0.0, 0.0]),
+                        dtype=np.float64,
+                    ),
                 )
-                cam.initialize()
-                cam.add_distance_to_image_plane_to_frame()
                 self.cameras[cam_name_key] = cam
 
             # --- Initial state ---
@@ -308,6 +321,52 @@ class Env():
 
         await self.step()
         return robots, robot_pins
+
+    async def _initialize_cameras(self, warmup_steps=8):
+        """Initialize render products after reset and allow frames to arrive."""
+        self.camera_errors = {}
+        for cam_key, cam in self.cameras.items():
+            try:
+                cam.initialize()
+                cam.add_distance_to_image_plane_to_frame()
+            except Exception as exc:
+                self.camera_errors[cam_key] = str(exc)
+                print(f"[camera] WARNING: failed to initialize {cam_key}: {exc}")
+        for _ in range(warmup_steps):
+            await self.step()
+
+    def camera_health(self):
+        """Return shape/dtype/dynamic-range diagnostics for every camera."""
+        health = {}
+        for cam_key, cam in self.cameras.items():
+            try:
+                rgb = cam.get_rgb()
+                array = None if rgb is None else np.asarray(rgb)
+                valid = (
+                    array is not None
+                    and array.ndim == 3
+                    and array.shape[2] in (3, 4)
+                    and array.size > 0
+                    and np.isfinite(array).all()
+                )
+                health[cam_key] = {
+                    "valid": bool(valid),
+                    "shape": None if array is None else tuple(array.shape),
+                    "dtype": None if array is None else str(array.dtype),
+                    "range": None if array is None else (
+                        float(np.min(array)), float(np.max(array))
+                    ),
+                    "error": self.camera_errors.get(cam_key),
+                }
+            except Exception as exc:
+                health[cam_key] = {
+                    "valid": False,
+                    "shape": None,
+                    "dtype": None,
+                    "range": None,
+                    "error": str(exc),
+                }
+        return health
 
     def _ensure_dof_maps(self):
         """Build per-arm dof_name → dof index maps (deferred until world is ready)."""
@@ -478,7 +537,15 @@ class Env():
         # Images: per-arm keys
         obs["images"] = {}
         for cam_key, cam in self.cameras.items():
-            obs["images"][f"{cam_key}_rgb"] = cam.get_rgb()
-            obs["images"][f"{cam_key}_depth"] = cam.get_depth()
+            try:
+                rgb = cam.get_rgb()
+                depth = cam.get_depth()
+            except Exception as exc:
+                self.camera_errors[cam_key] = str(exc)
+                continue
+            if rgb is not None:
+                obs["images"][f"{cam_key}_rgb"] = rgb
+            if depth is not None:
+                obs["images"][f"{cam_key}_depth"] = depth
 
         return obs

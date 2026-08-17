@@ -1,551 +1,419 @@
-# noqa: N999 — module name follows repo convention (Policy.py, NaivePolicy.py)
-"""DemoPolicy: Robust dual-arm assembly policy for Piper L.
+# noqa: N999 -- module name follows the public competition convention.
+"""Closed-loop scripted expert for dual Piper brick assembly."""
 
-Improvements over NaivePolicy:
-  - State transitions gate on *actual* joint positions from obs.
-  - Per-arm state machines with independent task assignment.
-  - Tasks assigned to the arm whose base is closer to the pick brick.
-  - Settle detection: N consecutive steps within tolerance.
-  - Per-state timeout with graceful skip.
-  - Gripper open/close with joint-limit awareness.
-"""
+from __future__ import annotations
+
+from dataclasses import dataclass
+
 import numpy as np
+from bricksim.core import compute_connection_transform, lookup_physics_connection
 from bricksim.topology.ordering import bfs_sort_connections
+from scipy.spatial.transform import Rotation
 
-from rocobrick.utils import trans_z
+PREGRASP_HEIGHT = 0.10
+PREPLACE_HEIGHT = 0.06
+PRESS_DEPTH = 0.003
+FINGERTIP_CLEARANCE = 0.002
+MAX_JOINT_STEP = 0.006
+MAX_STATE_STEPS = 600
+SETTLE_STEPS = 12
+GRIPPER_WAIT_STEPS = 45
+POSITION_TOLERANCE = 0.012
+ROTATION_TOLERANCE = 0.30
+HOME_TOLERANCE = 0.08
+TRACKING_COMPENSATION = 0.35
+MAX_TRACKING_COMPENSATION = 0.15
+GRIPPER_CLOSE_J1 = 0.0
+GRIPPER_J2 = 0.0
 
-# ---------------------------------------------------------------------------
-# Tunable parameters
-# ---------------------------------------------------------------------------
-POSITION_TOLERANCE = 0.30       # rad (~17 deg) — PD steady-state error τ_g/k≈0.25
-SETTLE_WINDOW = 15              # rolling window size for settle detection
-MAX_STEPS_PER_STATE = 600       # ~10 s at 60 FPS; timeout triggers recovery
-MAX_STEP = 0.005                # rad/step interpolation cap
-GRIPPER_WAIT_STEPS = 40         # 0.67 s for gripper close/open
-GRIPPER_OPEN_J1 = 0.04          # m; gripper_joint1 open width (max 0.05)
-GRIPPER_OPEN_J2 = 0.0           # m; gripper_joint2 open (0.0 = URDF upper limit)
-GRIPPER_CLOSE_J1 = 0.0          # m; closed
-GRIPPER_CLOSE_J2 = 0.0          # m
+
+@dataclass
+class EpisodeResult:
+    """Terminal and progress information exposed to data collectors."""
+
+    done: bool = False
+    success: bool = False
+    failure_stage: str | None = None
+    failure_reason: str | None = None
+    completed_tasks: int = 0
+    total_tasks: int = 0
 
 
 class Policy:
-    """Dual-arm brick-assembly policy with closed-loop state transitions."""
+    """Sequential, privileged expert policy for collecting demonstrations."""
 
-    def __init__(self, env):
-        """Initialize the policy with the simulation environment.
-
-        Builds assembly plan, locks gripper joints for IK, distributes
-        tasks across arms, and pre-plans waypoints for each arm's first task.
-        """
+    def __init__(self, env, strict_demo: bool = False):
         self.env = env
+        self.strict_demo = strict_demo
         self.num_arms = len(env.robot_configs)
+        self.plan = self._build_plan()
+        self.result = EpisodeResult(total_tasks=len(self.plan))
+        self.commands = [rp.home_q.copy() for rp in env.robot_pins]
+        self.previous_actual = [rp.home_q.copy() for rp in env.robot_pins]
+        self.active_arm = 0
+        self.task_index = 0
+        self.state = "done" if not self.plan else "home"
+        self.state_steps = 0
+        self.settle_count = 0
+        self.waypoints: dict[str, np.ndarray] = {}
+        self.targets: dict[str, np.ndarray] = {}
+        self.grasp_start_T = None
+        self.brick_to_tcp = None
 
-        # -- Build assembly plan (reuse NaivePolicy BFS logic) --
-        self.plan = self._build_plan(
-            env.topology, env.pre_placed_parts, env.to_place_placed
-        )
-
-        # -- Lock gripper joints on every arm for IK --
         for rp in env.robot_pins:
-            gripper_joints = [j for j in rp.controllable_joints if "gripper" in j]
-            if gripper_joints:
-                rp.lock_joints(gripper_joints)
-            cj = rp.controllable_joints
-            print(f"[DemoPolicy] locked grippers, controllable: {cj}")
-
-        # -- Per-arm state --
-        self.arm_state = ["home"] * self.num_arms
-        # commanded (interpolated) joint positions
-        self.arm_cmd = [rp.home_q.copy() for rp in env.robot_pins]
-        self.arm_task_idx = [0] * self.num_arms
-        # waypoints for current task
-        self.arm_waypoints = [{} for _ in range(self.num_arms)]
-        self.arm_step_cnt = [0] * self.num_arms
-        self.arm_err_hist = [[] for _ in range(self.num_arms)]  # rolling error window
-        self.arm_done = [False] * self.num_arms
-        # per-arm task assignment lists
-        self.arm_tasks = [[] for _ in range(self.num_arms)]
-        # retry / fail tracking
-        self.arm_retries = [0] * self.num_arms
-        self.arm_task_done = [False] * self.num_arms
-
-        # -- Distribute tasks across arms --
-        self._distribute_tasks()
-
-        # -- Plan first task for each arm --
-        for arm_idx in range(self.num_arms):
-            self._load_next_task(arm_idx)
+            gripper = [j for j in rp.controllable_joints if "gripper" in j]
+            rp.lock_joints(gripper)
 
         if not self.plan:
-            print("[DemoPolicy] empty plan — nothing to assemble.")
-            for i in range(self.num_arms):
-                self.arm_done[i] = True
-
-    # ==================================================================
-    # Public API
-    # ==================================================================
+            self.result.done = True
+            self.result.success = True
+        else:
+            self._prepare_task()
 
     def get_action(self, obs):
-        """Return the 16D global joint-position command."""
-        n = len(self.env.global_joint_order)
-        q_global = np.zeros(n, dtype=np.float32)
+        """Advance the expert and return the global joint-position command."""
+        actual = self._split_actual(obs["joint_positions"])
+        if not self.result.done:
+            self._advance(actual)
 
-        for arm_idx in range(self.num_arms):
-            rc = self.env.robot_configs[arm_idx]
-            name = rc.get("Name", f"piper_{arm_idx}")
+        output = np.zeros(len(self.env.global_joint_order), dtype=np.float32)
+        for arm_idx, command in enumerate(self.commands):
+            name = self.env.robot_configs[arm_idx].get("Name", f"piper_{arm_idx}")
             start, length = self.env.arm_joint_slices[name]
-            q_arm = self._step_arm(obs, arm_idx)
-            q_global[start:start + length] = q_arm.astype(np.float32)
-
-        return q_global
+            output[start:start + length] = command[:length]
+            self.previous_actual[arm_idx] = actual[arm_idx]
+        return output
 
     def is_done(self):
-        """Return True when every arm has finished and returned home."""
-        return all(self.arm_done)
+        """Return whether the episode has reached a terminal state."""
+        return self.result.done
 
-    # ==================================================================
-    # Assembly planning
-    # ==================================================================
+    def succeeded(self):
+        """Return true only after every requested connection was verified."""
+        return self.result.done and self.result.success
 
-    def _build_plan(self, topology, pre_placed, to_place):
-        """Build BFS-sorted assembly plan, skipping fully pre-placed connections.
-
-        Returns:
-            List of task dicts with stud_path, hole_path, offset, yaw, etc.
-        """
-        sorted_topo = bfs_sort_connections(topology)
-
-        def path_for(pid):
-            if pid in pre_placed:
-                return pre_placed[pid]
-            return to_place[pid]
-
-        def label_for(pid):
-            if pid in pre_placed:
-                return f"{pre_placed[pid]} (pre-placed)"
-            return f"{to_place[pid]}"
-
-        print("[DemoPolicy] Assembly Order:")
-        plan = []
-        for conn in sorted_topo["connections"]:
-            skip = (conn["stud_id"] in pre_placed
-                    and conn["hole_id"] in pre_placed)
-            if not skip:
-                plan.append({
-                    "stud_path": path_for(conn["stud_id"]),
-                    "stud_iface": conn["stud_iface"],
-                    "hole_path": path_for(conn["hole_id"]),
-                    "hole_iface": conn["hole_iface"],
-                    "offset": conn["offset"],
-                    "yaw": conn["yaw"],
-                })
-            tag = "SKIP" if skip else "   "
-            msg = (f" {tag} #{conn['id']}:"
-                   f" stud={label_for(conn['stud_id'])}"
-                   f" % {conn['stud_iface']};"
-                   f" hole={label_for(conn['hole_id'])}"
-                   f" % {conn['hole_iface']};"
-                   f" offset={conn['offset']}, yaw={conn['yaw']}")
-            print(msg)
-        return plan
-
-    def _distribute_tasks(self):
-        """Assign each plan task to the nearest arm; check both arms' IK."""
-        for task_idx, task in enumerate(self.plan):
-            grab_path = task["hole_path"]
-            # Print distances to both arms
-            try:
-                gpos = self.env.get_prim_world_T(grab_path)[:3, 3]
-            except Exception:
-                gpos = np.zeros(3)
-            for i, rp in enumerate(self.env.robot_pins):
-                d = np.linalg.norm(gpos - rp.BASE_T[:3, 3])
-                print(f"[DemoPolicy] Arm {i} dist to grab brick: {d:.3f} m"
-                      f" (base={rp.BASE_T[:3, 3]})")
-            arm = self._nearest_arm(grab_path)
-            self.arm_tasks[arm].append(task_idx)
-
-        for arm_idx in range(self.num_arms):
-            assigned = self.arm_tasks[arm_idx]
-            print(f"[DemoPolicy] Arm {arm_idx} tasks: {assigned}"
-                  f" ({len(assigned)} total)")
-
-    def _nearest_arm(self, prim_path):
-        """Return the arm index whose base is closest to *prim_path*."""
-        try:
-            pos = self.env.get_prim_world_T(prim_path)[:3, 3]
-        except Exception:
-            return 0
-        best = 0
-        best_d = float("inf")
-        for i, rp in enumerate(self.env.robot_pins):
-            d = np.linalg.norm(pos - rp.BASE_T[:3, 3])
-            if d < best_d:
-                best_d = d
-                best = i
-        return best
-
-    # ==================================================================
-    # Per-arm stepping
-    # ==================================================================
-
-    def _step_arm(self, obs, arm_idx):
-        """Advance one arm's state machine.
-
-        Returns:
-            8D numpy array of commanded joint positions for this arm.
-        """
-        rc = self.env.robot_configs[arm_idx]
-        name = rc.get("Name", f"piper_{arm_idx}")
-        start, length = self.env.arm_joint_slices[name]
-        actual_q = obs["joint_positions"][start:start + length].copy()
-
-        # Already done — hold position
-        if self.arm_done[arm_idx]:
-            return self.arm_cmd[arm_idx]
-
-        state = self.arm_state[arm_idx]
-        wp = self.arm_waypoints[arm_idx]
-
-        if not wp:
-            # No task — drift toward home
-            goal = self.env.robot_pins[arm_idx].home_q.copy()
-            self.arm_cmd[arm_idx] = self._interp(self.arm_cmd[arm_idx], goal)
-            return self.arm_cmd[arm_idx]
-
-        goal_q = wp.get(state)
-        if goal_q is None:
-            return self.arm_cmd[arm_idx]
-
-        # Tick step counter (timeout guard)
-        self.arm_step_cnt[arm_idx] += 1
-
-        # ==============================================================
-        # State transition logic (gated on *actual* joint positions)
-        # ==============================================================
-        if state == "home":
-            if self.arm_step_cnt[arm_idx] >= 30:
-                next_t = self._next_task(arm_idx)
-                if next_t is not None:
-                    self.arm_task_idx[arm_idx] = next_t
-                    self._plan_waypoints(next_t, arm_idx)
-                    self._enter(arm_idx, "pregrasp")
-                else:
-                    if self._settled(actual_q, goal_q, arm_idx):
-                        self.arm_done[arm_idx] = True
-                        print(f"[DemoPolicy] Arm {arm_idx}: all done.")
-            else:
-                self._settled(actual_q, goal_q, arm_idx)
-
-        elif state == "pregrasp":
-            if self._settled(actual_q, goal_q, arm_idx):
-                self._enter(arm_idx, "grasp")
-
-        elif state == "grasp":
-            if self._settled(actual_q, goal_q, arm_idx):
-                self._enter(arm_idx, "close_gripper")
-
-        elif state == "close_gripper":
-            if self.arm_step_cnt[arm_idx] >= GRIPPER_WAIT_STEPS:
-                err = np.max(np.abs(actual_q[6:8] - goal_q[6:8]))
-                if err > 0.01:
-                    print(f"[DemoPolicy] Arm {arm_idx}: gripper may not"
-                          f" have closed (err={err:.4f}) — continuing")
-                self._enter(arm_idx, "retreat_grasp")
-
-        elif state == "retreat_grasp":
-            if self._settled(actual_q, goal_q, arm_idx):
-                self._enter(arm_idx, "preplace")
-
-        elif state == "preplace":
-            if self._settled(actual_q, goal_q, arm_idx):
-                self._enter(arm_idx, "place")
-
-        elif state == "place":
-            if self._settled(actual_q, goal_q, arm_idx):
-                self._enter(arm_idx, "open_gripper")
-
-        elif state == "open_gripper":
-            if self.arm_step_cnt[arm_idx] >= GRIPPER_WAIT_STEPS:
-                self._enter(arm_idx, "retreat_place")
-
-        elif state == "retreat_place":
-            if self._settled(actual_q, goal_q, arm_idx):
-                self._enter(arm_idx, "back_home")
-
-        elif state == "back_home":
-            if self._settled(actual_q, goal_q, arm_idx):
-                self._enter(arm_idx, "home")
-
-        else:
-            print(f"[DemoPolicy] WARNING: unknown state '{state}'"
-                  f" for arm {arm_idx}")
-            self._enter(arm_idx, "home")
-
-        # ==============================================================
-        # Timeout guard
-        # ==============================================================
-        if self.arm_step_cnt[arm_idx] > MAX_STEPS_PER_STATE:
-            self.arm_retries[arm_idx] += 1
-            print(f"[DemoPolicy] WARNING: Arm {arm_idx} state '{state}'"
-                  f" timed out (retry {self.arm_retries[arm_idx]}/2)")
-            if self.arm_retries[arm_idx] >= 2:
-                self._skip_current_task(arm_idx)
-            else:
-                self._enter(arm_idx, "back_home")
-
-        # ==============================================================
-        # Interpolate command toward current goal
-        # ==============================================================
-        cur_goal = self.arm_waypoints[arm_idx].get(
-            self.arm_state[arm_idx], goal_q)
-        if cur_goal is not None:
-            self.arm_cmd[arm_idx] = self._interp(
-                self.arm_cmd[arm_idx], cur_goal)
-
-        return self.arm_cmd[arm_idx]
-
-    # ==================================================================
-    # State helpers
-    # ==================================================================
-
-    def _settled(self, actual_q, goal_q, arm_idx):
-        """Check if arm joints (indices 0-5) have settled.
-
-        Uses a rolling maximum over the last SETTLE_WINDOW steps.
-        This is robust to PD oscillation: if the peak error within
-        the window stays below the threshold, the arm has settled.
-
-        Returns:
-            True if settled.
-        """
-        err = np.max(np.abs(goal_q[:6] - actual_q[:6]))
-        hist = self.arm_err_hist[arm_idx]
-        hist.append(err)
-        if len(hist) > SETTLE_WINDOW:
-            hist.pop(0)
-        # Periodic debug: show tracking error
-        if self.arm_step_cnt[arm_idx] % 60 == 0:
-            window_max = max(hist) if hist else err
-            print(f"[DemoPolicy] Arm {arm_idx} {self.arm_state[arm_idx]}"
-                  f" step={self.arm_step_cnt[arm_idx]}"
-                  f" max_err={err:.4f} rad"
-                  f" window_max={window_max:.4f} rad"
-                  f" tol={POSITION_TOLERANCE:.2f}")
-        if len(hist) < SETTLE_WINDOW:
-            return False
-        return max(hist) < POSITION_TOLERANCE
-
-    def _enter(self, arm_idx, new_state):
-        """Transition arm to a new state; reset counters and error history."""
-        old = self.arm_state[arm_idx]
-        self.arm_state[arm_idx] = new_state
-        self.arm_step_cnt[arm_idx] = 0
-        self.arm_err_hist[arm_idx] = []
-        if new_state != old:
-            wp = self.arm_waypoints[arm_idx]
-            goal = wp.get(new_state)
-            if goal is not None:
-                print(f"[DemoPolicy] Arm {arm_idx}: {old} -> {new_state}"
-                      f" goal[:6]={goal[:6].round(3)}"
-                      f" cmd[:6]={self.arm_cmd[arm_idx][:6].round(3)}")
-            else:
-                print(f"[DemoPolicy] Arm {arm_idx}: {old} -> {new_state}")
-
-    def _interp(self, cur, goal, max_step=MAX_STEP):
-        """Bounded-velocity interpolation toward goal.
-
-        Returns:
-            Next commanded joint vector, stepped by at most *max_step*.
-        """
-        cur = np.asarray(cur, dtype=np.float64)
-        goal = np.asarray(goal, dtype=np.float64)
-        delta = goal - cur
-        m = np.max(np.abs(delta))
-        if m <= max_step:
-            return goal.copy()
-        return cur + delta / m * max_step
-
-    # ==================================================================
-    # Task queue
-    # ==================================================================
-
-    def _next_task(self, arm_idx):
-        """Return the next plan index for this arm, or None.
-
-        Returns:
-            Plan index (int) or None.
-        """
-        tasks = self.arm_tasks[arm_idx]
-        idx = self.arm_task_idx[arm_idx]
-        if idx < len(tasks):
-            return tasks[idx]
-        return None
-
-    def _load_next_task(self, arm_idx):
-        """Load the next task for this arm and plan its waypoints."""
-        next_t = self._next_task(arm_idx)
-        if next_t is not None:
-            self.arm_retries[arm_idx] = 0
-            self._plan_waypoints(next_t, arm_idx)
-            self._enter(arm_idx, "home")
-        else:
-            self.arm_done[arm_idx] = True
-
-    def _skip_current_task(self, arm_idx):
-        """Skip the current task after repeated failure."""
-        self.arm_task_idx[arm_idx] += 1
-        self.arm_retries[arm_idx] = 0
-        next_t = self._next_task(arm_idx)
-        if next_t is not None:
-            print(f"[DemoPolicy] Arm {arm_idx}: skipping to next task"
-                  f" #{next_t}")
-            self._plan_waypoints(next_t, arm_idx)
-            self._enter(arm_idx, "home")
-        else:
-            print(f"[DemoPolicy] Arm {arm_idx}: no more tasks — marking done")
-            self.arm_done[arm_idx] = True
-
-    # ==================================================================
-    # IK waypoint planning (per-arm, per-task)
-    # ==================================================================
-
-    def _plan_waypoints(self, task_idx, arm_idx):
-        """Compute IK waypoints for *task_idx* on *arm_idx*."""
-        task = self.plan[task_idx]
-        to_path = task["stud_path"]      # target / placed brick
-        grab_path = task["hole_path"]    # brick to pick up
-
-        pin = self.env.robot_pins[arm_idx]
-        ee = pin.ee_frames[0]  # "link6"
-
-        # --- Diagnostics: world-frame positions ---
-        grab_world = self.env.get_prim_world_T(grab_path)
-        to_world = self.env.get_prim_world_T(to_path)
-        base_pos = pin.BASE_T[:3, 3]
-        print(f"[DemoPolicy] Arm {arm_idx} base world pos: {base_pos}")
-        print(f"[DemoPolicy] Arm {arm_idx} grab brick world pos:"
-              f" {grab_world[:3, 3]}")
-        print(f"[DemoPolicy] Arm {arm_idx} to   brick world pos:"
-              f" {to_world[:3, 3]}")
-        print(f"[DemoPolicy] Arm {arm_idx} grab dist from base:"
-              f" {np.linalg.norm(grab_world[:3, 3] - base_pos):.3f} m")
-
-        # --- FK at home for reference ---
-        home_fk = pin.FK(pin.home_q, [ee])
-        home_ee_world = pin.BASE_T @ home_fk[ee]
-        print(f"[DemoPolicy] Arm {arm_idx} EE home world pos:"
-              f" {home_ee_world[:3, 3]}")
-
-        to_t = self.env.get_prim_arm_T(to_path, arm_idx=arm_idx)
-        grab_t = self.env.get_prim_arm_T(grab_path, arm_idx=arm_idx)
-        # Normalize: ensure rotation is valid SO(3)
-        for label, t in [("to_t", to_t), ("grab_t", grab_t)]:
-            det = np.linalg.det(t[:3, :3])
-            if abs(det - 1.0) > 0.1:
-                print(f"[DemoPolicy] WARNING: {label} det(R)={det:.4f}"
-                      f" — rotation may be invalid!")
-        print(f"[DemoPolicy] Arm {arm_idx} grab_t (in base frame):")
-        print(f"  pos: {grab_t[:3, 3]}")
-        print(f"  z-axis: {grab_t[:3, 2]}")
-
-        uh = self.env.brick_unit_height
-        pre_grasp_z = 4 * uh
-        grasp_z = 0.97 * uh
-        preplace_z = 4 * uh
-        place_z = 0.0015 if "Part_0" in to_path else uh * 1.85
-
-        wp = {
-            "ee_name": ee,
-            "to_brick": to_path,
-            "grab_brick": grab_path,
-            "home": pin.home_q.copy(),
+    def episode_result(self):
+        """Return a JSON-friendly snapshot of expert progress."""
+        return {
+            "done": self.result.done,
+            "success": self.result.success,
+            "failure_stage": self.result.failure_stage,
+            "failure_reason": self.result.failure_reason,
+            "completed_tasks": self.result.completed_tasks,
+            "total_tasks": self.result.total_tasks,
         }
 
-        seed = pin.home_q.copy()
+    def _build_plan(self):
+        parts = {part["id"]: part for part in self.env.topology["parts"]}
+        ordered = bfs_sort_connections(self.env.topology)
 
-        # -- pregrasp --
-        pregrasp_t = grab_t @ trans_z(pre_grasp_z)
-        q, log = pin.IK({ee: pregrasp_t}, seed, pin.controllable_joints)
-        self._warn_ik(arm_idx, "pregrasp", log, pin, ee, pregrasp_t, q)
-        wp["pregrasp"] = q.copy()
-        seed = q.copy()
+        def path_for(part_id):
+            if part_id in self.env.pre_placed_parts:
+                return self.env.pre_placed_parts[part_id]
+            return self.env.to_place_placed[part_id]
 
-        # -- grasp --
-        grasp_t = grab_t @ trans_z(grasp_z)
-        q, log = pin.IK({ee: grasp_t}, seed, pin.controllable_joints)
-        self._warn_ik(arm_idx, "grasp", log, pin, ee, grasp_t, q)
-        wp["grasp"] = q.copy()
-        seed = q.copy()
+        plan = []
+        for connection in ordered["connections"]:
+            stud_id = connection["stud_id"]
+            hole_id = connection["hole_id"]
+            if (
+                stud_id in self.env.pre_placed_parts
+                and hole_id in self.env.pre_placed_parts
+            ):
+                continue
+            # A valid BFS assembly step adds the hole-side brick to an
+            # already-built stud-side component.
+            if hole_id not in self.env.to_place_placed:
+                continue
+            plan.append({
+                "stud_path": path_for(stud_id),
+                "stud_iface": connection["stud_iface"],
+                "hole_path": path_for(hole_id),
+                "hole_iface": connection["hole_iface"],
+                "offset": tuple(connection["offset"]),
+                "yaw": connection["yaw"],
+                "dimensions": parts[hole_id]["payload"],
+            })
+        return plan
 
-        # -- close_gripper --
-        wp["close_gripper"] = self._gripper(q, arm_idx, close=True)
-        seed = wp["close_gripper"].copy()
+    def _split_actual(self, global_q):
+        result = []
+        for arm_idx, rp in enumerate(self.env.robot_pins):
+            name = self.env.robot_configs[arm_idx].get("Name", f"piper_{arm_idx}")
+            start, length = self.env.arm_joint_slices[name]
+            q = rp.home_q.copy()
+            q[:length] = np.asarray(global_q[start:start + length])
+            result.append(q)
+        return result
 
-        # -- retreat_grasp --
-        wp["retreat_grasp"] = wp["pregrasp"].copy()
-        seed = wp["retreat_grasp"].copy()
+    def _prepare_task(self):
+        task = self.plan[self.task_index]
+        self.active_arm = self._select_arm(task["hole_path"])
+        self.grasp_start_T = self.env.get_prim_world_T(task["hole_path"])
+        grasp_world, pregrasp_world = self._grasp_targets(task, self.active_arm)
+        self.targets = {
+            "grasp": grasp_world,
+            "pregrasp": pregrasp_world,
+        }
+        self.waypoints = {}
+        self.waypoints["home"] = self.env.robot_pins[self.active_arm].home_q.copy()
+        seed = self.waypoints["home"]
+        self.waypoints["pregrasp"] = self._solve(pregrasp_world, seed)
+        self.waypoints["grasp"] = self._solve(grasp_world, self.waypoints["pregrasp"])
+        self.waypoints["close_gripper"] = self._with_gripper(
+            self.waypoints["grasp"], close=True, task=task
+        )
+        self.waypoints["lift"] = self._with_gripper(
+            self._solve(pregrasp_world, self.waypoints["grasp"]),
+            close=True,
+            task=task,
+        )
+        self._enter("home")
+        print(
+            f"[Expert] task {self.task_index + 1}/{len(self.plan)} "
+            f"uses arm {self.active_arm}"
+        )
 
-        # -- preplace --
-        preplace_t = to_t @ trans_z(preplace_z)
-        q, log = pin.IK({ee: preplace_t}, seed, pin.controllable_joints)
-        self._warn_ik(arm_idx, "preplace", log, pin, ee, preplace_t, q)
-        wp["preplace"] = q.copy()
-        seed = q.copy()
+    def _select_arm(self, brick_path):
+        brick_pos = self.env.get_prim_world_T(brick_path)[:3, 3]
+        return min(
+            range(self.num_arms),
+            key=lambda i: np.linalg.norm(
+                brick_pos - self.env.robot_pins[i].BASE_T[:3, 3]
+            ),
+        )
 
-        # -- place --
-        place_t = to_t @ trans_z(place_z)
-        q, log = pin.IK({ee: place_t}, seed, pin.controllable_joints)
-        self._warn_ik(arm_idx, "place", log, pin, ee, place_t, q)
-        wp["place"] = q.copy()
+    def _grasp_targets(self, task, arm_idx):
+        brick = self.env.get_prim_world_T(task["hole_path"])
+        dims = task["dimensions"]
+        short_axis = 0 if dims["L"] <= dims["W"] else 1
+        x_axis = brick[:3, short_axis].copy()
+        z_axis = -brick[:3, 2].copy()
+        y_axis = np.cross(z_axis, x_axis)
+        x_axis /= np.linalg.norm(x_axis)
+        y_axis /= np.linalg.norm(y_axis)
+        z_axis /= np.linalg.norm(z_axis)
+        candidates = []
+        for sign in (1.0, -1.0):
+            target = np.eye(4)
+            target[:3, :3] = np.column_stack((sign * x_axis, sign * y_axis, z_axis))
+            target[:3, 3] = brick[:3, 3] + brick[:3, 2] * FINGERTIP_CLEARANCE
+            target_arm = np.linalg.inv(self.env.robot_pins[arm_idx].BASE_T) @ target
+            q, log = self.env.robot_pins[arm_idx].IK(
+                {self.env.robot_pins[arm_idx].ee_frames[0]: target_arm},
+                self.env.robot_pins[arm_idx].home_q,
+                self.env.robot_pins[arm_idx].controllable_joints,
+                ROT_WEIGHT=0.25,
+            )
+            cost = np.linalg.norm(q[:6] - self.env.robot_pins[arm_idx].home_q[:6])
+            cost += 10.0 * np.linalg.norm(log["final_error"][:3])
+            cost += np.linalg.norm(log["final_error"][3:])
+            candidates.append((cost, target))
+        grasp = min(candidates, key=lambda item: item[0])[1]
+        pregrasp = grasp.copy()
+        pregrasp[:3, 3] += brick[:3, 2] * PREGRASP_HEIGHT
+        return grasp, pregrasp
 
-        # -- open_gripper --
-        wp["open_gripper"] = self._gripper(q, arm_idx, close=False)
+    def _solve(self, world_target, seed):
+        rp = self.env.robot_pins[self.active_arm]
+        arm_target = np.linalg.inv(rp.BASE_T) @ world_target
+        q, log = rp.IK(
+            {rp.ee_frames[0]: arm_target}, seed, rp.controllable_joints,
+            ROT_WEIGHT=0.25,
+        )
+        pos_error = np.linalg.norm(log["final_error"][:3])
+        if pos_error > 0.025:
+            self._fail(f"IK position error {pos_error:.4f} m")
+        return q
 
-        # -- retreat_place --
-        wp["retreat_place"] = wp["preplace"].copy()
+    def _advance(self, actual):
+        self.state_steps += 1
+        arm_q = actual[self.active_arm]
+        if self.state_steps > MAX_STATE_STEPS:
+            self._fail(f"state timeout after {MAX_STATE_STEPS} steps")
+            return
 
-        # -- back_home --
-        wp["back_home"] = pin.home_q.copy()
+        if self.state == "home" and self._joint_settled(arm_q, self.waypoints["home"]):
+            self._enter("pregrasp")
+        elif self.state == "pregrasp" and self._pose_settled(
+            arm_q, self.targets["pregrasp"]
+        ):
+            self._enter("grasp")
+        elif self.state == "grasp" and self._pose_settled(arm_q, self.targets["grasp"]):
+            self._enter("close_gripper")
+        elif self.state == "close_gripper" and self.state_steps >= GRIPPER_WAIT_STEPS:
+            self._enter("lift")
+        elif self.state == "lift" and self._pose_settled(
+            arm_q, self.targets["pregrasp"]
+        ):
+            if not self._verify_grasp(arm_q):
+                self._fail("brick did not follow the gripper during lift")
+                return
+            self._plan_place(arm_q)
+            self._enter("preplace")
+        elif self.state == "preplace" and self._pose_settled(
+            arm_q, self.targets["preplace"]
+        ):
+            self._enter("place")
+        elif self.state == "place" and self._pose_settled(arm_q, self.targets["place"]):
+            self._enter("press")
+        elif self.state == "press" and self.state_steps >= GRIPPER_WAIT_STEPS:
+            if not self._verify_connection():
+                self._fail("BrickSim did not accept the requested connection")
+                return
+            self._enter("open_gripper")
+        elif self.state == "open_gripper" and self.state_steps >= GRIPPER_WAIT_STEPS:
+            self._enter("retreat")
+        elif self.state == "retreat" and self._pose_settled(
+            arm_q, self.targets["preplace"]
+        ):
+            self._enter("back_home")
+        elif self.state == "back_home" and self._joint_settled(
+            arm_q, self.waypoints["back_home"]
+        ):
+            self.result.completed_tasks += 1
+            self.task_index += 1
+            if self.task_index >= len(self.plan):
+                self.result.done = True
+                self.result.success = True
+                self.state = "done"
+                print("[Expert] all requested connections verified")
+            else:
+                self._prepare_task()
 
-        self.arm_waypoints[arm_idx] = wp
-        print(f"[DemoPolicy] Arm {arm_idx} waypoints for task"
-              f" #{task_idx}: grab={grab_path} -> place on {to_path}")
+        if not self.result.done:
+            goal = self.waypoints.get(self.state)
+            if goal is not None:
+                compensated = goal.copy()
+                if self.state not in {"close_gripper", "open_gripper"}:
+                    error = goal[:6] - arm_q[:6]
+                    compensated[:6] += np.clip(
+                        TRACKING_COMPENSATION * error,
+                        -MAX_TRACKING_COMPENSATION,
+                        MAX_TRACKING_COMPENSATION,
+                    )
+                self.commands[self.active_arm] = self._interp(
+                    self.commands[self.active_arm], compensated
+                )
 
-    def _gripper(self, q, arm_idx, close):
-        """Return copy of *q* with gripper joints set to open/close."""
-        q_new = q.copy()
-        rc = self.env.robot_configs[arm_idx]
-        pin = self.env.robot_pins[arm_idx]
+    def _plan_place(self, actual_q):
+        task = self.plan[self.task_index]
+        brick_world = self.env.get_prim_world_T(task["hole_path"])
+        tcp_world = self._tcp_world(actual_q)
+        self.brick_to_tcp = np.linalg.inv(brick_world) @ tcp_world
+        quat, pos = compute_connection_transform(
+            stud_path=task["stud_path"],
+            stud_if=task["stud_iface"],
+            hole_path=task["hole_path"],
+            hole_if=task["hole_iface"],
+            offset=task["offset"],
+            yaw=task["yaw"],
+        )
+        stud_to_hole = np.eye(4)
+        stud_to_hole[:3, :3] = Rotation.from_quat(
+            [quat[1], quat[2], quat[3], quat[0]]
+        ).as_matrix()
+        stud_to_hole[:3, 3] = pos
+        desired_brick = self.env.get_prim_world_T(task["stud_path"]) @ stud_to_hole
+        place = desired_brick @ self.brick_to_tcp
+        preplace = place.copy()
+        preplace[:3, 3] += desired_brick[:3, 2] * PREPLACE_HEIGHT
+        press = place.copy()
+        press[:3, 3] -= desired_brick[:3, 2] * PRESS_DEPTH
+        self.targets.update({"preplace": preplace, "place": place, "press": press})
+        self.waypoints["preplace"] = self._with_gripper(
+            self._solve(preplace, actual_q), close=True, task=task
+        )
+        self.waypoints["place"] = self._with_gripper(
+            self._solve(place, self.waypoints["preplace"]), close=True, task=task
+        )
+        self.waypoints["press"] = self._with_gripper(
+            self._solve(press, self.waypoints["place"]), close=True, task=task
+        )
+        self.waypoints["open_gripper"] = self._with_gripper(
+            self.waypoints["press"], close=False, task=task
+        )
+        self.waypoints["retreat"] = self._with_gripper(
+            self._solve(preplace, self.waypoints["press"]), close=False, task=task
+        )
+        self.waypoints["back_home"] = self.env.robot_pins[self.active_arm].home_q.copy()
 
-        for jname in rc.get("Joint_Order", []):
-            if "gripper_joint1" in jname:
-                try:
-                    jid = pin.pin_model.getJointId(jname)
-                    idx = pin.pin_model.joints[jid].idx_q
-                    q_new[idx] = GRIPPER_CLOSE_J1 if close else GRIPPER_OPEN_J1
-                except Exception:
-                    pass
-            elif "gripper_joint2" in jname:
-                try:
-                    jid = pin.pin_model.getJointId(jname)
-                    idx = pin.pin_model.joints[jid].idx_q
-                    q_new[idx] = GRIPPER_CLOSE_J2 if close else GRIPPER_OPEN_J2
-                except Exception:
-                    pass
-        return q_new
+    def _verify_grasp(self, actual_q):
+        now = self.env.get_prim_world_T(self.plan[self.task_index]["hole_path"])
+        lift = now[2, 3] - self.grasp_start_T[2, 3]
+        tcp_distance = np.linalg.norm(now[:3, 3] - self._tcp_world(actual_q)[:3, 3])
+        return lift > 0.035 and tcp_distance < 0.16
+
+    def _verify_connection(self):
+        task = self.plan[self.task_index]
+        info = lookup_physics_connection(
+            stud_path=task["stud_path"], stud_if=task["stud_iface"],
+            hole_path=task["hole_path"], hole_if=task["hole_iface"],
+        )
+        return (
+            info is not None
+            and tuple(info.offset) == task["offset"]
+            and info.yaw == task["yaw"]
+        )
+
+    def _tcp_world(self, q):
+        rp = self.env.robot_pins[self.active_arm]
+        ee = rp.ee_frames[0]
+        return rp.BASE_T @ rp.FK(q, [ee])[ee]
+
+    def _pose_settled(self, q, target_world):
+        actual = self._tcp_world(q)
+        pos_error = np.linalg.norm(actual[:3, 3] - target_world[:3, 3])
+        rot_error = np.linalg.norm(
+            Rotation.from_matrix(actual[:3, :3].T @ target_world[:3, :3]).as_rotvec()
+        )
+        return self._stable(
+            pos_error < POSITION_TOLERANCE
+            and rot_error < ROTATION_TOLERANCE
+        )
+
+    def _joint_settled(self, q, goal):
+        return self._stable(np.max(np.abs(q[:6] - goal[:6])) < HOME_TOLERANCE)
+
+    def _stable(self, condition):
+        self.settle_count = self.settle_count + 1 if condition else 0
+        return self.settle_count >= SETTLE_STEPS
+
+    def _with_gripper(self, q, close, task):
+        result = q.copy()
+        dims = task["dimensions"]
+        width = min(dims["L"], dims["W"]) * 0.008
+        open_width = min(width + 0.012, 0.045)
+        rp = self.env.robot_pins[self.active_arm]
+        for name in self.env.robot_configs[self.active_arm]["Joint_Order"]:
+            if name == "gripper_joint1":
+                idx = rp.pin_model.joints[rp.pin_model.getJointId(name)].idx_q
+                result[idx] = GRIPPER_CLOSE_J1 if close else open_width
+            elif name == "gripper_joint2":
+                idx = rp.pin_model.joints[rp.pin_model.getJointId(name)].idx_q
+                result[idx] = GRIPPER_J2
+        return result
+
+    def _enter(self, state):
+        if state != self.state:
+            print(f"[Expert] {self.state} -> {state}")
+        self.state = state
+        self.state_steps = 0
+        self.settle_count = 0
+
+    def _fail(self, reason):
+        if self.result.done:
+            return
+        self.result.done = True
+        self.result.success = False
+        self.result.failure_stage = self.state
+        self.result.failure_reason = reason
+        print(f"[Expert] FAILED in {self.state}: {reason}")
 
     @staticmethod
-    def _warn_ik(arm_idx, stage, log, pin=None, ee=None,
-                 target_t=None, q=None):
-        """Print warning if IK position error is large (FK-verified)."""
-        if pin is not None and ee is not None and target_t is not None \
-                and q is not None:
-            fk_t = pin.FK(q, [ee])[ee]
-            pos_err = np.linalg.norm(fk_t[:3, 3] - target_t[:3, 3])
-            if pos_err > 0.01:
-                print(f"[DemoPolicy] WARNING: Arm {arm_idx} {stage}"
-                      f" IK pos_err={pos_err:.4f} m")
-        elif not log["success"] and log["final_error_norm"] > 0.03:
-            print(f"[DemoPolicy] WARNING: Arm {arm_idx} {stage}"
-                  f" IK final_error_norm={log['final_error_norm']:.4f}")
+    def _interp(current, goal):
+        delta = np.asarray(goal) - np.asarray(current)
+        largest = np.max(np.abs(delta))
+        if largest <= MAX_JOINT_STEP:
+            return np.asarray(goal).copy()
+        return np.asarray(current) + delta / largest * MAX_JOINT_STEP

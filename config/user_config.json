@@ -18,7 +18,7 @@
                 "Robot_URDF_Path": "../robot_assets/piper_l/piper_l_gripper_d435.urdf",
                 "Robot_USD_Path": "../robot_assets/piper_l/USD/piper_l_gripper_d435.usd",
                 "Robot_Prim_Path": "/World/Robot_0",
-                "EE_Frames": ["link6"],
+                "EE_Frames": ["grasp_tcp"],
                 "Joint_Order": ["joint1", "joint2", "joint3", "joint4", "joint5", "joint6", "gripper_joint1", "gripper_joint2"],
                 "Joint_Home_Position": [0, 0.79, 0, -1.57, 0, 1.57, 0.04, 0.0],
                 "Robot_Base_Frame": {
@@ -30,7 +30,10 @@
                     "Wrist_Camera": {
                         "FPS": 30,
                         "Resolution": [640, 480],
-                        "Prim_Path": "/World/Robot_0/d435_camera_link/camera_link/camera_link/Camera"
+                        "Mount_Prim_Path": "/World/Robot_0/camera_stand_link",
+                        "Prim_Path": "/World/Robot_0/camera_stand_link/Wrist_Camera",
+                        "Local_Position": [-0.0390961, -0.0105, 0.01605003],
+                        "Local_Orientation": [0.17450021, 0.0, -0.98465714, 0.0]
                     }
                 },
                 "Gripper_Config": {
@@ -51,7 +54,7 @@
                 "Robot_URDF_Path": "../robot_assets/piper_l/piper_l_gripper_d435.urdf",
                 "Robot_USD_Path": "../robot_assets/piper_l/USD/piper_l_gripper_d435.usd",
                 "Robot_Prim_Path": "/World/Robot_1",
-                "EE_Frames": ["link6"],
+                "EE_Frames": ["grasp_tcp"],
                 "Joint_Order": ["joint1", "joint2", "joint3", "joint4", "joint5", "joint6", "gripper_joint1", "gripper_joint2"],
                 "Joint_Home_Position": [0, 0.79, 0, -1.57, 0, 1.57, 0.04, 0.0],
                 "Robot_Base_Frame": {
@@ -63,7 +66,10 @@
                     "Wrist_Camera": {
                         "FPS": 30,
                         "Resolution": [640, 480],
-                        "Prim_Path": "/World/Robot_1/d435_camera_link/camera_link/camera_link/Camera"
+                        "Mount_Prim_Path": "/World/Robot_1/camera_stand_link",
+                        "Prim_Path": "/World/Robot_1/camera_stand_link/Wrist_Camera",
+                        "Local_Position": [-0.0390961, -0.0105, 0.01605003],
+                        "Local_Orientation": [0.17450021, 0.0, -0.98465714, 0.0]
                     }
                 },
                 "Gripper_Config": {

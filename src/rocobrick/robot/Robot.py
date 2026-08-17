@@ -174,8 +174,12 @@ class Robot_Pin():
                     for ee_id, target_pose in zip(ee_ids, target_poses):
                         current_pose = self.pin_data.oMf[ee_id]
                         err = pin.log6(current_pose.inverse() * target_pose).vector
-                        # Position-only cost (rotation is irrelevant for brick picking)
+                        # A Piper parallel gripper must approach with its tool
+                        # axis pointing into the brick.  Ignoring orientation
+                        # can put the wrist at the right point with the fingers
+                        # facing away from the workpiece.
                         total += np.sum(err[:3]**2)
+                        total += (ROT_WEIGHT ** 2) * np.sum(err[3:]**2)
                     return total
 
                 res = minimize(cost, x0, method='L-BFGS-B',
@@ -216,10 +220,11 @@ class Robot_Pin():
             if not status:
                 # Fall back to optimization with random restarts
                 q_opt, status_opt, _, unscaled_error_opt = _optimize_ik()
-                # Compare position error only (rotation is irrelevant for reaching)
-                pos_err_jac = np.linalg.norm(unscaled_error[:3]) if not status else 0
-                pos_err_opt = np.linalg.norm(unscaled_error_opt[:3]) if not status_opt else 0
-                if status_opt or pos_err_opt < pos_err_jac:
+                scaled_jac = unscaled_error.copy()
+                scaled_opt = unscaled_error_opt.copy()
+                scaled_jac[3:] *= ROT_WEIGHT
+                scaled_opt[3:] *= ROT_WEIGHT
+                if status_opt or np.linalg.norm(scaled_opt) < np.linalg.norm(scaled_jac):
                     q, status, unscaled_error = q_opt, status_opt, unscaled_error_opt
 
         return q, {"success": status, "iterations": iters if method != "optimize" else -1,

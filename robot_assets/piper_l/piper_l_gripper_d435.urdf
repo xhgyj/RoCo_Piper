@@ -237,6 +237,18 @@
     <parent link="link6"/>
     <child link="gripper_base"/>
   </joint>
+  <!--
+    Kinematic tool centre point used by the scripted expert.  link6 is the
+    wrist flange; the fingers extend from z=0.1358 down to z=0.0593 in the
+    flange frame.  Keeping this as a separate fixed frame prevents planners
+    from accidentally placing the flange itself at the brick surface.
+  -->
+  <link name="grasp_tcp"/>
+  <joint name="grasp_tcp_joint" type="fixed">
+    <origin rpy="0 0 0" xyz="0 0 0.0593"/>
+    <parent link="link6"/>
+    <child link="grasp_tcp"/>
+  </joint>
   <link name="gripper_link1">
     <inertial>
       <origin rpy="0 0 0" xyz="0.00065123185041968 -0.0491929869131989 0.00972258769184025"/>

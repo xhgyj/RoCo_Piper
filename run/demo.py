@@ -21,7 +21,7 @@ async def main():
     
     while(1):
         if my_policy.is_done():
-            print("Demo complete.")
+            print("Demo result:", my_policy.episode_result())
             break
         obs = env.get_observations()
         q = my_policy.get_action(obs)
