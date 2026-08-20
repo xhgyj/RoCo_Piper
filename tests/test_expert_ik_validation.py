@@ -63,8 +63,7 @@ def test_solve_reports_planning_stage_for_unreachable_target():
 
 def test_motion_settle_count_is_phase_specific():
     policy = _policy()
-    assert not policy._stable(True)
-    assert policy._stable(True)  # home requires only two stable frames
+    assert policy._stable(True)  # free-space home transition has no idle frame
 
     policy.state = "grasp"
     policy.settle_count = 0
@@ -100,5 +99,5 @@ def test_interpolation_uses_separate_arm_and_gripper_limits():
     current = np.zeros(8)
     goal = np.ones(8)
     command = Policy._interp(current, goal)
-    assert np.max(np.abs(command[:6])) <= 0.012
+    assert np.max(np.abs(command[:6])) <= 0.018
     assert np.max(np.abs(command[6:])) <= 0.001

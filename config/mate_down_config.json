@@ -1,0 +1,39 @@
+{
+    "control_hz": 30,
+    "history_steps": 10,
+    "max_translation_step": 0.0015,
+    "max_rotation_step_deg": 2.0,
+    "max_force": 15.0,
+    "max_torque": 1.5,
+    "safety_activation_distance": 0.01,
+    "safety_violation_steps": 3,
+    "max_episode_steps": 720,
+    "contact_force": 0.5,
+    "stable_force_min": 0.8,
+    "stable_force_max": 8.0,
+    "stable_steps": 5,
+    "gripper_closed_width": 0.01,
+    "gripper_hold_position": 0.0,
+    "wrench_filter_alpha": 0.05,
+    "jacobian_rcond": 0.00001,
+    "wrench_damping": 0.03,
+    "target_noise": {
+        "xy_m": 0.006,
+        "z_m": 0.003,
+        "yaw_deg": 8.0,
+        "tilt_deg": 3.0,
+        "max_delay_frames": 3
+    },
+    "act": {
+        "chunk_size": 10,
+        "dim_model": 256,
+        "n_heads": 8,
+        "dim_feedforward": 1024,
+        "n_encoder_layers": 4,
+        "n_decoder_layers": 2,
+        "latent_dim": 32,
+        "dropout": 0.1,
+        "kl_weight": 10.0,
+        "temporal_ensemble_coeff": 0.1
+    }
+}

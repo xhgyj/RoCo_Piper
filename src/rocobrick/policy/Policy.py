@@ -14,16 +14,16 @@ PREGRASP_HEIGHT = 0.10
 PREPLACE_HEIGHT = 0.06
 PRESS_DEPTH = 0.003
 FINGERTIP_CLEARANCE = 0.002
-# 30 Hz control: 0.012 rad/frame = 0.36 rad/s.  This remains well below
-# Piper's URDF velocity limits while halving the free-space travel time.
-MAX_JOINT_STEP = 0.012
+# 30 Hz control: 0.018 rad/frame = 0.54 rad/s.  Contact-sensitive states keep
+# their own settle windows; this limit applies to conventional free-space Pick.
+MAX_JOINT_STEP = 0.018
 MAX_GRIPPER_STEP = 0.001
 MAX_STATE_STEPS = 600
 STATE_SETTLE_STEPS = {
-    "home": 2,
-    "pregrasp": 2,
+    "home": 1,
+    "pregrasp": 1,
     "grasp": 5,
-    "lift": 3,
+    "lift": 2,
     "preplace": 2,
     "place": 5,
     "retreat": 2,
@@ -42,6 +42,8 @@ GRIPPER_OPEN_FRACTION = 0.5
 MAX_GRIPPER_OPEN_STEPS = 45
 POSITION_TOLERANCE = 0.012
 ROTATION_TOLERANCE = 0.30
+STRICT_POSITION_TOLERANCE = 0.004
+STRICT_ROTATION_TOLERANCE = 0.03
 IK_ROTATION_WEIGHT = 0.05
 HOME_TOLERANCE = 0.08
 TRACKING_COMPENSATION = 0.35
@@ -66,6 +68,7 @@ class Policy:
     """Sequential, privileged expert policy for collecting demonstrations."""
 
     def __init__(self, env, strict_demo: bool = False):
+        """Initialize the expert for one environment episode."""
         self.env = env
         self.strict_demo = strict_demo
         self.num_arms = len(env.robot_configs)
@@ -95,7 +98,11 @@ class Policy:
             self._prepare_task()
 
     def get_action(self, obs):
-        """Advance the expert and return the global joint-position command."""
+        """Advance the expert.
+
+        Returns:
+            Global joint-position command for every configured arm.
+        """
         actual = self._split_actual(obs["joint_positions"])
         if not self.result.done:
             self._advance(actual)
@@ -465,9 +472,23 @@ class Policy:
 
     def _pose_settled(self, q, target_world):
         pos_error, rot_error = self._pose_errors(q, target_world)
+        precise_mating_state = self.strict_demo and self.state in {
+            "preplace",
+            "place",
+        }
+        position_tolerance = (
+            STRICT_POSITION_TOLERANCE
+            if precise_mating_state
+            else POSITION_TOLERANCE
+        )
+        rotation_tolerance = (
+            STRICT_ROTATION_TOLERANCE
+            if precise_mating_state
+            else ROTATION_TOLERANCE
+        )
         return self._stable(
-            pos_error < POSITION_TOLERANCE
-            and rot_error < ROTATION_TOLERANCE
+            pos_error < position_tolerance
+            and rot_error < rotation_tolerance
         )
 
     def _pose_errors(self, q, target_world):
@@ -499,7 +520,11 @@ class Policy:
 
     @staticmethod
     def _gripper_closed_enough(current_q, open_goal):
-        """Reject a false stall before the fingers have approached the brick."""
+        """Reject a false stall before the fingers have approached the brick.
+
+        Returns:
+            Whether the fingers have closed far enough to plausibly grasp.
+        """
         if len(current_q) <= 6 or len(open_goal) <= 6:
             return True
         current = np.abs(np.asarray(current_q[6:], dtype=float))
@@ -523,6 +548,9 @@ class Policy:
 
         The retreat waypoint keeps commanding the fully open target, so the
         fingers continue opening while the arm moves away from the brick.
+
+        Returns:
+            Whether both fingers have opened enough to begin retreating.
         """
         if len(current_q) <= 6 or len(open_goal) <= 6:
             return True
