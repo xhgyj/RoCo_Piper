@@ -226,6 +226,19 @@ owning skill interface is stable.
    Recover and Regrasp by composing existing primitives rather than copying
    controllers.
 
+## Implementation status
+
+- Phase 1 was completed in commit `153bd16`: backend/controller contracts,
+  shared Move/Approach/Grasp/Retreat primitives, PickSkill, registry gating,
+  unit tests, and a BrickSim preparation smoke run.
+- Phase 2 is complete: Align preserves the insertion axis and evaluates only
+  transverse/rotation convergence; InsertPress is direction-parameterized and
+  bounded by travel, force, and live semantic checks; Release re-verifies
+  success before and after opening; Place-Up and Place-Down are enabled through
+  the same AssembleSkill template. The legacy entry point now invokes this
+  composition and retains only a thin home-return adapter.
+- Phase 3 (Hold and Support-Bottom/Support-Top) remains pending.
+
 ## Verification and acceptance
 
 - Skills, primitives, controllers, and safety modules import and run against a

@@ -7,8 +7,9 @@ from dataclasses import dataclass
 import numpy as np
 from numpy.typing import NDArray
 
-from rocobrick.execution.types import OperationResult
+from rocobrick.execution.types import HeldObject, OperationResult
 from rocobrick.primitives.base import PrimitiveContext
+from rocobrick.safety.checks import GraspTracking, SuccessCheck
 
 FloatArray = NDArray[np.float64]
 
@@ -20,6 +21,8 @@ class ApproachRequest:
     world_t_tcp: FloatArray
     grasp_width: float
     stage: str = "approach"
+    held: HeldObject | None = None
+    success_check: SuccessCheck | None = None
 
 
 class Approach:
@@ -30,14 +33,24 @@ class Approach:
         self._context = context
 
     async def execute(self, request: ApproachRequest) -> OperationResult:
-        """Execute a straight Cartesian approach with an open gripper.
+        """Execute a straight Cartesian approach.
 
         Returns:
             Controller completion metrics.
         """
+        tracking = None
+        if request.held is not None:
+            tracking = GraspTracking(
+                request.held.object_id,
+                request.held.object_t_tcp,
+                request.held.grasp_axis,
+                request.held.grasp_width,
+            )
         return await self._context.cartesian.move_to(
             request.world_t_tcp,
             request.stage,
             request.grasp_width,
-            closed=False,
+            closed=request.held is not None,
+            tracking=tracking,
+            success_check=request.success_check,
         )

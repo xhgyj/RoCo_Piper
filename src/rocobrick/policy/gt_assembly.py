@@ -9,17 +9,20 @@ from pathlib import Path
 import numpy as np
 from scipy.spatial.transform import Rotation
 
-from rocobrick.backends.bricksim import BrickSimRobotBackend, BrickSimWorldModel
-from rocobrick.execution.types import ExecutionError
+from rocobrick.backends.bricksim import (
+    BrickSimConnectionGoal,
+    BrickSimRobotBackend,
+    BrickSimSuccessCheck,
+    BrickSimWorldModel,
+)
+from rocobrick.controllers.motion import MotionConfig
+from rocobrick.execution.types import ExecutionError, HeldObject
 from rocobrick.policy.assembly_control import (
     AssemblyExpertConfig,
-    AssemblyPhase,
-    GTAssemblyExpert,
 )
-from rocobrick.policy.assembly_runtime import (
-    DELICATE_ALIGNMENT_ROTATION_STEP,
-    GTAssemblyRuntime,
-)
+from rocobrick.policy.assembly_runtime import GTAssemblyRuntime
+from rocobrick.safety.checks import ForceGuard
+from rocobrick.skills.assemble import AssembleRequest, AssembleSkill
 from rocobrick.skills.pick import GraspCandidate, PickRequest, PickSkill
 
 SAFE_HEIGHT = 0.06
@@ -120,6 +123,22 @@ class PickPlan:
     world_t_pregrasp_tcp: np.ndarray
     q_pregrasp: np.ndarray
     q_grasp: np.ndarray
+
+
+class _RuntimeWrenchSource:
+    """Expose calibrated legacy feedback through the primitive protocol."""
+
+    def __init__(self, runtime: GTAssemblyRuntime):
+        """Bind the calibrated BrickSim assembly runtime."""
+        self._runtime = runtime
+
+    def read_wrench_world(self) -> np.ndarray:
+        """Read the current estimated world-frame TCP wrench.
+
+        Returns:
+            Force followed by torque as a six-vector.
+        """
+        return self._runtime.read_feedback().wrench_world
 
 
 @dataclass(frozen=True)
@@ -420,7 +439,7 @@ async def run_gt_assembly_expert(
     prepared: SafeStart,
     runtime_config,
 ) -> ExpertResult:
-    """Run the only recorded expert trajectory from safe pose to connection.
+    """Run deterministic geometric assembly from safe pose to connection.
 
     Returns:
         Success, executed control steps, and an optional failure reason.
@@ -436,12 +455,10 @@ async def run_gt_assembly_expert(
             f"target slipped during pre-trajectory calibration: "
             f"{initial_grasp_error}",
         )
-    alignment_reachable, rotation_hint, alignment_branch = (
-        _alignment_rotation_hint(
-            env,
-            prepared,
-            runtime_config.max_alignment_rotation_step * 0.5,
-        )
+    alignment_reachable, _, _ = _alignment_rotation_hint(
+        env,
+        prepared,
+        runtime_config.max_alignment_rotation_step * 0.5,
     )
     if not alignment_reachable:
         return ExpertResult(
@@ -449,162 +466,60 @@ async def run_gt_assembly_expert(
             0,
             "safe-start pose has no verified high-clearance alignment IK",
         )
-    expert = GTAssemblyExpert(
-        stable_force_min=runtime_config.stable_force_min,
-        stable_force_max=runtime_config.stable_force_max,
-        initial_rotation_hint=rotation_hint,
+    robot = BrickSimRobotBackend(env, prepared.arm_index)
+    world = BrickSimWorldModel(env)
+    calibrated_preassembly_tcp = robot.read_state().tcp_world
+    success_check = _bricksim_success_check(prepared.task)
+    held = HeldObject(
+        prepared.task.target_path,
+        robot.robot_id,
+        prepared.brick_t_tcp,
+        prepared.grasp_axis,
+        prepared.grasp_width,
     )
-    expert.reset()
-    previous_phase = None
-    for step in range(1, runtime_config.max_episode_steps + 1):
-        current_brick = env.get_prim_world_T(prepared.task.target_path)
-        feedback, observation, _, safety, world_t_goal_tcp = (
-            runtime.observe_brick_goal(
-                prepared.world_t_goal_brick,
-                current_brick,
-            )
-        )
-        if safety.done and not safety.success_candidate:
-            return ExpertResult(
-                False,
-                step,
-                f"safety stop: {safety.failure.name}",
-            )
-        skill_t_tcp = np.linalg.inv(world_t_goal_tcp) @ feedback.tcp_world
-        wrench_skill = _rotate_wrench(
-            world_t_goal_tcp, feedback.wrench_world
-        )
-        output = expert.act(
-            skill_t_tcp,
-            wrench_skill,
-            connected=verify_connections(prepared.task),
-        )
-        conflict = _connection_conflict(prepared.task)
-        if conflict is not None:
-            return ExpertResult(False, step, conflict)
-        if output.phase != previous_phase:
-            print(f"[expert] {output.phase.name}", flush=True)
-            previous_phase = output.phase
-        if step == 1 or step % 60 == 0:
-            position = skill_t_tcp[:3, 3]
-            rotation_error = Rotation.from_matrix(skill_t_tcp[:3, :3]).magnitude()
-            print(
-                "[expert] progress "
-                f"step={step} xyz={position.tolist()} "
-                f"rotation={np.rad2deg(rotation_error):.2f}deg "
-                f"force={wrench_skill[:3].tolist()} "
-                f"connected={verify_connections(prepared.task)}",
-                flush=True,
-            )
-            print(
-                f"[expert] bricksim={_assembly_debug_summary(prepared.task)}",
-                flush=True,
-            )
-        try:
-            high_clearance_phase = bool(
-                output.phase == AssemblyPhase.ALIGN
-                and float(skill_t_tcp[2, 3]) < -0.02
-            )
-            high_clearance_alignment = bool(
-                high_clearance_phase
-                # A 1x2 target can tip between the fingers under the ordinary
-                # high-clearance rotation lead, so it follows the dedicated
-                # delicate path below.  Wider targets retain the fast path.
-                and _fast_alignment_allowed(prepared.task.dimensions)
-            )
-            delicate_alignment = bool(
-                high_clearance_phase
-                and _is_short_target(prepared.task.dimensions)
-            )
-            alignment_step = (
-                DELICATE_ALIGNMENT_ROTATION_STEP
-                if delicate_alignment
-                else runtime_config.max_alignment_rotation_step
-            )
-            runtime.apply_action(
-                world_t_goal_tcp,
-                feedback,
-                output.action,
-                fast_alignment=high_clearance_alignment,
-                delicate_alignment=delicate_alignment,
-                ik_seed=(
-                    _alignment_branch_seed(
-                        alignment_branch,
-                        max(
-                            0.0,
-                            Rotation.from_matrix(
-                                skill_t_tcp[:3, :3]
-                            ).magnitude()
-                            - alignment_step,
-                        ),
-                    )
-                    if high_clearance_phase
-                    else None
+    direction = -prepared.world_t_goal_brick[:3, 2]
+    motion_config = MotionConfig(
+        position_tolerance=0.002,
+        rotation_tolerance=np.deg2rad(1.0),
+        timeout_steps=runtime_config.max_episode_steps,
+        translation_step=runtime_config.max_translation_step,
+        translation_step_held=runtime_config.max_translation_step,
+    )
+    print("[expert] execute AssembleSkill", flush=True)
+    try:
+        result = await AssembleSkill.create(
+            robot, world, motion_config
+        ).execute(
+            AssembleRequest(
+                held=held,
+                world_t_preassembly_tcp=calibrated_preassembly_tcp,
+                world_t_goal_tcp=prepared.world_t_goal_tcp,
+                insertion_direction_world=direction,
+                success_check=success_check,
+                approach_clearance=0.005,
+                insertion_distance=0.012,
+                insertion_step=0.0001,
+                retreat_distance=POST_ASSEMBLY_RETREAT,
+                max_insert_steps=runtime_config.max_episode_steps,
+                wrench_source=_RuntimeWrenchSource(runtime),
+                force_guard=ForceGuard(
+                    runtime_config.max_force, runtime_config.max_force
                 ),
             )
-        except RuntimeError as exc:
-            return ExpertResult(False, step, str(exc))
-        await env.step()
-        await env.step()
-        connected_after_step = verify_connections(prepared.task)
-        if output.done:
-            return ExpertResult(
-                connected_after_step,
-                step,
-                None
-                if connected_after_step
-                else "BrickSim did not verify every connection",
-            )
-        # Once BrickSim has constrained the target to the structure, relative
-        # brick-to-TCP motion describes release/contact compliance rather than
-        # a dropped free brick.  Keep the strict grasp check unchanged until
-        # that exact requested connection has been verified.
-        if not connected_after_step:
-            grasp_error = _grasp_stability_error(env, prepared)
-            if grasp_error is not None:
-                return ExpertResult(
-                    False,
-                    step,
-                    f"target slipped from initialized grasp: {grasp_error}",
-                )
-    return ExpertResult(False, runtime_config.max_episode_steps, "expert timed out")
+        )
+    except (ExecutionError, ValueError) as exc:
+        return ExpertResult(False, 0, str(exc))
+    print(
+        f"[expert] AssembleSkill complete: steps={result.steps}", flush=True
+    )
+    return ExpertResult(True, result.steps, None)
 
 
 async def release_and_return_home(env, prepared: SafeStart) -> None:
-    """Release the assembled brick, retreat, and home outside the trajectory."""
+    """Return home after AssembleSkill has released and retreated."""
     if not verify_connections(prepared.task):
-        raise SafeStartError("cannot release before every connection is verified")
+        raise SafeStartError("cannot return home before every connection is verified")
     arm_index = prepared.arm_index
-    current_q = _arm_configuration(env, arm_index)
-    print("[cleanup] open gripper", flush=True)
-    await _actuate_gripper(
-        env,
-        arm_index,
-        current_q,
-        prepared.grasp_width,
-        close=False,
-        connected_release=True,
-    )
-    current_q = _arm_configuration(env, arm_index)
-    current_tcp = _tcp_world(env, arm_index, current_q)
-    retreat_tcp = current_tcp.copy()
-    retreat_tcp[:3, 3] += (
-        prepared.world_t_goal_brick[:3, 2] * POST_ASSEMBLY_RETREAT
-    )
-    _solve_verified_ik(
-        env, arm_index, retreat_tcp, current_q, "post_assembly_retreat"
-    )
-    print("[cleanup] retreat", flush=True)
-    await _execute_cartesian_waypoint(
-        env,
-        arm_index,
-        retreat_tcp,
-        "post_assembly_retreat",
-        prepared.grasp_width,
-        close=False,
-    )
-    if not verify_connections(prepared.task):
-        raise SafeStartError("requested connection was lost during release")
     home_q = env.robot_pins[arm_index].home_q.copy()
     print("[cleanup] retreat -> home", flush=True)
     await _execute_joint_waypoint(
@@ -633,6 +548,27 @@ def verify_connections(task: GTAssemblyTask) -> bool:
         ):
             return False
     return True
+
+
+def _bricksim_success_check(task: GTAssemblyTask) -> BrickSimSuccessCheck:
+    """Build exact connection verification behind the backend boundary.
+
+    Returns:
+        Live semantic success checker for every task connection.
+    """
+    return BrickSimSuccessCheck(
+        tuple(
+            BrickSimConnectionGoal(
+                connection.reference_path,
+                connection.stud_iface,
+                connection.target_path,
+                connection.hole_iface,
+                connection.offset,
+                connection.yaw,
+            )
+            for connection in task.connections
+        )
+    )
 
 
 def _connection_conflict(task: GTAssemblyTask) -> str | None:

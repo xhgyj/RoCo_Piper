@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 import numpy as np
 from numpy.typing import NDArray
 from scipy.spatial.transform import Rotation
 
 from rocobrick.backends.base import RobotState
+from rocobrick.execution.types import ExecutionError, FailureCode
 
 FloatArray = NDArray[np.float64]
 
@@ -14,6 +17,84 @@ SAFE_IK_POSITION_TOLERANCE = 0.004
 SAFE_IK_ROTATION_TOLERANCE = np.deg2rad(3.0)
 GRIPPER_OPEN_MARGIN_PER_FINGER = 0.006
 GRIPPER_MAX_JOINT_OPENING = 0.045
+
+
+@dataclass(frozen=True)
+class BrickSimConnectionGoal:
+    """One requested BrickSim connection without policy-layer dependencies."""
+
+    reference_path: str
+    stud_iface: int
+    target_path: str
+    hole_iface: int
+    offset: tuple[int, int]
+    yaw: int
+
+
+class BrickSimSuccessCheck:
+    """Verify exact BrickSim offsets and yaw for requested connections."""
+
+    def __init__(self, goals: tuple[BrickSimConnectionGoal, ...]):
+        """Store at least one immutable requested connection."""
+        if not goals:
+            raise ValueError("at least one connection goal is required")
+        self._goals = goals
+
+    def is_satisfied(self) -> bool:
+        """Return whether every exact requested connection is active.
+
+        Returns:
+            True only when all offsets and yaw values match.
+        """
+        return all(self._status(goal) == "matched" for goal in self._goals)
+
+    def conflict(self) -> str | None:
+        """Return the first wrong active connection.
+
+        Returns:
+            Conflict detail, or None when connections are absent or correct.
+        """
+        for goal in self._goals:
+            status = self._status(goal)
+            if status not in {"absent", "matched"}:
+                return status
+        return None
+
+    def require_satisfied(self, stage: str) -> None:
+        """Raise unless every exact requested connection is active."""
+        conflict = self.conflict()
+        if conflict is not None:
+            raise ExecutionError(
+                FailureCode.VERIFICATION_FAILED, stage, conflict
+            )
+        if not self.is_satisfied():
+            raise ExecutionError(
+                FailureCode.VERIFICATION_FAILED,
+                stage,
+                "BrickSim did not verify every requested connection",
+            )
+
+    def _status(self, goal: BrickSimConnectionGoal) -> str:
+        from bricksim.core import lookup_physics_connection
+
+        info = lookup_physics_connection(
+            stud_path=goal.reference_path,
+            stud_if=goal.stud_iface,
+            hole_path=goal.target_path,
+            hole_if=goal.hole_iface,
+        )
+        if info is None:
+            return "absent"
+        actual_offset = tuple(info.offset)
+        actual_yaw = int(info.yaw)
+        if actual_offset == goal.offset and actual_yaw == goal.yaw:
+            return "matched"
+        return (
+            "wrong BrickSim connection: "
+            f"reference={goal.reference_path} "
+            f"actual={actual_offset}/{actual_yaw} "
+            f"expected={goal.offset}/{goal.yaw}"
+        )
 
 
 class BrickSimRobotBackend:

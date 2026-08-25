@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Protocol
 
 import numpy as np
 from numpy.typing import NDArray
@@ -50,6 +51,88 @@ class CollisionCheck:
                 stage,
                 "commanded configuration failed safety checks",
             )
+
+
+class SuccessCheck(Protocol):
+    """Semantic postcondition injected into contact-phase primitives."""
+
+    def is_satisfied(self) -> bool:
+        """Return whether every requested task condition is active."""
+        ...
+
+    def conflict(self) -> str | None:
+        """Return a conflicting terminal condition, if one exists."""
+        ...
+
+    def require_satisfied(self, stage: str) -> None:
+        """Raise when the requested task condition is not active."""
+        ...
+
+
+@dataclass(frozen=True)
+class ForceGuard:
+    """Reject excessive total or insertion-axis force."""
+
+    max_force: float
+    max_axial_force: float
+
+    def __post_init__(self) -> None:
+        """Require positive force limits."""
+        if self.max_force <= 0.0 or self.max_axial_force <= 0.0:
+            raise ValueError("force limits must be positive")
+
+    def require_safe(
+        self, wrench_world: FloatArray, direction_world: FloatArray, stage: str
+    ) -> None:
+        """Raise when a wrench exceeds configured force limits."""
+        wrench = np.asarray(wrench_world, dtype=np.float64)
+        direction = np.asarray(direction_world, dtype=np.float64)
+        if wrench.shape != (6,) or not np.isfinite(wrench).all():
+            raise ValueError("wrench_world must be a finite 6-vector")
+        if direction.shape != (3,) or not np.isfinite(direction).all():
+            raise ValueError("direction_world must be a finite 3-vector")
+        norm = float(np.linalg.norm(direction))
+        if norm < 1e-9:
+            raise ValueError("direction_world must be nonzero")
+        force = wrench[:3]
+        total = float(np.linalg.norm(force))
+        axial = abs(float(np.dot(force, direction / norm)))
+        if total > self.max_force or axial > self.max_axial_force:
+            raise ExecutionError(
+                FailureCode.EXCESS_FORCE,
+                stage,
+                f"force limit exceeded: total={total:.3f}/"
+                f"{self.max_force:.3f} N, axial={axial:.3f}/"
+                f"{self.max_axial_force:.3f} N",
+            )
+
+
+@dataclass(frozen=True)
+class ContactCheck:
+    """Detect directional contact from force and commanded travel."""
+
+    min_axial_force: float = 0.5
+    min_travel: float = 0.0
+
+    def __post_init__(self) -> None:
+        """Validate non-negative contact thresholds."""
+        if self.min_axial_force < 0.0 or self.min_travel < 0.0:
+            raise ValueError("contact thresholds must be non-negative")
+
+    def detected(
+        self,
+        wrench_world: FloatArray,
+        direction_world: FloatArray,
+        travel: float,
+    ) -> bool:
+        """Return whether force after minimum travel indicates contact."""
+        wrench = np.asarray(wrench_world, dtype=np.float64)
+        direction = np.asarray(direction_world, dtype=np.float64)
+        norm = float(np.linalg.norm(direction))
+        if wrench.shape != (6,) or direction.shape != (3,) or norm < 1e-9:
+            raise ValueError("contact check requires a wrench and direction")
+        axial = abs(float(np.dot(wrench[:3], direction / norm)))
+        return travel >= self.min_travel and axial >= self.min_axial_force
 
 
 class GraspStabilityCheck:

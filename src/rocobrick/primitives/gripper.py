@@ -35,13 +35,17 @@ class Grasp:
         self._context = context
         self._config = config or GripperConfig()
 
-    async def prepare(self, object_width: float) -> OperationResult:
+    async def prepare(
+        self, object_width: float, allow_constrained: bool = False
+    ) -> OperationResult:
         """Open and verify clearance for the requested object width.
 
         Returns:
             Gripper completion metrics.
         """
-        return await self._actuate(object_width, closed=False)
+        return await self._actuate(
+            object_width, closed=False, allow_constrained=allow_constrained
+        )
 
     async def execute(self, object_width: float) -> OperationResult:
         """Close and verify stable contact around the requested width.
@@ -52,7 +56,10 @@ class Grasp:
         return await self._actuate(object_width, closed=True)
 
     async def _actuate(
-        self, object_width: float, closed: bool
+        self,
+        object_width: float,
+        closed: bool,
+        allow_constrained: bool = False,
     ) -> OperationResult:
         target = self._context.robot.with_gripper(
             self._context.robot.read_state().q,
@@ -94,10 +101,17 @@ class Grasp:
                 )
             else:
                 error = float(np.max(np.abs(actual_values - target_values)))
-                reached = error <= self._config.open_tolerance
+                reached = error <= self._config.open_tolerance or (
+                    allow_constrained and stalled
+                )
             stable = stable + 1 if reached else 0
             if step >= self._config.min_steps and stable >= self._config.stable_steps:
-                state = "closed on target" if closed else "at planned opening"
+                if closed:
+                    state = "closed on target"
+                elif error <= self._config.open_tolerance:
+                    state = "at planned opening"
+                else:
+                    state = "constrained; retreat required"
                 print(
                     f"[motion] gripper {state}: steps={step}, "
                     f"joints={actual_values.tolist()}",

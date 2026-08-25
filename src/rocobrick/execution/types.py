@@ -19,6 +19,9 @@ class FailureCode(Enum):
     COLLISION = "collision"
     GRIPPER_FAILED = "gripper_failed"
     SLIPPED = "slipped"
+    EXCESS_FORCE = "excess_force"
+    CONTACT_FAILED = "contact_failed"
+    VERIFICATION_FAILED = "verification_failed"
     INVALID_REQUEST = "invalid_request"
 
 

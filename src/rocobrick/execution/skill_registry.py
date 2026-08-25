@@ -47,6 +47,27 @@ class SkillRegistry:
             )
         )
 
+    @classmethod
+    def phase_two(cls) -> SkillRegistry:
+        """Return the assembly rollout with both Place variants enabled."""
+        available = {
+            ManipulationSkillType.PICK,
+            ManipulationSkillType.PLACE_DOWN,
+            ManipulationSkillType.PLACE_UP,
+        }
+        return cls(
+            tuple(
+                SkillCapability(
+                    skill_type,
+                    available=skill_type in available,
+                    robot_count=(
+                        2 if skill_type is ManipulationSkillType.HANDOVER else 1
+                    ),
+                )
+                for skill_type in ManipulationSkillType
+            )
+        )
+
     def require_available(self, skill_type: ManipulationSkillType) -> None:
         """Reject unavailable capabilities before plan execution."""
         capability = self._capabilities[skill_type]

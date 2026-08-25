@@ -14,6 +14,7 @@ from rocobrick.safety.checks import (
     CollisionCheck,
     GraspStabilityCheck,
     GraspTracking,
+    SuccessCheck,
 )
 
 FloatArray = NDArray[np.float64]
@@ -172,6 +173,7 @@ class CartesianController:
         closed: bool,
         tracking: GraspTracking | None = None,
         allow_vertical_settling: bool = False,
+        success_check: SuccessCheck | None = None,
     ) -> OperationResult:
         """Track one straight Cartesian segment and enforce postconditions.
 
@@ -185,6 +187,8 @@ class CartesianController:
         rotation_error = 0.0
         for step in range(1, self._config.timeout_steps + 1):
             state = self._robot.read_state()
+            if success_check is not None and success_check.is_satisfied():
+                return OperationResult(step - 1, position_error, rotation_error)
             if tracking is not None:
                 self._grasp_check.require_stable(
                     tracking, stage, allow_vertical_settling
@@ -271,3 +275,49 @@ class CartesianController:
             f"(position={position_error:.4f} m, "
             f"rotation={np.rad2deg(rotation_error):.2f} deg)",
         )
+
+    async def servo_step(
+        self,
+        world_t_tcp: FloatArray,
+        stage: str,
+        grasp_width: float,
+        closed: bool,
+        tracking: GraspTracking | None = None,
+    ) -> OperationResult:
+        """Execute one bounded Cartesian feedback step.
+
+        This non-blocking form lets contact primitives inspect semantic and
+        force postconditions between commands instead of waiting for a pose
+        target that contact may intentionally prevent reaching.
+
+        Returns:
+            Pose error measured after the command.
+        """
+        target = np.asarray(world_t_tcp, dtype=np.float64)
+        state = self._robot.read_state()
+        if tracking is not None:
+            self._grasp_check.require_stable(tracking, stage)
+        q_target = self._ik.solve(target, state.q, stage)
+        q_target = self._robot.with_gripper(
+            q_target, grasp_width, closed=closed
+        )
+        delta_q = q_target - state.q
+        for index in self._robot.arm_configuration_indices:
+            delta_q[index] = np.clip(
+                delta_q[index],
+                -self._config.max_arm_step,
+                self._config.max_arm_step,
+            )
+        for index in self._robot.gripper_configuration_indices:
+            delta_q[index] = np.clip(
+                delta_q[index],
+                -self._config.max_gripper_step,
+                self._config.max_gripper_step,
+            )
+        command = state.q + delta_q
+        self._collision.require_safe(command, stage)
+        self._robot.command_configuration(command)
+        await self._world.advance(2)
+        after = self._robot.read_state()
+        position_error, rotation_error = pose_error(after.tcp_world, target)
+        return OperationResult(1, position_error, rotation_error)

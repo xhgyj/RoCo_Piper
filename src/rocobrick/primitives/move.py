@@ -7,8 +7,9 @@ from dataclasses import dataclass
 import numpy as np
 from numpy.typing import NDArray
 
-from rocobrick.execution.types import OperationResult
+from rocobrick.execution.types import HeldObject, OperationResult
 from rocobrick.primitives.base import PrimitiveContext
+from rocobrick.safety.checks import GraspTracking
 
 FloatArray = NDArray[np.float64]
 
@@ -20,6 +21,7 @@ class MoveRequest:
     goal_q: FloatArray
     stage: str
     world_t_tcp: FloatArray | None = None
+    held: HeldObject | None = None
 
 
 class Move:
@@ -35,6 +37,22 @@ class Move:
         Returns:
             Controller completion metrics.
         """
+        if request.held is not None:
+            if request.world_t_tcp is None:
+                raise ValueError("held-object Move requires a TCP target")
+            tracking = GraspTracking(
+                request.held.object_id,
+                request.held.object_t_tcp,
+                request.held.grasp_axis,
+                request.held.grasp_width,
+            )
+            return await self._context.cartesian.move_to(
+                request.world_t_tcp,
+                request.stage,
+                request.held.grasp_width,
+                closed=True,
+                tracking=tracking,
+            )
         return await self._context.trajectory.move_to(
             request.goal_q, request.stage, request.world_t_tcp
         )
