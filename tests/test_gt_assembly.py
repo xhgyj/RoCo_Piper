@@ -211,6 +211,7 @@ def test_transport_seating_limit_scales_with_grasp_width() -> None:
     """Long-axis grasps can seat farther without weakening small-brick checks."""
     assert gt_assembly._transport_jaw_drift_limit(0.008) == pytest.approx(0.004)
     assert gt_assembly._transport_jaw_drift_limit(0.016) == pytest.approx(0.008)
+    assert gt_assembly._transport_jaw_drift_limit(0.048) == pytest.approx(0.008)
     assert gt_assembly._transport_jaw_drift_limit(0.064) == pytest.approx(0.008)
     assert gt_assembly.GRASP_DRIFT_COMPARISON_TOLERANCE == pytest.approx(0.0002)
 

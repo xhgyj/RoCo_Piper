@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 import tempfile
+from datetime import datetime
 from pathlib import Path
 
 import numpy as np
@@ -15,6 +16,10 @@ from scipy.spatial.transform import Rotation
 
 from rocobrick.env.Env import Env
 from rocobrick.env.lifecycle import close_kit_app
+from rocobrick.env.video import (
+    GlobalCameraVideoRecorder,
+    configure_global_camera_view,
+)
 from rocobrick.policy.gt_assembly import (
     compute_goal_brick_pose,
     load_expert_config,
@@ -51,6 +56,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--seed", type=int, default=7)
     parser.add_argument("--inspect-seconds", type=float, default=5.0)
     parser.add_argument("--final-hold-seconds", type=float, default=10.0)
+    video = parser.add_mutually_exclusive_group()
+    video.add_argument("--save-video", action="store_true")
+    video.add_argument("--no-save-video", action="store_true")
+    parser.add_argument("--video-output", type=Path)
+    parser.add_argument(
+        "--video-view",
+        choices=("assembly-close", "overview"),
+        default="assembly-close",
+        help="global-camera framing used by the saved video",
+    )
     yaw = parser.add_mutually_exclusive_group()
     yaw.add_argument(
         "--initial-yaw-deg",
@@ -79,17 +94,25 @@ def parse_args() -> argparse.Namespace:
 async def main() -> None:
     """Show the initial scene, execute the expert, and hold the final state."""
     env = None
+    recorder = None
     return_code = 0
     try:
         args = parse_args()
         if args.inspect_seconds < 0 or args.final_hold_seconds < 0:
             raise ValueError("demo hold durations cannot be negative")
+        if args.video_output is not None and not args.save_video:
+            raise ValueError("--video-output requires --save-video")
         with tempfile.TemporaryDirectory(
             prefix="roco-symbolic-demo-"
         ) as temporary:
             temporary_path = Path(temporary)
             task_dir, generated = _resolve_task(args, temporary_path)
             config_path = _write_demo_config(task_dir, temporary_path)
+            config = json.loads(config_path.read_text(encoding="utf-8"))
+            configure_global_camera_view(config, args.video_view)
+            config_path.write_text(
+                json.dumps(config, indent=2) + "\n", encoding="utf-8"
+            )
             env = Env(
                 root_dir=str(SCRIPT_DIR),
                 user_config_path=str(config_path),
@@ -99,6 +122,12 @@ async def main() -> None:
             applied_yaw = _apply_initial_yaw(env, args)
             await env.play()
             await env.get_robot_ready()
+            if args.save_video:
+                recorder = GlobalCameraVideoRecorder(
+                    _video_path(args.video_output), fps=30
+                )
+                recorder.attach(env)
+                print(f"[video] recording {recorder.output_path}", flush=True)
 
             task = resolve_single_step_task(env)
             goal_brick = compute_goal_brick_pose(env, task)
@@ -159,7 +188,25 @@ async def main() -> None:
         return_code = 1
         raise
     finally:
-        await close_kit_app(env, return_code)
+        try:
+            if recorder is not None:
+                recorder.close()
+                print(
+                    f"[video] saved {recorder.frame_count} frames to "
+                    f"{recorder.output_path}",
+                    flush=True,
+                )
+        finally:
+            await close_kit_app(env, return_code)
+
+
+def _video_path(requested: Path | None) -> Path:
+    if requested is not None:
+        return requested.resolve()
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    return REPOSITORY_ROOT / "validation_reports" / (
+        f"symbolic_assembly_{timestamp}.mp4"
+    )
 
 
 def _resolve_task(

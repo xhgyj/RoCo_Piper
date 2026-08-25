@@ -1,0 +1,8 @@
+{
+  "1": {"brick_id": 6, "x": 3, "y": 3, "z": 0, "ori": 1, "color": "Orange"},
+  "2": {"brick_id": 12, "x": 0, "y": 0, "z": 0, "ori": 0, "color": "Orange"},
+  "3": {"brick_id": 12, "x": 0, "y": 0, "z": 1, "ori": 0, "color": "Green"},
+  "4": {"brick_id": 12, "x": 4, "y": 5, "z": 0, "ori": 0, "color": "Green"},
+  "5": {"brick_id": 12, "x": 4, "y": 5, "z": 1, "ori": 0, "color": "Dark Turquoise"},
+  "6": {"brick_id": 6, "x": 0, "y": 3, "z": 1, "ori": 1, "color": "Orange"}
+}

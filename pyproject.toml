@@ -8,6 +8,8 @@ dependencies = [
     "isaacsim[all,extscache]==5.1.0",
     "lerobot==0.4.4",
     "huggingface_hub>=0.34.2,<0.36.0",
+    "imageio>=2.37,<3",
+    "imageio-ffmpeg>=0.6,<0.7",
     "torch==2.7.0",
     "torchvision==0.22.0",
     "torchaudio==2.7.0",

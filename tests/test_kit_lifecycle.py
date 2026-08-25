@@ -50,3 +50,12 @@ def test_every_bricksim_entry_closes_kit_in_finally() -> None:
         source = (ROOT / "run" / name).read_text(encoding="utf-8")
         assert "finally:" in source
         assert "await close_kit_app(env, return_code)" in source
+
+
+def test_symbolic_demo_exposes_video_options() -> None:
+    """The symbolic workflow can save and frame its global-camera video."""
+    source = (ROOT / "run/demo_symbolic_assembly.py").read_text(encoding="utf-8")
+    assert '"--save-video"' in source
+    assert '"--video-output"' in source
+    assert '"--video-view"' in source
+    assert "recorder.attach(env)" in source

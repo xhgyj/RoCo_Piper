@@ -124,7 +124,35 @@ workflow:
 ```bash
 uv run bricksim ./run/demo_symbolic_assembly.py --family basic --seed 7
 uv run bricksim ./run/demo_symbolic_assembly.py --family bridge --seed 7
+
+# Inspect dense/1 and save the global-camera assembly video in this directory
+uv run bricksim ./run/demo_symbolic_assembly.py \
+  --task-dir tasks/type1/dense/1 \
+  --initial-yaw-deg -135 \
+  --inspect-seconds 5 \
+  --save-video \
+  --video-view assembly-close \
+  --video-output ./symbolic_dense1.mp4
 ```
+
+Run the six-brick `dense1` goal from an empty plate with strict dual-arm
+alternation.  The default opens the Isaac Sim window and does not create a
+video:
+
+```bash
+uv run python ./run/launch_dual_arm_dense1.py --show --no-save-video
+uv run python ./run/launch_dual_arm_dense1.py --show --save-video
+uv run python ./run/launch_dual_arm_dense1.py \
+  --headless --save-video --video-view assembly-close \
+  --video-output /tmp/dense1.mp4
+```
+
+The sequence is fixed to `piper_0, piper_1, ...`.  A turn begins only after
+the preceding arm has released, retreated, returned home, and preserved its
+BrickSim connection. Before assembly, every pickup pose must pass
+pregrasp/grasp/lift IK for its assigned arm. Saved video defaults to the
+1280x720 `assembly-close` global-camera view at 30 FPS. Pass
+`--video-view overview` to retain the original 960x540 full-scene framing.
 
 Generated tasks are grouped as `tasks/type1/<family>/<sequence>/`, and every
 sequence directory contains only `structure_start.json` and
