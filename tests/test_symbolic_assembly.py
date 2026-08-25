@@ -5,8 +5,16 @@ from __future__ import annotations
 from pathlib import Path
 
 import numpy as np
+import pytest
 
-from rocobrick.env.loose_parts import aabb_clearance, footprint_aabb
+from rocobrick.env.loose_parts import (
+    aabb_clearance,
+    aabb_inside,
+    centered_aabb,
+    footprint_aabb,
+    planar_yaw_degrees,
+    with_planar_yaw,
+)
 from rocobrick.task_config.symbolic_assembly import (
     GenerationConfig,
     build_single_step_plan,
@@ -108,6 +116,27 @@ def test_loose_target_aabb_is_separate_from_plate() -> None:
     plate = footprint_aabb(plate_transform, 32, 32)
     target = footprint_aabb(target_transform, 4, 2)
     assert aabb_clearance(plate, target) > 0.02
+
+
+def test_continuous_loose_yaw_preserves_center_and_vertical_axis() -> None:
+    """Yaw randomization rotates in place without tilting the target."""
+    initial = np.eye(4)
+    initial[:3, 3] = [0.14, 0.01, 0.003]
+    rotated = with_planar_yaw(initial, 37.5)
+    np.testing.assert_allclose(rotated[:3, 3], initial[:3, 3])
+    np.testing.assert_allclose(rotated[:3, 2], initial[:3, 2])
+    assert planar_yaw_degrees(rotated) == pytest.approx(37.5)
+
+
+def test_rotated_loose_footprint_must_remain_inside_storage() -> None:
+    """Long-brick yaw validation accounts for its oriented world AABB."""
+    storage = centered_aabb((0.0, 0.0), (0.1, 0.1))
+    centered = np.eye(4)
+    diagonal = with_planar_yaw(centered, 45.0)
+    assert aabb_inside(footprint_aabb(diagonal, 8, 1), storage)
+    shifted = diagonal.copy()
+    shifted[0, 3] = 0.04
+    assert not aabb_inside(footprint_aabb(shifted, 8, 1), storage)
 
 
 def test_goal_only_validation_accepts_generated_bridge() -> None:

@@ -83,7 +83,10 @@ loss after contact triggers a full unload-and-realign cycle instead of repeated
 sub-millimeter contact retries.
 High-clearance alignment uses a separate 4-degree rotation step and 6-degree
 tracking lead. The controller restores the conservative 2-degree limit within
-20 mm of the assembly surface.
+20 mm of the assembly surface. A 1x2 target uses a lower 2 mm grasp and a
+1-degree high-clearance yaw step to prevent physical tipping. Candidate grasps
+are rejected before pickup unless the complete high-clearance Cartesian yaw
+path has a verified continuous IK branch.
 After BrickSim verifies every requested connection, an unrecorded cleanup phase
 opens the gripper, retreats vertically, and returns the selected arm home.
 
@@ -131,6 +134,23 @@ The demo shows a translucent green goal preview during its initial inspection
 pause, removes it before execution, and holds the verified final structure for
 review. Pass `--task-dir tasks/type1/basic/1` to inspect a saved task.
 
+Set an exact loose-target yaw, or sample one reproducibly outside the plate:
+
+```bash
+uv run bricksim ./run/demo_symbolic_assembly.py \
+  --task-dir tasks/type1/dense/1 \
+  --initial-yaw-deg -135
+
+uv run bricksim ./run/demo_symbolic_assembly.py \
+  --task-dir tasks/type1/dense/1 \
+  --random-initial-yaw \
+  --yaw-seed 7
+```
+
+These options preserve the sampled pickup yaw through preparation. Geometric
+symmetry equivalence is intentionally not applied yet: the expert still tracks
+the exact BrickSim connection yaw.
+
 To validate only pickup and transport to the pose directly above the goal,
 without running local alignment/insertion, use:
 
@@ -145,6 +165,18 @@ Validate every saved Type-1 task in isolated headless Isaac processes:
 
 ```bash
 uv run python ./run/validate_expert_tasks.py --tasks-root tasks/type1
+```
+
+For deterministic continuous-yaw coverage and a visible HTML report:
+
+```bash
+uv run python ./run/validate_expert_tasks.py \
+  --tasks-root tasks/type1 \
+  --yaw-samples 3 \
+  --yaw-seed 7 \
+  --output validation_reports/yaw_seed7
+
+xdg-open validation_reports/yaw_seed7/report.html
 ```
 
 The command displays terminal progress and continuously updates an ignored

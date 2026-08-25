@@ -210,36 +210,17 @@ def test_long_brick_opening_uses_half_width_per_finger() -> None:
 def test_transport_seating_limit_scales_with_grasp_width() -> None:
     """Long-axis grasps can seat farther without weakening small-brick checks."""
     assert gt_assembly._transport_jaw_drift_limit(0.008) == pytest.approx(0.004)
-    assert gt_assembly._transport_jaw_drift_limit(0.016) == pytest.approx(0.004)
-    assert gt_assembly._transport_jaw_drift_limit(0.064) == pytest.approx(0.0064)
+    assert gt_assembly._transport_jaw_drift_limit(0.016) == pytest.approx(0.008)
+    assert gt_assembly._transport_jaw_drift_limit(0.064) == pytest.approx(0.008)
     assert gt_assembly.GRASP_DRIFT_COMPARISON_TOLERANCE == pytest.approx(0.0002)
 
 
-def test_fast_alignment_is_disabled_only_for_narrow_grasps() -> None:
-    """A 1x2-class grasp avoids rotation lead while wider grasps retain it."""
-    assert not gt_assembly._fast_alignment_allowed(0.008)
-    assert not gt_assembly._fast_alignment_allowed(0.016)
-    assert gt_assembly._fast_alignment_allowed(0.024)
-    assert gt_assembly._fast_alignment_allowed(0.048)
-
-
-def test_only_low_layer_one_by_two_target_uses_centered_pick_height() -> None:
-    """The height adjustment excludes higher layers and larger targets."""
-    assert gt_assembly._pick_tcp_height(
-        {"L": 1, "W": 2}, goal_z=0.0096
-    ) == pytest.approx(0.0048)
-    assert gt_assembly._pick_tcp_height(
-        {"L": 2, "W": 1}, goal_z=0.0096
-    ) == pytest.approx(0.0048)
-    assert gt_assembly._pick_tcp_height(
-        {"L": 1, "W": 2}, goal_z=0.0192
-    ) == pytest.approx(gt_assembly.PICK_TCP_HEIGHT)
-    assert gt_assembly._pick_tcp_height(
-        {"L": 2, "W": 2}, goal_z=0.0096
-    ) == pytest.approx(gt_assembly.PICK_TCP_HEIGHT)
-    assert gt_assembly._pick_tcp_height(
-        {"L": 2, "W": 4}, goal_z=0.0096
-    ) == pytest.approx(gt_assembly.PICK_TCP_HEIGHT)
+def test_fast_alignment_is_disabled_only_for_one_by_two_targets() -> None:
+    """A 1x2 target avoids rotation lead while other footprints retain it."""
+    assert not gt_assembly._fast_alignment_allowed({"L": 1, "W": 2})
+    assert not gt_assembly._fast_alignment_allowed({"L": 2, "W": 1})
+    assert gt_assembly._fast_alignment_allowed({"L": 2, "W": 2})
+    assert gt_assembly._fast_alignment_allowed({"L": 2, "W": 4})
 
 
 def test_long_brick_prefers_long_axis_for_yaw_stability() -> None:
@@ -283,6 +264,27 @@ def test_already_aligned_safe_start_does_not_require_pi_hint(monkeypatch) -> Non
         lambda robot, target, seed: seed.copy(),
     )
 
-    reachable, hint = gt_assembly._alignment_rotation_hint(env, prepared)
+    reachable, hint, branch = gt_assembly._alignment_rotation_hint(
+        env, prepared, np.deg2rad(4.0)
+    )
     assert reachable
     assert hint is None
+    assert branch is not None
+    np.testing.assert_allclose(branch.configurations[0], np.zeros(6))
+
+
+def test_alignment_branch_seed_advances_one_rotation_step() -> None:
+    """The runtime chooses the verified seed nearest its next target pose."""
+    branch = gt_assembly.AlignmentIKBranch(
+        rotation_errors=np.deg2rad(np.array([0.0, 4.0, 8.0])),
+        configurations=(
+            np.array([0.0, 0.0]),
+            np.array([1.0, -2.0]),
+            np.array([2.0, -4.0]),
+        ),
+    )
+    seed = gt_assembly._alignment_branch_seed(
+        branch,
+        np.deg2rad(5.0),
+    )
+    np.testing.assert_allclose(seed, np.array([1.0, -2.0]))

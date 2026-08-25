@@ -1,4 +1,6 @@
 import omni.kit.app
+from random import Random
+
 from isaacsim.core.api.world import World
 from isaacsim.core.api.materials import PhysicsMaterial
 from isaacsim.core.prims import SingleArticulation, SingleXFormPrim, SingleGeometryPrim
@@ -7,6 +9,7 @@ from isaacsim.core.utils.types import ArticulationAction
 from isaacsim.core.utils.viewports import set_camera_view
 from isaacsim.sensors.camera import Camera
 from pxr import Gf, Usd, UsdGeom, Sdf
+from scipy.spatial.transform import Rotation
 
 from bricksim.assets import DEFAULT_STAGE_PATH
 from bricksim.core import (
@@ -19,7 +22,14 @@ from bricksim.core import (
 from rocobrick.utils import *
 from rocobrick.robot.Robot import *
 from rocobrick.task_config.Task import *
-from rocobrick.env.loose_parts import aabb_clearance, footprint_aabb, format_aabb
+from rocobrick.env.loose_parts import (
+    aabb_clearance,
+    aabb_inside,
+    centered_aabb,
+    footprint_aabb,
+    format_aabb,
+    with_planar_yaw,
+)
 
 class Env():
     def __init__(self, root_dir, user_config_path, system_config_path):
@@ -143,6 +153,123 @@ class Env():
                     f"target {format_aabb(target_bounds)}; "
                     f"clearance={actual_clearance:.3f} m"
                 )
+
+    def set_loose_target_yaw(self, yaw_degrees):
+        """Set the only loose target to an absolute continuous world yaw.
+
+        Returns:
+            Applied yaw in degrees.
+        """
+        part_id, path, payload = self._single_loose_target()
+        base_pose = self._loose_target_storage_center_pose(
+            self.get_prim_world_T(path)
+        )
+        desired = with_planar_yaw(base_pose, float(yaw_degrees))
+        invalid = self._loose_target_pose_error(payload, desired)
+        if invalid is not None:
+            raise RuntimeError(
+                f"loose target {part_id} yaw {yaw_degrees:.3f} deg is invalid: "
+                f"{invalid}"
+            )
+        quaternion = Rotation.from_matrix(desired[:3, :3]).as_quat()
+        prim = SingleXFormPrim(
+            prim_path=path,
+            name=f"loose_target_yaw_{part_id}",
+        )
+        prim.set_world_pose(
+            position=desired[:3, 3],
+            orientation=np.array(
+                [quaternion[3], quaternion[0], quaternion[1], quaternion[2]],
+                dtype=np.float64,
+            ),
+        )
+        return float(yaw_degrees)
+
+    def randomize_loose_target_yaw(
+        self,
+        seed,
+        minimum_degrees=-180.0,
+        maximum_degrees=180.0,
+        max_attempts=64,
+    ):
+        """Apply one reproducible valid yaw sampled from a continuous range.
+
+        Returns:
+            Applied yaw in degrees.
+        """
+        if not minimum_degrees < maximum_degrees:
+            raise ValueError("minimum yaw must be smaller than maximum yaw")
+        if max_attempts <= 0:
+            raise ValueError("max_attempts must be positive")
+        _, path, payload = self._single_loose_target()
+        current = self._loose_target_storage_center_pose(
+            self.get_prim_world_T(path)
+        )
+        rng = Random(int(seed))
+        rejected = []
+        for _ in range(max_attempts):
+            yaw_degrees = rng.uniform(minimum_degrees, maximum_degrees)
+            candidate = with_planar_yaw(current, yaw_degrees)
+            invalid = self._loose_target_pose_error(payload, candidate)
+            if invalid is None:
+                return self.set_loose_target_yaw(yaw_degrees)
+            rejected.append((yaw_degrees, invalid))
+        last_yaw, last_reason = rejected[-1]
+        raise RuntimeError(
+            f"failed to sample a valid loose-target yaw after {max_attempts} "
+            f"attempts; last={last_yaw:.3f} deg: {last_reason}"
+        )
+
+    def _single_loose_target(self):
+        """Return the only loose target ID, path, and topology payload."""
+        targets = sorted(self.to_place_placed.items())
+        if len(targets) != 1:
+            raise RuntimeError(
+                f"expected exactly one loose target, found {len(targets)}"
+            )
+        part_id, path = targets[0]
+        parts = {part["id"]: part for part in self.topology["parts"]}
+        return part_id, path, parts[part_id]["payload"]
+
+    def _loose_target_storage_center_pose(self, world_transform):
+        """Return a pose centered in storage while retaining height/rotation."""
+        result = np.asarray(world_transform, dtype=np.float64).copy()
+        storage = self.config["Env_Config"]["Storage_Config"]
+        result[0, 3] = float(storage["Position"][0])
+        result[1, 3] = float(storage["Position"][1])
+        return result
+
+    def _loose_target_pose_error(self, payload, world_transform):
+        """Return a geometry rejection reason, or None for a valid pose."""
+        target_bounds = footprint_aabb(
+            world_transform, payload["L"], payload["W"]
+        )
+        storage = self.config["Env_Config"]["Storage_Config"]
+        storage_bounds = centered_aabb(
+            (storage["Position"][0], storage["Position"][1]),
+            (storage["Size"][0], storage["Size"][1]),
+        )
+        if not aabb_inside(target_bounds, storage_bounds, tolerance=0.001):
+            return (
+                f"outside storage: target {format_aabb(target_bounds)}, "
+                f"storage {format_aabb(storage_bounds)}"
+            )
+        plate_path = self.pre_placed_parts[0]
+        parts = {part["id"]: part for part in self.topology["parts"]}
+        plate = parts[0]["payload"]
+        plate_bounds = footprint_aabb(
+            self.get_prim_world_T(plate_path), plate["L"], plate["W"]
+        )
+        clearance = self.config["Env_Config"].get(
+            "Loose_Target_Clearance", 0.02
+        )
+        actual_clearance = aabb_clearance(plate_bounds, target_bounds)
+        if actual_clearance + 0.001 < clearance:
+            return (
+                f"plate clearance={actual_clearance:.4f} m, "
+                f"required={clearance:.4f} m"
+            )
+        return None
 
     async def setup_bricksim(self, config):
         """

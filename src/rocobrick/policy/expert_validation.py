@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import hashlib
 import html
 import json
 import re
 from dataclasses import asdict, dataclass
 from pathlib import Path
+from random import Random
 from typing import Literal
 
 ValidationStatus = Literal["pending", "running", "passed", "failed", "timeout"]
@@ -22,6 +24,7 @@ class TaskValidationResult:
     duration_seconds: float = 0.0
     failure: str = ""
     log_name: str = ""
+    initial_yaw_degrees: float | None = None
 
 
 def discover_tasks(
@@ -68,6 +71,22 @@ def failure_from_log(log_text: str, return_code: int) -> str:
     if runtime:
         return runtime[-1].strip()
     return f"process exited with code {return_code}"
+
+
+def deterministic_validation_yaws(
+    task: str, count: int, seed: int
+) -> tuple[float, ...]:
+    """Return task-stable continuous yaw samples in ``[-180, 180)``.
+
+    Returns:
+        Reproducible yaw sequence independent of task iteration order.
+    """
+    if count <= 0:
+        raise ValueError("yaw sample count must be positive")
+    digest = hashlib.sha256(f"{seed}:{task}".encode()).digest()
+    task_seed = int.from_bytes(digest[:8], byteorder="big", signed=False)
+    rng = Random(task_seed)
+    return tuple(rng.uniform(-180.0, 180.0) for _ in range(count))
 
 
 def write_report(
@@ -131,7 +150,10 @@ th {{ background: #f1f4f9; }} code {{ white-space: pre-wrap; }}
 <span class="passed">通过 {passed}</span>
 <span class="failed">失败 {failed}</span>
 </div>
-<table><thead><tr><th>任务</th><th>类别</th><th>状态</th><th>耗时</th><th>结果/错误</th><th>日志</th></tr></thead>
+<table><thead><tr>
+<th>任务</th><th>类别</th><th>初始 yaw</th><th>状态</th>
+<th>耗时</th><th>结果/错误</th><th>日志</th>
+</tr></thead>
 <tbody>{rows}</tbody></table>
 </main></body></html>
 """
@@ -179,10 +201,16 @@ def _result_row(result: TaskValidationResult) -> str:
         if result.log_name
         else "—"
     )
+    yaw = (
+        f"{result.initial_yaw_degrees:.3f}°"
+        if result.initial_yaw_degrees is not None
+        else "arranger 默认"
+    )
     return (
         "<tr>"
         f"<td><code>{html.escape(result.task)}</code></td>"
         f"<td>{html.escape(result.family)}</td>"
+        f"<td>{yaw}</td>"
         f'<td class="{result.status}">{status_text}</td>'
         f"<td>{result.duration_seconds:.1f} s</td>"
         f"<td>{html.escape(result.failure) if result.failure else '—'}</td>"

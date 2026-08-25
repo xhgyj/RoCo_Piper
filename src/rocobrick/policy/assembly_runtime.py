@@ -18,6 +18,9 @@ from rocobrick.policy.assembly_control import (
     SupervisorResult,
 )
 
+DELICATE_ALIGNMENT_ROTATION_STEP = np.deg2rad(1.0)
+DELICATE_ALIGNMENT_ROTATION_LEAD = np.deg2rad(1.5)
+
 
 @dataclass(frozen=True)
 class RuntimeFeedback:
@@ -193,23 +196,32 @@ class GTAssemblyRuntime:
         feedback: RuntimeFeedback,
         action: np.ndarray,
         fast_alignment: bool = False,
+        delicate_alignment: bool = False,
+        ik_seed: np.ndarray | None = None,
     ) -> np.ndarray:
         """Apply a bounded Cartesian action.
+
+        ``ik_seed`` may select a previously verified continuous IK branch.  It
+        changes only the numerical starting point of the Cartesian solve; the
+        commanded pose and the strict pose-error verification remain the same.
 
         Returns:
             Executed bounded action for dataset recording.
         """
         if self._commanded_tcp_world is None:
             self._commanded_tcp_world = feedback.tcp_world.copy()
+        if fast_alignment and delicate_alignment:
+            raise ValueError("alignment cannot be both fast and delicate")
+        rotation_step = None
+        if fast_alignment:
+            rotation_step = self.config.max_alignment_rotation_step
+        elif delicate_alignment:
+            rotation_step = DELICATE_ALIGNMENT_ROTATION_STEP
         bounded, world_t_target = self.action_adapter.target(
             estimated_world_t_skill,
             self._commanded_tcp_world,
             action,
-            max_rotation_step=(
-                self.config.max_alignment_rotation_step
-                if fast_alignment
-                else None
-            ),
+            max_rotation_step=rotation_step,
         )
         world_t_target = _limit_pose_tracking_error(
             feedback.tcp_world,
@@ -218,13 +230,17 @@ class GTAssemblyRuntime:
             max_rotation=(
                 self.config.max_alignment_rotation_lead
                 if fast_alignment
-                else self.config.max_rotation_step
+                else (
+                    DELICATE_ALIGNMENT_ROTATION_LEAD
+                    if delicate_alignment
+                    else self.config.max_rotation_step
+                )
             ),
         )
         arm_t_target = np.linalg.inv(self.robot_pin.BASE_T) @ world_t_target
         q_target, log = self.robot_pin.IK(
             {self.robot_pin.ee_frames[0]: arm_t_target},
-            feedback.q,
+            feedback.q if ik_seed is None else ik_seed,
             self._arm_joint_names,
             ROT_WEIGHT=0.05,
             STEP_SIZE=0.35,

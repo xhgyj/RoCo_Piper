@@ -14,13 +14,14 @@ from rocobrick.policy.assembly_control import (
     AssemblyPhase,
     GTAssemblyExpert,
 )
-from rocobrick.policy.assembly_runtime import GTAssemblyRuntime
+from rocobrick.policy.assembly_runtime import (
+    DELICATE_ALIGNMENT_ROTATION_STEP,
+    GTAssemblyRuntime,
+)
 
 SAFE_HEIGHT = 0.06
 PICK_APPROACH_HEIGHT = 0.06
 PICK_TCP_HEIGHT = 0.002
-SHORT_TARGET_PICK_TCP_HEIGHT = 0.0048
-SHORT_TARGET_CENTER_GRASP_MAX_GOAL_Z = 0.015
 TRANSIT_HEIGHT = 0.10
 POST_ASSEMBLY_RETREAT = 0.06
 GOAL_POSITION_CONSISTENCY = 5e-4
@@ -57,6 +58,7 @@ SAME_LEVEL_Z_TOLERANCE = 0.0048
 MIN_GRIPPER_SIDE_CLEARANCE = 0.004
 GRIPPER_CLEARANCE_SCORE_CAP = 0.012
 LONG_BRICK_ASPECT_RATIO = 3.0
+ALIGNMENT_IK_PLANNING_STEP = np.deg2rad(2.0)
 
 
 @dataclass(frozen=True)
@@ -124,6 +126,14 @@ class ExpertResult:
     success: bool
     steps: int
     failure_reason: str | None
+
+
+@dataclass(frozen=True)
+class AlignmentIKBranch:
+    """Verified joint seeds along a high-clearance Cartesian yaw path."""
+
+    rotation_errors: np.ndarray
+    configurations: tuple[np.ndarray, ...]
 
 
 class SafeStartError(RuntimeError):
@@ -466,7 +476,13 @@ async def run_gt_assembly_expert(
             f"target slipped during pre-trajectory calibration: "
             f"{initial_grasp_error}",
         )
-    alignment_reachable, rotation_hint = _alignment_rotation_hint(env, prepared)
+    alignment_reachable, rotation_hint, alignment_branch = (
+        _alignment_rotation_hint(
+            env,
+            prepared,
+            runtime_config.max_alignment_rotation_step * 0.5,
+        )
+    )
     if not alignment_reachable:
         return ExpertResult(
             False,
@@ -525,20 +541,46 @@ async def run_gt_assembly_expert(
                 flush=True,
             )
         try:
-            high_clearance_alignment = bool(
+            high_clearance_phase = bool(
                 output.phase == AssemblyPhase.ALIGN
                 and float(skill_t_tcp[2, 3]) < -0.02
-                # A narrow grasp has little yaw leverage.  The high-clearance
-                # rotation lead can twist a 1x2 target between the fingers,
-                # so retain the ordinary bounded rotation for only this small
-                # grasp class.  Wider targets keep the fast alignment path.
-                and _fast_alignment_allowed(prepared.grasp_width)
+            )
+            high_clearance_alignment = bool(
+                high_clearance_phase
+                # A 1x2 target can tip between the fingers under the ordinary
+                # high-clearance rotation lead, so it follows the dedicated
+                # delicate path below.  Wider targets retain the fast path.
+                and _fast_alignment_allowed(prepared.task.dimensions)
+            )
+            delicate_alignment = bool(
+                high_clearance_phase
+                and _is_short_target(prepared.task.dimensions)
+            )
+            alignment_step = (
+                DELICATE_ALIGNMENT_ROTATION_STEP
+                if delicate_alignment
+                else runtime_config.max_alignment_rotation_step
             )
             runtime.apply_action(
                 world_t_goal_tcp,
                 feedback,
                 output.action,
                 fast_alignment=high_clearance_alignment,
+                delicate_alignment=delicate_alignment,
+                ik_seed=(
+                    _alignment_branch_seed(
+                        alignment_branch,
+                        max(
+                            0.0,
+                            Rotation.from_matrix(
+                                skill_t_tcp[:3, :3]
+                            ).magnitude()
+                            - alignment_step,
+                        ),
+                    )
+                    if high_clearance_phase
+                    else None
+                ),
             )
         except RuntimeError as exc:
             return ExpertResult(False, step, str(exc))
@@ -744,9 +786,7 @@ def _select_pick_plan(
     """
     candidates = []
     preferred_axis = _preferred_grasp_axis(task.dimensions)
-    pick_tcp_height = _pick_tcp_height(
-        task.dimensions, float(world_t_goal_brick[2, 3])
-    )
+    pick_tcp_height = PICK_TCP_HEIGHT
     obstacle_bounds = _goal_level_obstacle_bounds(env, task, world_t_goal_brick)
     clearances = tuple(
         _grasp_axis_clearance(task.dimensions, obstacle_bounds, axis)
@@ -810,6 +850,18 @@ def _select_pick_plan(
                     robot_pin, aligned_safe_tcp, safe
                 )
                 if aligned_safe is None:
+                    continue
+                # Endpoint reachability alone is insufficient: a wrist-limit
+                # discontinuity can lie between two individually valid poses.
+                # Reject that grasp branch before touching the loose target.
+                if _build_alignment_ik_branch(
+                    robot_pin,
+                    safe_tcp,
+                    aligned_safe_tcp,
+                    safe,
+                    ALIGNMENT_IK_PLANNING_STEP,
+                    verbose=False,
+                ) is None:
                     continue
                 ik_cost = float(
                     np.linalg.norm(pregrasp[:6] - robot_pin.home_q[:6])
@@ -903,16 +955,6 @@ def _preferred_grasp_axis(dimensions: dict[str, int]) -> int:
 def _is_short_target(dimensions: dict[str, int]) -> bool:
     """Return whether the footprint is exactly one by two studs."""
     return sorted((int(dimensions["L"]), int(dimensions["W"]))) == [1, 2]
-
-
-def _pick_tcp_height(dimensions: dict[str, int], goal_z: float) -> float:
-    """Return a centered grasp height for low-layer 1x2 targets."""
-    if (
-        _is_short_target(dimensions)
-        and goal_z <= SHORT_TARGET_CENTER_GRASP_MAX_GOAL_Z
-    ):
-        return SHORT_TARGET_PICK_TCP_HEIGHT
-    return PICK_TCP_HEIGHT
 
 
 def _try_verified_ik(robot_pin, world_t_tcp, seed):
@@ -1110,12 +1152,12 @@ def _transport_jaw_drift_limit(grasp_width: float) -> float:
     """
     if grasp_width <= 0.0:
         raise ValueError("grasp_width must be positive")
-    return min(0.008, max(0.004, grasp_width * 0.1))
+    return min(0.008, max(0.004, grasp_width * 0.5))
 
 
-def _fast_alignment_allowed(grasp_width: float) -> bool:
-    """Return whether a grasp is wide enough for rotation lead."""
-    return grasp_width > 2.0 * BRICK_UNIT_LENGTH + 1e-9
+def _fast_alignment_allowed(dimensions: dict[str, int]) -> bool:
+    """Return whether target geometry tolerates rotation lead."""
+    return not _is_short_target(dimensions)
 
 
 def _gripper_positions(env, arm_index, q) -> list[float]:
@@ -1473,13 +1515,16 @@ def _rotate_wrench(world_t_frame, wrench_world):
 
 
 def _alignment_rotation_hint(
-    env, prepared: SafeStart
-) -> tuple[bool, np.ndarray | None]:
+    env,
+    prepared: SafeStart,
+    rotation_step: float,
+) -> tuple[bool, np.ndarray | None, AlignmentIKBranch | None]:
     """Return the Cartesian rotation direction of a reachable IK branch.
 
     Returns:
-        Endpoint reachability and an optional unit rotation vector in the goal
-        skill frame.  The hint is needed only for a +/-pi ambiguity.
+        Path reachability, an optional unit rotation vector in the goal skill
+        frame, and verified joint seeds along the Cartesian rotation path.  The
+        hint is needed only for a +/-pi ambiguity.
     """
     arm_index = prepared.arm_index
     current_q = _arm_configuration(env, arm_index)
@@ -1493,7 +1538,17 @@ def _alignment_rotation_hint(
         env.robot_pins[arm_index], aligned_tcp, current_q
     )
     if aligned_q is None:
-        return False, None
+        return False, None, None
+
+    branch = _build_alignment_ik_branch(
+        env.robot_pins[arm_index],
+        current_tcp,
+        aligned_tcp,
+        current_q,
+        rotation_step,
+    )
+    if branch is None:
+        return False, None, None
 
     probe_q = current_q + 0.02 * (aligned_q - current_q)
     probe_tcp = _tcp_world(env, arm_index, probe_q)
@@ -1510,20 +1565,95 @@ def _alignment_rotation_hint(
             "no pi rotation hint required",
             flush=True,
         )
-        return True, None
+        return True, None, branch
     skill_t_probe = np.linalg.inv(world_t_goal_tcp) @ probe_tcp
     hint = Rotation.from_matrix(
         skill_t_probe[:3, :3] @ skill_t_current[:3, :3].T
     ).as_rotvec()
     hint_norm = float(np.linalg.norm(hint))
     if hint_norm < 1e-9:
-        return False, None
+        return False, None, None
     result = hint / hint_norm
     print(
         f"[expert] high-clearance alignment rotation hint={result.tolist()}",
         flush=True,
     )
-    return True, result
+    return True, result, branch
+
+
+def _build_alignment_ik_branch(
+    robot_pin,
+    current_tcp: np.ndarray,
+    aligned_tcp: np.ndarray,
+    current_q: np.ndarray,
+    rotation_step: float,
+    *,
+    verbose: bool = True,
+) -> AlignmentIKBranch | None:
+    """Continue IK from the physical safe start over Cartesian yaw.
+
+    Returns:
+        Verified seeds indexed by remaining rotation, or ``None`` if any
+        intermediate high-clearance pose is not reachable.
+    """
+    if rotation_step <= 0.0:
+        raise ValueError("rotation_step must be positive")
+    aligned_rotation = Rotation.from_matrix(aligned_tcp[:3, :3])
+    delta = Rotation.from_matrix(
+        current_tcp[:3, :3] @ aligned_tcp[:3, :3].T
+    ).as_rotvec()
+    total_error = float(np.linalg.norm(delta))
+    errors = [total_error]
+    configurations = [np.asarray(current_q, dtype=np.float64).copy()]
+    if total_error <= 1e-9:
+        return AlignmentIKBranch(np.asarray(errors), tuple(configurations))
+    error = max(0.0, total_error - rotation_step)
+    seed = configurations[0]
+    while True:
+        pose = np.asarray(aligned_tcp, dtype=np.float64).copy()
+        pose[:3, :3] = (
+            Rotation.from_rotvec(delta * (error / total_error)).as_matrix()
+            @ aligned_rotation.as_matrix()
+        )
+        solved = _try_verified_ik(robot_pin, pose, seed)
+        if solved is None:
+            if verbose:
+                print(
+                    "[expert] high-clearance IK continuation failed at "
+                    f"remaining_rotation={np.rad2deg(error):.2f} deg",
+                    flush=True,
+                )
+            return None
+        errors.append(error)
+        configurations.append(solved)
+        seed = solved
+        if error <= 1e-9:
+            break
+        error = max(0.0, error - rotation_step)
+    order = np.argsort(errors)
+    return AlignmentIKBranch(
+        np.asarray(errors)[order],
+        tuple(configurations[index] for index in order),
+    )
+
+
+def _alignment_branch_seed(
+    branch: AlignmentIKBranch | None,
+    target_rotation_error: float,
+) -> np.ndarray | None:
+    """Return the verified branch seed nearest a target rotation error.
+
+    Returns:
+        A deterministic nearby joint seed, or ``None`` without an endpoint.
+    """
+    if branch is None:
+        return None
+    index = int(
+        np.argmin(
+            np.abs(branch.rotation_errors - float(target_rotation_error))
+        )
+    )
+    return branch.configurations[index].copy()
 
 
 def _grasp_stability_error(env, prepared: SafeStart) -> str | None:
@@ -1550,8 +1680,14 @@ def _grasp_stability_error(env, prepared: SafeStart) -> str | None:
         and rotation_error < np.deg2rad(20.0)
     ):
         return None
+    _, brick_goal_rotation = _pose_error(
+        brick, prepared.world_t_goal_brick
+    )
+    _, tcp_goal_rotation = _pose_error(tcp, prepared.world_t_goal_tcp)
     return (
         f"jaw={jaw_drift:.4f} m, finger={finger_drift:.4f} m, "
         f"vertical={vertical_drift:.4f} m, "
-        f"rotation={np.rad2deg(rotation_error):.2f} deg"
+        f"rotation={np.rad2deg(rotation_error):.2f} deg, "
+        f"brick_goal_rotation={np.rad2deg(brick_goal_rotation):.2f} deg, "
+        f"tcp_goal_rotation={np.rad2deg(tcp_goal_rotation):.2f} deg"
     )

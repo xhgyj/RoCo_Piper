@@ -48,7 +48,7 @@ target，并以 Cartesian 路径将砖块中心搬运到目标 XY 正上方 60 m
 - dense：目标附近沿随机 x/y 轴生成同层障碍及对应下层支撑，同时保留另一条
   平行夹爪通道和 1-stud 刚体插入间隙，迫使专家在部分任务中旋转夹爪 90°。
 - bridge：target 同时连接两个 reference，覆盖 5 种支撑组合。
-- 项目自动化测试当前为 45 passed。
+- 项目自动化测试当前为 55 passed。
 - GT safe-start 专家已在 Isaac Sim 中通过代表性动态验证：`basic/1` 72 步、
   `multilevel/3` 71 步、`dense/1` 76 步、`bridge/1` 74 步，均由 BrickSim
   目标 connection（含 offset/yaw）确认成功。
@@ -62,6 +62,21 @@ target，并以 Cartesian 路径将砖块中心搬运到目标 XY 正上方 60 m
 上述部分动态结果来自旧的精确预对齐准备流程。准备流程现已改为只对准目标 XY、
 保留抓取后的 yaw，因此需要重新进行全量 Isaac Sim 验证。静态结果只证明符号结构
 和 BrickSim 拓扑合法，不等同于所有结构已经通过动态抓取、碰撞和插接验证。
+
+连续初始 yaw 的专家验证接口已完成：demo 支持指定绝对角度或按 seed 随机角度，
+批量验证器支持重复指定角度或为每个任务生成确定性随机样本，并将实际角度写入
+HTML/JSON 报告和独立日志。启用 yaw 验证时，loose target 会先放到配置中 Storage
+区域的中心，再绕世界竖直轴设置角度；这只规范化板外抓取起点，不改变底板、预置
+结构、目标位姿、offset 或 connection yaw。代表性无窗口动态验证已通过：
+`adjacent/1 @ 30°` 139 步、`dense/1 @ -135°` 106 步、`bridge/1 @ -45°`
+和 `multilevel/1 @ 175°` 均完成物理抓取、保向搬运、精确对齐/插接、释放和归位。
+
+连续 yaw 使用高空笛卡尔路标的已验证 IK 分支；抓取候选若在安全位到目标 yaw
+之间存在腕部限位或 IK 分支断点，会在抓取前被拒绝。1×2 砖使用 2 mm 抓取高度和
+1°/步、1.5°指令超前的专用高空旋转限制，避免小砖倾倒；其他尺寸仍使用 4°/步、
+6°指令超前。当前阶段故意不把 1×2、2×2 等几何对称性作为等价成功条件，专家
+仍严格执行结构 JSON/BrickSim connection 指定的目标 yaw；对称等价将在完成基线
+数据验证后单独设计，不能静默折叠训练标签。
 
 ## 3. 固定接口约束
 
@@ -150,8 +165,9 @@ R 区分背景和局部坐标零值；G/B 同时编码朝向，避免单一轮�
    严格阈值，下降阶段使用滞回并同步修正小误差，避免 ALIGN/APPROACH 抖动；错误
    offset/yaw 立即失败，不等待 episode 超时。接触后的失配必须连续 3 帧确认，随后
    完整退回约 10 mm 的无接触高度重新对齐，禁止用 0.5 mm 往返试探生成抖动轨迹。
-   距离装配面至少 20 mm 时，高空对齐可使用 4°/步和 6°指令超前；低空修正、下降
-   与接触阶段继续使用 2°限制，不能通过整体提高插接速度来缩短 episode。
+   距离装配面至少 20 mm 时，高空对齐可使用 4°/步和 6°指令超前；易倾倒的 1×2
+   砖使用 1°/步和 1.5°指令超前；低空修正、下降与接触阶段继续使用 2°限制，不能
+   通过整体提高插接速度来缩短 episode。
 4. 对每类先运行一个代表任务，再运行全部 50 个任务；记录失败阶段、IK 位置/
    旋转误差、接触力、是否掉砖和最终 BrickSim connection。
 5. Pick/transport 属于数据记录前的 episode setup，不得混入训练轨迹；连接成功
@@ -164,8 +180,9 @@ R 区分背景和局部坐标零值；G/B 同时编码朝向，避免单一轮�
    优先跨长边夹持以增加抗偏航力臂；紧凑砖优先短边，目标侧障碍约束优先级最高。
 8. 抓取 TCP 位于砖底上方 2 mm 的侧壁区域。闭爪必须验证接触宽度；首次抬升允许
    有限竖直接触就位，随后搬运分别监控夹紧轴、手指轴、竖直和旋转滑移。夹紧轴
-   名义阈值至少为 4 mm，并使用 0.2 mm 仿真比较容差；其他方向和最终 5 mm
-   safe-start 位置验收保持不变。
+   夹紧轴允许不超过半个夹持宽度、上限 8 mm 的单侧接触就位，并使用 0.2 mm
+   仿真比较容差；手指轴、竖直、旋转以及最终 5 mm safe-start 位置验收保持
+   不变，因此放宽中途检测不会接受明显掉砖或错误装配起点。
 9. 搬运拆分为安全高度提升、保持抓取姿态的长距离平移和下降到目标 XY 正上方
    60 mm；不执行 yaw 对齐，也不人为添加 XY/yaw 扰动。无负载关节步长为 0.02 rad，
    持砖 Cartesian 步长为 2 mm，指令超前量在 15 帧内渐增到 4 mm。
@@ -255,6 +272,20 @@ uv run bricksim ./run/demo_symbolic_assembly.py \
   --inspect-seconds 30
 ```
 
+指定或随机化 loose target 的绝对初始 yaw（两者互斥）：
+
+```bash
+uv run bricksim ./run/demo_symbolic_assembly.py \
+  --task-dir tasks/type1/dense/1 \
+  --initial-yaw-deg -135 \
+  --inspect-seconds 5
+
+uv run bricksim ./run/demo_symbolic_assembly.py \
+  --task-dir tasks/type1/dense/1 \
+  --random-initial-yaw \
+  --yaw-seed 7
+```
+
 只验证抓取和搬运到目标正上方，不运行后续对齐/插接：
 
 ```bash
@@ -273,6 +304,22 @@ uv run bricksim ./run/demo_gt_assembly.py \
   --final-hold-seconds 2
 ```
 
+无窗口批量验证连续 yaw，并在浏览器查看实时 HTML 报告：
+
+```bash
+uv run python ./run/validate_expert_tasks.py \
+  --tasks-root tasks/type1 \
+  --yaw-samples 3 \
+  --yaw-seed 7 \
+  --output validation_reports/yaw_seed7
+
+xdg-open validation_reports/yaw_seed7/report.html
+```
+
+也可重复传入精确角度，例如
+`--initial-yaw-deg -135 --initial-yaw-deg 30`；中断后用同一输出目录加
+`--resume`，已通过的 task/yaw 组合不会重跑。
+
 运行自动化测试：
 
 ```bash
@@ -281,7 +328,10 @@ uv run pytest
 
 ## 7. 下一项交付
 
-下一项只实现阶段 A，不同时修改专家策略或启动数据采集。交付内容为：
+先运行一次完整的连续 yaw 动态基线：50 个任务、每个任务 3 个确定性随机角度，
+检查 HTML 中的失败是否集中在某一尺寸、机械臂或角度区间。该批量运行是验收，
+不再改变 target yaw、结构或成功标准。完成后，下一项只实现阶段 A，不同时修改
+专家策略或启动数据采集。阶段 A 的交付内容为：
 
 1. 垂直 Top_Camera 配置与健康检查。
 2. 可单元测试的 GT target pose 与 directional mask 模块。

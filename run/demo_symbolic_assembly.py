@@ -51,6 +51,23 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--seed", type=int, default=7)
     parser.add_argument("--inspect-seconds", type=float, default=5.0)
     parser.add_argument("--final-hold-seconds", type=float, default=10.0)
+    yaw = parser.add_mutually_exclusive_group()
+    yaw.add_argument(
+        "--initial-yaw-deg",
+        type=float,
+        help="set the loose target to this absolute world yaw before pickup",
+    )
+    yaw.add_argument(
+        "--random-initial-yaw",
+        action="store_true",
+        help="sample loose-target world yaw continuously from [-180, 180)",
+    )
+    parser.add_argument(
+        "--yaw-seed",
+        type=int,
+        default=0,
+        help="reproducible seed used by --random-initial-yaw",
+    )
     parser.add_argument(
         "--prepare-only",
         action="store_true",
@@ -79,12 +96,22 @@ async def main() -> None:
                 system_config_path="../config/system_config.json",
             )
             await env.reset()
+            applied_yaw = _apply_initial_yaw(env, args)
             await env.play()
             await env.get_robot_ready()
 
             task = resolve_single_step_task(env)
             goal_brick = compute_goal_brick_pose(env, task)
             target_world = env.get_prim_world_T(task.target_path)
+            if applied_yaw is not None:
+                actual_yaw = Rotation.from_matrix(
+                    target_world[:3, :3]
+                ).as_euler("zyx", degrees=True)[0]
+                print(
+                    "[symbolic-demo] loose target initial yaw: "
+                    f"requested={applied_yaw:.3f} deg, "
+                    f"actual={actual_yaw:.3f} deg, seed={args.yaw_seed}"
+                )
             print(
                 "[symbolic-demo] loose target starts outside plate: "
                 f"xyz={target_world[:3, 3].tolist()}"
@@ -192,3 +219,16 @@ def _remove_goal_preview() -> None:
 async def _hold(env: Env, seconds: float) -> None:
     for _ in range(round(seconds * 30)):
         await env.step()
+
+
+def _apply_initial_yaw(env: Env, args: argparse.Namespace) -> float | None:
+    """Apply the requested expert-validation yaw before physics starts.
+
+    Returns:
+        Applied yaw, or None when retaining BrickSim arranger behavior.
+    """
+    if args.initial_yaw_deg is not None:
+        return env.set_loose_target_yaw(args.initial_yaw_deg)
+    if args.random_initial_yaw:
+        return env.randomize_loose_target_yaw(args.yaw_seed)
+    return None
