@@ -2,3 +2,10 @@
 .venv/
 *.zip
 datasets/
+generated_tasks/
+validation_reports/
+tasks/type1/adjacent/
+tasks/type1/basic/
+tasks/type1/bridge/
+tasks/type1/dense/
+tasks/type1/multilevel/

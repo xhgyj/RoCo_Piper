@@ -44,6 +44,16 @@ def test_both_arms_use_runtime_wrist_cameras():
     assert len(paths) == len(robots)
 
 
+def test_both_grippers_have_stable_contact_drives():
+    """Long bricks need adequate clamp stiffness without excess max force."""
+    config = json.loads((ROOT / "config/user_config.json").read_text())
+    for robot in config["Robot_Config"]["Robots"]:
+        drive = robot["Gripper_Config"]["Drive"]
+        assert drive["Max_Force"] == 10.0
+        assert drive["Damping"] == 10.0
+        assert drive["Stiffness"] == 500.0
+
+
 def test_global_camera_is_configured_for_review():
     """Ensure a fixed scene camera is available for collection review."""
     config = json.loads((ROOT / "config/user_config.json").read_text())
@@ -53,6 +63,26 @@ def test_global_camera_is_configured_for_review():
     assert camera["Position"][2] > camera["Target"][2]
     assert camera["Position"][1] > camera["Target"][1]
     assert camera["Clipping_Range"][0] <= 0.01
+
+
+def test_storage_workspace_fits_every_brick_and_stays_outside_plate():
+    """Keep the complete static pickup region valid and expert-reachable."""
+    config = json.loads((ROOT / "config/user_config.json").read_text())
+    environment = config["Env_Config"]
+    storage = environment["Storage_Config"]
+    workspace_clearance = 0.016
+    longest_brick = 8 * 0.008
+    required_side = longest_brick + 2 * workspace_clearance
+    assert storage["Size"][0] >= required_side
+    assert storage["Size"][1] >= required_side
+
+    base_plate = config["Task_Config"]["Base_Plate"]
+    plate_front = (
+        base_plate["Position"][1]
+        + base_plate["Dimension"][1] * 0.008 * 0.5
+    )
+    workspace_back = storage["Position"][1] - storage["Size"][1] * 0.5
+    assert workspace_back - plate_front >= environment["Loose_Target_Clearance"]
 
 
 def test_camera_poses_are_applied_in_usd_axes():

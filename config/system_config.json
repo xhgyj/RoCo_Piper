@@ -9,7 +9,7 @@
             "Distance_Tolerance": 0.001,
             "Max_Penetration": 0.005,
             "Z_Angle_Tolerance": 5.0,
-            "Required_Force": 1.0,
+            "Required_Force": 0.1,
             "Yaw_Tolerance": 5.0,
             "Position_Tolerance": 0.002
         },

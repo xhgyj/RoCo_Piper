@@ -19,6 +19,7 @@ from bricksim.core import (
 from rocobrick.utils import *
 from rocobrick.robot.Robot import *
 from rocobrick.task_config.Task import *
+from rocobrick.env.loose_parts import aabb_clearance, footprint_aabb, format_aabb
 
 class Env():
     def __init__(self, root_dir, user_config_path, system_config_path):
@@ -54,6 +55,7 @@ class Env():
         self.robot_pin = self.robot_pins[0] if self.robot_pins else None
         self.topology, self.pre_placed_parts, self.to_place_placed = self.setup_task(self.task_config)
         await self.world.reset_async()
+        self._validate_loose_parts_outside_baseplate()
         await self._initialize_cameras()
         self.apply_pose_offset_world("/World/Cube", 0, 0.3)
         await self.step()
@@ -110,6 +112,37 @@ class Env():
         if len(not_arranged) > 0:
             raise RuntimeError(f"Failed to arrange all parts in workspace; not arranged: {not_arranged}")
         return topology, pre_placed_parts, to_place_placed
+
+    def _validate_loose_parts_outside_baseplate(self):
+        """Reject loose targets whose footprint overlaps the base plate."""
+        if not self.to_place_placed:
+            return
+        clearance = self.config["Env_Config"].get(
+            "Loose_Target_Clearance", 0.02
+        )
+        parts = {part["id"]: part for part in self.topology["parts"]}
+        plate_path = self.pre_placed_parts[0]
+        plate = parts[0]["payload"]
+        plate_bounds = footprint_aabb(
+            self.get_prim_world_T(plate_path), plate["L"], plate["W"]
+        )
+        for part_id, path in self.to_place_placed.items():
+            payload = parts[part_id]["payload"]
+            target_bounds = footprint_aabb(
+                self.get_prim_world_T(path), payload["L"], payload["W"]
+            )
+            actual_clearance = aabb_clearance(plate_bounds, target_bounds)
+            # BrickSim's workspace arranger and PhysX pose synchronization can
+            # differ from the requested grid position by a fraction of a
+            # millimetre.  Preserve the configured clearance while tolerating
+            # that numerical/placement resolution at the boundary.
+            if actual_clearance + 0.001 < clearance:
+                raise RuntimeError(
+                    f"loose target {part_id} is not outside the base plate by "
+                    f"{clearance:.3f} m: plate {format_aabb(plate_bounds)}; "
+                    f"target {format_aabb(target_bounds)}; "
+                    f"clearance={actual_clearance:.3f} m"
+                )
 
     async def setup_bricksim(self, config):
         """
@@ -286,6 +319,7 @@ class Env():
                 # Auto-configure drives for all joints by traversing the prim hierarchy
                 from pxr import UsdPhysics
                 root_prim = stage.GetPrimAtPath(prim_path)
+                gripper_drive = rc.get("Gripper_Config", {}).get("Drive", {})
                 if root_prim.IsValid():
                     for prim in Usd.PrimRange(root_prim):
                         if prim.IsA(UsdPhysics.RevoluteJoint) or prim.IsA(UsdPhysics.PrismaticJoint):
@@ -296,9 +330,15 @@ class Env():
                                     prim.GetAttribute("drive:angular:physics:stiffness").Set(200.0)
                                     print(f"[setup] {name}: configured revolute drive for {prim.GetPath()}", flush=True)
                                 else:
-                                    prim.GetAttribute("drive:linear:physics:maxForce").Set(10.0)
-                                    prim.GetAttribute("drive:linear:physics:damping").Set(2.0)
-                                    prim.GetAttribute("drive:linear:physics:stiffness").Set(50.0)
+                                    prim.GetAttribute("drive:linear:physics:maxForce").Set(
+                                        float(gripper_drive.get("Max_Force", 10.0))
+                                    )
+                                    prim.GetAttribute("drive:linear:physics:damping").Set(
+                                        float(gripper_drive.get("Damping", 2.0))
+                                    )
+                                    prim.GetAttribute("drive:linear:physics:stiffness").Set(
+                                        float(gripper_drive.get("Stiffness", 50.0))
+                                    )
                                     print(f"[setup] {name}: configured prismatic drive for {prim.GetPath()}", flush=True)
                             except Exception as e:
                                 print(f"[setup] WARNING: failed to configure drive for {prim.GetPath()}: {e}", flush=True)

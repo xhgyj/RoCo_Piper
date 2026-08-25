@@ -1,29 +1,43 @@
 #!/usr/bin/env python3
+"""Run pickup, the sole local GT assembly expert, and cleanup."""
+
+from pathlib import Path
+
 from rocobrick.env.Env import Env
-from rocobrick.utils import *
-from rocobrick.policy.Policy import Policy
+from rocobrick.env.lifecycle import close_kit_app
+from rocobrick.policy.gt_assembly import (
+    load_expert_config,
+    prepare_safe_start,
+    release_and_return_home,
+    run_gt_assembly_expert,
+)
+
 
 async def main():
-    SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-    
-    # Create BrickSim environment
-    env = Env(root_dir=SCRIPT_DIR,
-              user_config_path="../config/user_config.json",
-              system_config_path="../config/system_config.json")
-    await env.reset()
-
-    # Start simulation loop
-    await env.play()
-    await env.get_robot_ready()
-
-    # User Policy
-    my_policy = Policy(env)
-    
-    while(1):
-        if my_policy.is_done():
-            print("Demo result:", my_policy.episode_result())
-            break
-        obs = env.get_observations()
-        q = my_policy.get_action(obs)
-        env.robot_apply_action(q)
-        await env.step()
+    """Run one configured local assembly episode."""
+    script_dir = Path(__file__).resolve().parent
+    env = None
+    return_code = 0
+    try:
+        env = Env(
+            root_dir=str(script_dir),
+            user_config_path="../config/user_config.json",
+            system_config_path="../config/system_config.json",
+        )
+        await env.reset()
+        await env.play()
+        await env.get_robot_ready()
+        prepared = await prepare_safe_start(env)
+        config = load_expert_config(
+            script_dir / "../config/gt_assembly_expert.json"
+        )
+        result = await run_gt_assembly_expert(env, prepared, config)
+        print("Demo result:", result)
+        if not result.success:
+            raise RuntimeError(result.failure_reason)
+        await release_and_return_home(env, prepared)
+    except BaseException:
+        return_code = 1
+        raise
+    finally:
+        await close_kit_app(env, return_code)

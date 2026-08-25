@@ -1,4 +1,4 @@
-"""Proprioceptive interfaces for the local downward mating skill.
+"""Robot-feedback interfaces for the local GT assembly expert.
 
 The classes in this module deliberately do not import Isaac Sim or BrickSim.
 They form the hardware-shaped boundary used by both simulation and a future
@@ -19,7 +19,7 @@ ACTION_DIM = 6
 FRAME_STATE_DIM = 23
 
 
-class MatePhase(IntEnum):
+class AssemblyPhase(IntEnum):
     """Teacher-only phase labels stored with demonstrations."""
 
     ALIGN = 0
@@ -43,13 +43,15 @@ class FailureType(IntEnum):
 
 
 @dataclass(frozen=True)
-class MateDownConfig:
+class AssemblyExpertConfig:
     """Runtime limits shared by expert and learned policies."""
 
     control_hz: int = 30
     history_steps: int = 10
     max_translation_step: float = 0.0015
     max_rotation_step: float = np.deg2rad(2.0)
+    max_alignment_rotation_step: float = np.deg2rad(4.0)
+    max_alignment_rotation_lead: float = np.deg2rad(6.0)
     max_force: float = 15.0
     max_torque: float = 1.5
     safety_activation_distance: float = 0.01
@@ -67,7 +69,7 @@ class MateDownConfig:
 
 
 @dataclass(frozen=True)
-class MateObservation:
+class AssemblyObservation:
     """One frame of hardware-available proprioceptive feedback."""
 
     tcp_position: np.ndarray
@@ -208,10 +210,10 @@ class ExternalWrenchEstimator:
         return self._filtered.copy()
 
 
-class MateObservationBuilder:
-    """Build target-frame proprioception without exposing target truth."""
+class AssemblyObservationBuilder:
+    """Build target-frame robot feedback for the privileged expert."""
 
-    def __init__(self, config: MateDownConfig):
+    def __init__(self, config: AssemblyExpertConfig):
         """Initialize episode-local history and finite differences."""
         self.config = config
         self.history = ObservationHistory(config.history_steps)
@@ -230,7 +232,7 @@ class MateObservationBuilder:
         world_t_tcp: np.ndarray,
         gripper_width: float,
         wrench_world: np.ndarray,
-    ) -> tuple[MateObservation, np.ndarray]:
+    ) -> tuple[AssemblyObservation, np.ndarray]:
         """Return the current structured observation and flattened history."""
         world_t_skill = _transform(estimated_world_t_skill, "estimated_world_t_skill")
         tcp_world = _transform(world_t_tcp, "world_t_tcp")
@@ -251,7 +253,7 @@ class MateObservationBuilder:
         wrench = _vector(wrench_world, 6, "wrench_world").copy()
         wrench[:3] = world_t_skill[:3, :3].T @ wrench[:3]
         wrench[3:] = world_t_skill[:3, :3].T @ wrench[3:]
-        observation = MateObservation(
+        observation = AssemblyObservation(
             tcp_position=position,
             tcp_rotation_6d=rotation_6d,
             tcp_twist=twist,
@@ -263,13 +265,17 @@ class MateObservationBuilder:
 
 
 class CartesianActionAdapter:
-    """Limit a policy action and turn it into a world-frame TCP target."""
+    """Limit an expert action and turn it into a world-frame TCP target."""
 
-    def __init__(self, config: MateDownConfig):
+    def __init__(self, config: AssemblyExpertConfig):
         """Initialize the configured action limits."""
         self.config = config
 
-    def limit(self, action: np.ndarray) -> np.ndarray:
+    def limit(
+        self,
+        action: np.ndarray,
+        max_rotation_step: float | None = None,
+    ) -> np.ndarray:
         """Limit translational and rotational vector norms independently.
 
         Returns:
@@ -279,7 +285,14 @@ class CartesianActionAdapter:
         if not np.isfinite(value).all():
             raise ValueError("action contains non-finite values")
         value[:3] = _clip_norm(value[:3], self.config.max_translation_step)
-        value[3:] = _clip_norm(value[3:], self.config.max_rotation_step)
+        rotation_limit = (
+            self.config.max_rotation_step
+            if max_rotation_step is None
+            else max_rotation_step
+        )
+        if rotation_limit <= 0.0:
+            raise ValueError("max_rotation_step must be positive")
+        value[3:] = _clip_norm(value[3:], rotation_limit)
         return value
 
     def target(
@@ -287,11 +300,12 @@ class CartesianActionAdapter:
         estimated_world_t_skill: np.ndarray,
         world_t_tcp: np.ndarray,
         action: np.ndarray,
+        max_rotation_step: float | None = None,
     ) -> tuple[np.ndarray, np.ndarray]:
         """Return the bounded action and resulting world-frame TCP target."""
         world_t_skill = _transform(estimated_world_t_skill, "estimated_world_t_skill")
         tcp_world = _transform(world_t_tcp, "world_t_tcp")
-        bounded = self.limit(action)
+        bounded = self.limit(action, max_rotation_step=max_rotation_step)
         skill_t_tcp = np.linalg.inv(world_t_skill) @ tcp_world
         skill_t_target = skill_t_tcp.copy()
         skill_t_target[:3, 3] += bounded[:3]
@@ -310,10 +324,10 @@ class SupervisorResult:
     failure: FailureType
 
 
-class MateSupervisor:
+class AssemblySupervisor:
     """Apply time and wrench safety limits without simulator truth."""
 
-    def __init__(self, config: MateDownConfig):
+    def __init__(self, config: AssemblyExpertConfig):
         """Initialize feedback-only termination counters."""
         self.config = config
         self.steps = 0
@@ -326,7 +340,7 @@ class MateSupervisor:
         self.stable_steps = 0
         self.violation_steps = 0
 
-    def update(self, observation: MateObservation) -> SupervisorResult:
+    def update(self, observation: AssemblyObservation) -> SupervisorResult:
         """Return termination state using only the current observation."""
         self.steps += 1
         wrench = observation.external_wrench
@@ -365,12 +379,12 @@ class ExpertOutput:
     """One teacher command with labels excluded from policy input."""
 
     action: np.ndarray
-    phase: MatePhase
+    phase: AssemblyPhase
     done: bool
 
 
-class ScriptedMateDownExpert:
-    """Privileged assembly teacher starting from a safe preplace pose."""
+class GTAssemblyExpert:
+    """Privileged assembly expert starting from a safe preassembly pose."""
 
     def __init__(
         self,
@@ -381,8 +395,13 @@ class ScriptedMateDownExpert:
         rotation_tolerance: float = np.deg2rad(1.0),
         contact_activation_distance: float = 0.005,
         blend_activation_distance: float = 0.01,
+        press_depth: float = 0.003,
+        initial_rotation_hint: np.ndarray | None = None,
+        press_misalignment_steps: int = 3,
     ):
         """Initialize press and hold counters."""
+        if press_misalignment_steps <= 0:
+            raise ValueError("press_misalignment_steps must be positive")
         self.hold_steps = hold_steps
         self.stable_force_min = stable_force_min
         self.stable_force_max = stable_force_max
@@ -390,13 +409,29 @@ class ScriptedMateDownExpert:
         self.rotation_tolerance = rotation_tolerance
         self.contact_activation_distance = contact_activation_distance
         self.blend_activation_distance = blend_activation_distance
+        self.press_depth = press_depth
+        self.press_misalignment_steps = press_misalignment_steps
+        if initial_rotation_hint is None:
+            self.initial_rotation_hint = None
+        else:
+            hint = _vector(initial_rotation_hint, 3, "initial_rotation_hint")
+            hint_norm = np.linalg.norm(hint)
+            if hint_norm < 1e-9:
+                raise ValueError("initial_rotation_hint must be nonzero")
+            self.initial_rotation_hint = hint / hint_norm
         self._press_steps = 0
+        self._press_misalignment_count = 0
         self._hold_count = 0
+        self._alignment_complete = False
+        self._contact_recovery = False
 
     def reset(self) -> None:
         """Reset teacher phase counters."""
         self._press_steps = 0
+        self._press_misalignment_count = 0
         self._hold_count = 0
+        self._alignment_complete = False
+        self._contact_recovery = False
 
     def act(
         self,
@@ -415,61 +450,138 @@ class ScriptedMateDownExpert:
         rotation_error = Rotation.from_matrix(pose[:3, :3]).inv().as_rotvec()
         lateral_error = np.linalg.norm(position_error[:2])
         rotation_norm = np.linalg.norm(rotation_error)
+        if (
+            self.initial_rotation_hint is not None
+            and rotation_norm >= np.deg2rad(170.0)
+            and np.dot(rotation_error, self.initial_rotation_hint) < 0.0
+        ):
+            # At pi, +axis and -axis describe the same endpoint.  Follow the
+            # direction of the reachable endpoint IK branch instead of the
+            # arbitrary sign returned by the rotation logarithm.
+            rotation_error *= -1.0
         near_contact = abs(float(pose[2, 3])) <= self.contact_activation_distance
         in_contact = near_contact and abs(float(wrench[2])) >= 0.5
-
-        if self._hold_count:
-            self._hold_count += 1
-            done = self._hold_count > self.hold_steps
-            phase = MatePhase.COMPLETE if done else MatePhase.HOLD
-            return ExpertOutput(np.zeros(6), phase, done)
-
-        if connected:
-            self._hold_count = 1
-            return ExpertOutput(np.zeros(6), MatePhase.HOLD, False)
-
+        recovery_lateral_error = 0.0015
+        recovery_rotation_error = np.deg2rad(2.0)
         needs_alignment = (
             lateral_error > self.lateral_tolerance
             or rotation_norm > self.rotation_tolerance
         )
+        needs_recovery = (
+            lateral_error > recovery_lateral_error
+            or rotation_norm > recovery_rotation_error
+        )
+
+        if self._hold_count:
+            self._hold_count += 1
+            done = self._hold_count > self.hold_steps
+            phase = AssemblyPhase.COMPLETE if done else AssemblyPhase.HOLD
+            return ExpertOutput(np.zeros(6), phase, done)
+
+        if connected:
+            self._hold_count = 1
+            return ExpertOutput(np.zeros(6), AssemblyPhase.HOLD, False)
+
+        # Contact starts a one-way press waypoint.  Do not fall back to
+        # alignment when contact deflects the arm slightly: that unloads the
+        # interface and makes the detector alternate between contact/no-contact.
+        press_misaligned = bool(
+            lateral_error > recovery_lateral_error
+            or rotation_norm > recovery_rotation_error
+        )
+        if self._press_steps and press_misaligned:
+            self._press_misalignment_count += 1
+        else:
+            self._press_misalignment_count = 0
+        lost_press_alignment = (
+            self._press_misalignment_count >= self.press_misalignment_steps
+        )
+        if lost_press_alignment:
+            self._press_steps = 0
+            self._press_misalignment_count = 0
+            self._alignment_complete = False
+            self._contact_recovery = True
+
+        # A real contact misalignment needs a complete unload/re-align cycle.
+        # A one-frame 0.5 mm retreat repeatedly re-enters contact before the
+        # brick is free to rotate, producing PRESS/ALIGN phase chatter and poor
+        # demonstrations.  Retreat to the configured blend height first, then
+        # align there before permitting another approach.
+        if self._contact_recovery:
+            clearance_reached = bool(
+                float(pose[2, 3]) <= -self.blend_activation_distance
+            )
+            if not clearance_reached:
+                return ExpertOutput(
+                    np.array([0.0, 0.0, -0.0005, 0.0, 0.0, 0.0]),
+                    AssemblyPhase.ALIGN,
+                    False,
+                )
+            if needs_alignment:
+                action = np.concatenate((position_error, rotation_error))
+                action[:2] *= 0.7
+                action[2] = 0.0
+                action[3:] *= 0.7
+                return ExpertOutput(action, AssemblyPhase.ALIGN, False)
+            self._contact_recovery = False
+            self._alignment_complete = True
+
+        if in_contact and not self._press_steps:
+            self._press_steps = 1
+        if self._press_steps:
+            normal_force = abs(float(wrench[2]))
+            if normal_force > self.stable_force_max:
+                action = np.array([0.0, 0.0, -0.0001, 0.0, 0.0, 0.0])
+            elif float(pose[2, 3]) < self.press_depth:
+                action = np.array([0.0, 0.0, 0.0001, 0.0, 0.0, 0.0])
+            else:
+                action = np.zeros(6)
+            self._press_steps += 1
+            return ExpertOutput(action, AssemblyPhase.PRESS, False)
+
+        if not needs_alignment:
+            self._alignment_complete = True
         axial_error = float(position_error[2])
-        if needs_alignment:
+        if needs_recovery or (needs_alignment and not self._alignment_complete):
             action = np.concatenate((position_error, rotation_error))
-            # Far above contact, blend alignment with descent instead of
-            # producing a visible stop between two state-machine phases.
-            # Inside the final 10 mm, hold height until alignment is precise.
+            # Alignment is a real high-clearance phase.  Never descend while
+            # lateral/yaw error remains: doing so can carry a 90/180-degree
+            # brick into the structure and remove the IK/collision room needed
+            # to finish rotating it.  Only a contact/jam recovery may retreat.
             action[:2] *= 0.7
             action[3:] *= 0.7
-            if abs(axial_error) > self.blend_activation_distance:
-                action[2] = np.copysign(0.0015, axial_error)
+            if abs(axial_error) <= self.blend_activation_distance:
+                action[2] = -0.0005
             else:
                 action[2] = 0.0
-            return ExpertOutput(action, MatePhase.ALIGN, False)
+            return ExpertOutput(action, AssemblyPhase.ALIGN, False)
 
-        if not in_contact and abs(axial_error) > 0.0005:
-            if abs(axial_error) > 0.01:
+        # Above the nominal mating plane, approach monotonically downward.
+        # Once the nominal plane is reached, keep searching gently for real
+        # contact instead of reversing on the signed pose error.  Reversing
+        # here creates an oscillation around z=0 before BrickSim reaches its
+        # connection capture depth.
+        if not in_contact and pose[2, 3] < -0.0005:
+            distance_above = -float(pose[2, 3])
+            if distance_above > 0.01:
                 step_size = 0.0015
-            elif abs(axial_error) > 0.003:
+            elif distance_above > 0.003:
                 step_size = 0.0005
             else:
                 step_size = 0.0001
-            normal_step = np.copysign(step_size, axial_error)
-            action = np.array([0.0, 0.0, normal_step, 0.0, 0.0, 0.0])
-            return ExpertOutput(action, MatePhase.APPROACH, False)
+            action = np.concatenate((position_error, rotation_error))
+            action[:2] *= 0.3
+            action[2] = step_size
+            action[3:] *= 0.3
+            return ExpertOutput(action, AssemblyPhase.APPROACH, False)
 
         if not in_contact:
             # The desired mating TCP has its +z axis along the downward tool
             # direction, so continue gently through the nominal pose.
             action = np.array([0.0, 0.0, 0.0001, 0.0, 0.0, 0.0])
-            return ExpertOutput(action, MatePhase.FIRST_CONTACT, False)
+            return ExpertOutput(action, AssemblyPhase.FIRST_CONTACT, False)
 
-        normal_force = abs(float(wrench[2]))
-        if normal_force > self.stable_force_max:
-            action = np.array([0.0, 0.0, -0.0001, 0.0, 0.0, 0.0])
-            return ExpertOutput(action, MatePhase.PRESS, False)
-        self._press_steps += 1
-        action = np.array([0.0, 0.0, 0.00002, 0.0, 0.0, 0.0])
-        return ExpertOutput(action, MatePhase.PRESS, False)
+        raise AssertionError("contact must enter the latched press waypoint")
 
 
 def _clip_norm(value: np.ndarray, limit: float) -> np.ndarray:

@@ -46,66 +46,122 @@ RoCo-BrickAssembly/
 ├── src/                       
 │   └── rocobrick/                 # RoCo-BrickAssembly source code
 │       ├── env/                   # BrickSim environment
-│       ├── policy/                
-│       │   ├── NaivePolicy.py     # Example rule-based policy (uses privileged info)
-│       │   └── Policy.py          # Your robot policy implementation (TODOs)
+│       ├── policy/
+│       │   ├── gt_assembly.py     # GT pickup, local assembly, and cleanup
+│       │   ├── assembly_control.py# Cartesian phases, feedback, and safety
+│       │   └── assembly_runtime.py# Isaac/Piper runtime adapter
 │       ├── robot/                 # Pinocchio robot model (FK, IK, etc.)
-│       ├── task_config/           # Task loader and parser
+│       ├── task_config/           # Task loader and symbolic generator
 │       └── utils.py               # Helper functions
 └── run/
-    ├── demo.py                    # Example script using NaivePolicy 
-    └── main.py                    # Main script to evaluate your policy
+    ├── demo_gt_assembly.py        # Run a saved task from the safe pose
+    ├── demo_symbolic_assembly.py  # Inspect a structure, then run the expert
+    └── main.py                    # Current GT expert evaluation entry point
 ```
 
 ---
 
 ## 🛠️ Build Your Policy
 
-Your objective is to build an intelligent robot policy capable of successfully constructing as many assembly structures as possible. 
+The current repository intentionally contains only the privileged GT expert
+needed to validate and later collect the local alignment/insertion phase. The
+learned ACT/Diffusion Policy implementation will be added only after GT
+grounding, goal-mask validation, and demonstration collection are ready.
+`run/main.py` currently evaluates this expert and is not a competition-ready
+vision-only inference policy.
 
-* **Implementation:** Your custom policy code must be written in `RoCo-BrickAssembly/src/rocobrick/policy/Policy.py`. 
-  * **Input**: Observations, including camera and robot feedback.
-  * **Output**: robot joint positions, a 23-dimensional array. *Format*: [Lift, torso_flip, L_arm_j1 to L_arm_j7, L_gripper_joint, Unused, R_arm_j1 to R_arm_j7, R_gripper_joint, Unused, head_j1, head_j2, head_j3].
-* **Evaluation:** We will evaluate your policy by running `uv run bricksim ./run/main.py`.
+### GT single-step assembly expert
 
-### Example Policy
-We have provided a naive example policy in `src/rocobrick/policy/NaivePolicy.py` to demonstrate how to interact with BrickSim. You can test it by running the `demo.py` script.
+The sole scripted expert uses simulator GT to resolve one target-centric
+assembly step. An unrecorded preparation phase physically picks the loose
+target outside the plate, lifts it with a Cartesian path, and transports it to
+a verified pose with its center 60 mm directly above the goal. Preparation
+preserves the pickup yaw, so the separately bounded expert
+trajectory contains real alignment as well as approach, contact, press, and hold.
+Alignment is completed at clearance height before descent. Persistent alignment
+loss after contact triggers a full unload-and-realign cycle instead of repeated
+sub-millimeter contact retries.
+High-clearance alignment uses a separate 4-degree rotation step and 6-degree
+tracking lead. The controller restores the conservative 2-degree limit within
+20 mm of the assembly surface.
+After BrickSim verifies every requested connection, an unrecorded cleanup phase
+opens the gripper, retreats vertically, and returns the selected arm home.
 
-### Piper scripted expert and ACT demonstrations
-
-The Piper entry policy uses a dedicated fingertip TCP (`grasp_tcp`) and
-verifies both brick lift and the requested BrickSim connection before it marks
-an episode successful.  It can run without cameras:
+The preparation phase never teleports the target. It measures the actual
+brick-to-TCP transform after the initial lift and checks every remaining loaded
+segment against that single baseline so cumulative slip cannot be hidden. Grasp
+planning evaluates both local x/y axes and rotates the gripper 90 degrees when
+neighboring bricks block the default axis. The jaw opening is tailored to the
+selected brick width rather than always using full travel. High-aspect-ratio
+bricks prefer a wider long-axis grasp for yaw stability, while compact bricks
+prefer the shorter axis. Pickup uses the lower sidewall grasp plane and checks
+directional slip throughout transport. Free-space execution raises to a safe
+carry height, translates in the pickup orientation, then descends without yaw
+alignment. It uses a ramped Cartesian command lead and runs faster than
+the contact-sensitive local assembly trajectory. Every Env-based command requests an uncancellable Isaac Kit
+shutdown from `finally`, on both success and error, so completed demos do not
+leave simulator processes running:
 
 ```bash
 uv run bricksim ./run/demo.py
 ```
 
-The collector requires both wrist RGB cameras to pass their health checks and
-only commits complete successful episodes.  Its default output directory is
-ignored by git:
+Symbolic one-step tasks can be generated without launching Isaac Sim:
 
 ```bash
-uv run bricksim ./run/collect_demos.py \
-  --episodes 100 \
-  --repo-id local/roco-piper-act \
-  --output ../datasets/roco_piper_act
+uv run python ./run/generate_symbolic_tasks.py \
+  --output tasks/type1 \
+  --seed 7 \
+  --count-per-family 10
 ```
 
-Check that LeRobot can load the result before training:
+Use the visual demo to inspect a preplaced structure and run the same complete
+workflow:
 
 ```bash
-uv run python -c "from lerobot.datasets.lerobot_dataset import LeRobotDataset; print(LeRobotDataset('local/roco-piper-act', root='datasets/roco_piper_act'))"
+uv run bricksim ./run/demo_symbolic_assembly.py --family basic --seed 7
+uv run bricksim ./run/demo_symbolic_assembly.py --family bridge --seed 7
 ```
 
-Train the installed LeRobot ACT policy against the local dataset:
+Generated tasks are grouped as `tasks/type1/<family>/<sequence>/`, and every
+sequence directory contains only `structure_start.json` and
+`structure_goal.json`.
+
+The demo shows a translucent green goal preview during its initial inspection
+pause, removes it before execution, and holds the verified final structure for
+review. Pass `--task-dir tasks/type1/basic/1` to inspect a saved task.
+
+To validate only pickup and transport to the pose directly above the goal,
+without running local alignment/insertion, use:
 
 ```bash
-uv run lerobot-train \
-  --policy.type=act \
-  --dataset.repo_id=local/roco-piper-act \
-  --dataset.root=datasets/roco_piper_act \
-  --output_dir=outputs/act_roco_piper
+uv run bricksim ./run/demo_symbolic_assembly.py \
+  --task-dir tasks/type1/multilevel/7 \
+  --prepare-only \
+  --final-hold-seconds 10
+```
+
+Validate every saved Type-1 task in isolated headless Isaac processes:
+
+```bash
+uv run python ./run/validate_expert_tasks.py --tasks-root tasks/type1
+```
+
+The command displays terminal progress and continuously updates an ignored
+`validation_reports/<timestamp>/report.html` report containing PASS/FAIL,
+duration, failure reasons, and links to each complete simulator log. Restrict a
+run with repeated `--family` options or use `--limit` for a smoke test. Reuse
+the same `--output` with `--resume` to skip earlier PASS results whose detailed
+logs are still present; failed, interrupted, and log-less tasks are rerun.
+
+Run one saved task directly without the generated preview stage. The printed
+`ExpertResult.steps` counts only the local assembly trajectory; preparation and
+cleanup are intentionally excluded:
+
+```bash
+uv run bricksim ./run/demo_gt_assembly.py \
+  --task-dir tasks/type1/basic/1 \
+  --safe-height-mm 60
 ```
 
 ### ⚠️ Rules & Restrictions
@@ -117,7 +173,7 @@ uv run lerobot-train \
 > * **Be creative:** We do not restrict the underlying method, architecture, or algorithm you choose. Build the best brick builder possible!
 > 
 > **What You Cannot Do:**
-> * **Do NOT use privileged information during inference:** During inference/runtime, your policy may *only* rely on realistic observations (e.g., camera feeds and robot proprioceptive feedback). The `NaivePolicy` demo uses privileged information (like exact ground-truth brick states) for illustration purposes, but relying on this for your final evaluation is **strictly forbidden**.
+> * **Do NOT use privileged information during inference:** During inference/runtime, your policy may *only* rely on realistic observations (e.g., camera feeds and robot proprioceptive feedback). The GT assembly expert in this repository is a teacher/validation tool; it is not the final learned inference policy.
 > * **Do NOT use human intervention:** Fully autonomous execution is required. No human intervention or teleoperation is allowed during inference runtime.
 
 ---

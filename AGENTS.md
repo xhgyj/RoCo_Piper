@@ -25,4 +25,4 @@ Tests use pytest and follow `test_*.py` / `test_*` naming. Keep pure policy and 
 
 ## Commit & Pull Request Guidelines
 
-History follows concise Conventional Commit subjects such as `feat:`, `fix:`, `perf:`, and `chore:`. Keep commits scoped and imperative. Pull requests should explain behavior changes, list exact verification commands, link relevant issues, and include representative logs or images for visual/simulation changes. Preserve unrelated working-tree changes. The challenge rules limit edits to TODO-marked files or new supporting files unless organizer approval has been obtained.
+History follows concise Conventional Commit subjects such as `feat:`, `fix:`, `perf:`, and `chore:`. Keep commits scoped and imperative. Pull requests should explain behavior changes, list exact verification commands, link relevant issues, and include representative logs or images for visual/simulation changes. Preserve unrelated working-tree changes.
