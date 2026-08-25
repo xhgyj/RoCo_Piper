@@ -9,6 +9,8 @@ from pathlib import Path
 import numpy as np
 from scipy.spatial.transform import Rotation
 
+from rocobrick.backends.bricksim import BrickSimRobotBackend, BrickSimWorldModel
+from rocobrick.execution.types import ExecutionError
 from rocobrick.policy.assembly_control import (
     AssemblyExpertConfig,
     AssemblyPhase,
@@ -18,6 +20,7 @@ from rocobrick.policy.assembly_runtime import (
     DELICATE_ALIGNMENT_ROTATION_STEP,
     GTAssemblyRuntime,
 )
+from rocobrick.skills.pick import GraspCandidate, PickRequest, PickSkill
 
 SAFE_HEIGHT = 0.06
 PICK_APPROACH_HEIGHT = 0.06
@@ -260,82 +263,39 @@ async def prepare_safe_start(env, safe_height: float = SAFE_HEIGHT) -> SafeStart
     )
     arm_index = plan.arm_index
     print(
-        "[preparation] home -> pregrasp "
+        "[preparation] execute PickSkill "
         f"(arm={arm_index}, grasp_axis={'xy'[plan.grasp_axis]})",
         flush=True,
     )
-    await _execute_joint_waypoint(
-        env,
-        arm_index,
-        _with_gripper(
-            env, arm_index, plan.q_pregrasp, plan.grasp_width, close=False
-        ),
-        "pregrasp",
-        plan.world_t_pregrasp_tcp,
+    pick_skill = PickSkill.create(
+        BrickSimRobotBackend(env, arm_index), BrickSimWorldModel(env)
     )
-    print("[preparation] verify planned gripper opening", flush=True)
-    await _actuate_gripper(
-        env,
-        arm_index,
-        _arm_configuration(env, arm_index),
-        plan.grasp_width,
-        close=False,
-    )
-    print("[preparation] pregrasp -> grasp", flush=True)
-    await _execute_cartesian_waypoint(
-        env,
-        arm_index,
-        plan.world_t_pick_tcp,
-        "grasp",
-        plan.grasp_width,
-        close=False,
-    )
-    print("[preparation] close gripper", flush=True)
-    grasp_hold_q = _arm_configuration(env, arm_index)
-    await _actuate_gripper(
-        env, arm_index, grasp_hold_q, plan.grasp_width, close=True
-    )
-
-    grasp_q = _arm_configuration(env, arm_index)
-    grasp_tcp = _tcp_world(env, arm_index, grasp_q)
-    grasp_brick = env.get_prim_world_T(task.target_path)
-    brick_t_tcp = np.linalg.inv(grasp_brick) @ grasp_tcp
-    gripper_values = _gripper_positions(env, arm_index, grasp_q)
+    try:
+        pick_result = await pick_skill.execute(
+            PickRequest(
+                object_id=task.target_path,
+                candidates=(
+                    GraspCandidate(
+                        world_t_pregrasp_tcp=plan.world_t_pregrasp_tcp,
+                        world_t_grasp_tcp=plan.world_t_pick_tcp,
+                        grasp_axis=plan.grasp_axis,
+                        grasp_width=plan.grasp_width,
+                    ),
+                ),
+                lift_distance=PICK_APPROACH_HEIGHT,
+            )
+        )
+    except ExecutionError as exc:
+        raise SafeStartError(str(exc)) from exc
+    brick_t_tcp = pick_result.held.object_t_tcp
+    lifted_brick = pick_result.lifted_object_pose
     print(
-        "[preparation] grasp feedback: "
-        f"gripper={gripper_values}, "
-        f"brick_xyz={grasp_brick[:3, 3].tolist()}, "
+        "[preparation] PickSkill complete: "
+        f"steps={pick_result.steps}, "
+        f"brick_xyz={lifted_brick[:3, 3].tolist()}, "
         f"brick_to_tcp={brick_t_tcp[:3, 3].tolist()}",
         flush=True,
     )
-    lift_tcp = grasp_tcp.copy()
-    lift_tcp[:3, 3] += grasp_brick[:3, 2] * PICK_APPROACH_HEIGHT
-    lift_q = _solve_verified_ik(env, arm_index, lift_tcp, grasp_q, "lift")
-    print("[preparation] grasp -> lift", flush=True)
-    await _execute_cartesian_waypoint(
-        env,
-        arm_index,
-        lift_tcp,
-        "lift",
-        plan.grasp_width,
-        close=True,
-        grasp_reference=(task.target_path, brick_t_tcp, plan.grasp_axis),
-        allow_vertical_settling=True,
-    )
-    lifted_brick = env.get_prim_world_T(task.target_path)
-    lift_distance = float(
-        np.dot(
-            lifted_brick[:3, 3] - initial_brick[:3, 3],
-            initial_brick[:3, 2],
-        )
-    )
-    if lift_distance < PICK_APPROACH_HEIGHT * 0.55:
-        raise SafeStartError(
-            "target did not follow the gripper during lift: "
-            f"lift={lift_distance:.4f} m, "
-            f"initial_xyz={initial_brick[:3, 3].tolist()}, "
-            f"final_xyz={lifted_brick[:3, 3].tolist()}"
-        )
 
     # Establish one physical-grasp baseline after lift.  Every remaining
     # transport segment is checked against this same transform so cumulative
