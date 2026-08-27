@@ -150,3 +150,34 @@ uv run bricksim ./run/smoke_pick_executor.py --arm-index 0
 
 This entry point does not invoke the legacy preparation, dense1 sequence, or
 assembly demo workflows.
+
+Run the complete unified Pick -> PlaceDown path for one Task-1 directory:
+
+```bash
+uv run bricksim ./run/test_pick_assemble.py \
+  tasks/type1/example1 --arm-index 0
+```
+
+Test several directories in one Isaac Sim process and write a JSON report:
+
+```bash
+uv run bricksim ./run/test_pick_assemble.py \
+  tasks/type1/example1 /path/to/another/task \
+  --arm-index 0 --output /tmp/roco-pick-assemble.json
+```
+
+Recursively discover every valid Task-1 pair under a directory, or explicitly
+test the same tasks with both upper-planner arm assignments:
+
+```bash
+uv run bricksim ./run/test_pick_assemble.py \
+  --tasks-root tasks/type1 --arm-index 0
+
+uv run bricksim ./run/test_pick_assemble.py \
+  tasks/type1/example1 --arm-index 0 --arm-index 1
+```
+
+The runner creates temporary user configuration outside the repository. It
+does not modify `config/user_config.json`. Each task must contain exactly one
+new target between `structure_start.json` and `structure_goal.json`; invalid
+tasks and unsuitable arm assignments are returned as structured failures.
