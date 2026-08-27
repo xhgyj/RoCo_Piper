@@ -85,15 +85,26 @@ def obb_axis_separations(left: OrientedBox, right: OrientedBox) -> NDArray[np.fl
 
 def obb_intersects(left: OrientedBox, right: OrientedBox) -> bool:
     """Return whether two oriented boxes overlap under the SAT."""
-    return bool(np.all(obb_axis_separations(left, right) <= 1e-9))
+    _, intersects = obb_clearance_and_intersection(left, right)
+    return intersects
 
 
 def obb_clearance(left: OrientedBox, right: OrientedBox) -> float:
     """Return a conservative signed separation estimate."""
+    clearance, _ = obb_clearance_and_intersection(left, right)
+    return clearance
+
+
+def obb_clearance_and_intersection(
+    left: OrientedBox, right: OrientedBox
+) -> tuple[float, bool]:
+    """Compute clearance and intersection from one SAT evaluation.
+
+    Returns:
+        Conservative signed clearance and whether the boxes intersect.
+    """
     separations = obb_axis_separations(left, right)
-    if np.any(separations > 0.0):
-        return float(np.max(separations))
-    return float(np.max(separations))
+    return float(np.max(separations)), bool(np.all(separations <= 1e-9))
 
 
 def transform_box(box: OrientedBox, world_t_box: FloatArray) -> OrientedBox:
@@ -166,8 +177,10 @@ def path_clearance(
     for pose in poses:
         for gripper_box in gripper_boxes(pose, opening, geometry):
             for obstacle in obstacles:
-                clearance = obb_clearance(gripper_box, obstacle)
-                if obb_intersects(gripper_box, obstacle):
+                clearance, intersects = obb_clearance_and_intersection(
+                    gripper_box, obstacle
+                )
+                if intersects:
                     return None
                 minimum = min(minimum, clearance)
     return float(minimum)

@@ -75,6 +75,7 @@ def _adaptive_ik_path(
     stage: str,
     maximum_joint_step: float,
     maximum_depth: int,
+    goal_configuration: FloatArray | None = None,
 ) -> CartesianPath:
     """Solve a path and subdivide segments with excessive joint motion.
 
@@ -99,8 +100,18 @@ def _adaptive_ik_path(
         goal_pose: FloatArray,
         start_q: FloatArray,
         depth: int,
+        fixed_goal_q: FloatArray | None = None,
     ) -> list[tuple[FloatArray, FloatArray]]:
-        goal_q = _ik_path(robot, (goal_pose,), start_q, stage).configurations[0]
+        if fixed_goal_q is None:
+            goal_q = _ik_path(robot, (goal_pose,), start_q, stage).configurations[0]
+        else:
+            goal_q = np.asarray(fixed_goal_q, dtype=np.float64).copy()
+            if not robot.configuration_is_safe(goal_q):
+                raise ExecutionError(
+                    FailureCode.COLLISION,
+                    stage,
+                    "cached IK endpoint is an unsafe configuration",
+                )
         joint_step = float(np.max(np.abs(goal_q[arm_indices] - start_q[arm_indices])))
         if joint_step <= maximum_joint_step:
             return [(goal_pose, goal_q)]
@@ -116,15 +127,23 @@ def _adaptive_ik_path(
             )
         midpoint = interpolate_pose(start_pose, goal_pose, 0.5)
         first_half = solve_segment(start_pose, midpoint, start_q, depth + 1)
-        second_half = solve_segment(midpoint, goal_pose, first_half[-1][1], depth + 1)
+        second_half = solve_segment(
+            midpoint,
+            goal_pose,
+            first_half[-1][1],
+            depth + 1,
+            fixed_goal_q,
+        )
         return [*first_half, *second_half]
 
-    for goal_pose in poses[1:]:
+    for index, goal_pose in enumerate(poses[1:], start=1):
+        fixed_goal_q = goal_configuration if index == len(poses) - 1 else None
         segment = solve_segment(
             solved_poses[-1],
             goal_pose,
             solved_configurations[-1],
             0,
+            fixed_goal_q,
         )
         solved_poses.extend(item[0] for item in segment)
         solved_configurations.extend(item[1] for item in segment)
@@ -185,7 +204,6 @@ class _RankedGrasp:
     pregrasp_tcp: FloatArray
     grasp_tcp: FloatArray
     lift_tcp: FloatArray
-    q_pregrasp: FloatArray
 
 
 class GraspPlanner:
@@ -268,37 +286,6 @@ class GraspPlanner:
                     if minimum_clearance < self._config.minimum_side_clearance:
                         rejections["pick_collision"] += 1
                         continue
-                    try:
-                        q_pregrasp = _ik_path(
-                            robot,
-                            (pregrasp_tcp,),
-                            current.q,
-                            "pick_pregrasp_probe",
-                        ).configurations[-1]
-                        q_grasp = _ik_path(
-                            robot,
-                            (grasp_tcp,),
-                            q_pregrasp,
-                            "pick_grasp_probe",
-                        ).configurations[-1]
-                        q_lift = _ik_path(
-                            robot, (lift_tcp,), q_grasp, "pick_lift_probe"
-                        ).configurations[-1]
-                        if assembly_goal is not None:
-                            high_tcp = self._downstream_tcp(
-                                target, grasp_tcp, assembly_goal
-                            )
-                            _ik_path(
-                                robot,
-                                (high_tcp,),
-                                q_lift,
-                                "downstream_assembly_probe",
-                            )
-                    except ExecutionError as error:
-                        rejections[
-                            f"{error.stage}:{error.code.value}:{error.detail}"
-                        ] += 1
-                        continue
                     centering = 1.0 - (0.5 * abs(float(offset)) / max(available, 1e-9))
                     stability = (
                         width / float(max(region.half_extents[:2]) * 2.0) * centering
@@ -308,14 +295,9 @@ class GraspPlanner:
                         + np.linalg.norm(grasp_tcp[:3, 3] - pregrasp_tcp[:3, 3])
                         + np.linalg.norm(lift_tcp[:3, 3] - grasp_tcp[:3, 3])
                     )
-                    joint_margin = min(
-                        1.0 / (1.0 + float(np.linalg.norm(q)))
-                        for q in (q_pregrasp, q_grasp, q_lift)
-                    )
                     score = (
                         -minimum_clearance,
                         -stability,
-                        -joint_margin,
                         path_length,
                         float(index),
                     )
@@ -330,15 +312,42 @@ class GraspPlanner:
                             pregrasp_tcp,
                             grasp_tcp,
                             lift_tcp,
-                            q_pregrasp,
                         )
                     )
         for candidate in sorted(candidates, key=lambda item: item.score):
             try:
+                q_pregrasp = _ik_path(
+                    robot,
+                    (candidate.pregrasp_tcp,),
+                    current.q,
+                    "pick_pregrasp_probe",
+                ).configurations[-1]
+                q_grasp = _ik_path(
+                    robot,
+                    (candidate.grasp_tcp,),
+                    q_pregrasp,
+                    "pick_grasp_probe",
+                ).configurations[-1]
+                q_lift = _ik_path(
+                    robot,
+                    (candidate.lift_tcp,),
+                    q_grasp,
+                    "pick_lift_probe",
+                ).configurations[-1]
+                if assembly_goal is not None:
+                    high_tcp = self._downstream_tcp(
+                        target, candidate.grasp_tcp, assembly_goal
+                    )
+                    _ik_path(
+                        robot,
+                        (high_tcp,),
+                        q_lift,
+                        "downstream_assembly_probe",
+                    )
                 pregrasp = _joint_space_path(
                     robot,
                     current.q,
-                    candidate.q_pregrasp,
+                    q_pregrasp,
                     self._config.maximum_ik_joint_step,
                     "pick_pregrasp",
                 )
@@ -368,6 +377,7 @@ class GraspPlanner:
                     "pick_approach",
                     self._config.maximum_ik_joint_step,
                     self._config.maximum_ik_subdivision_depth,
+                    q_grasp,
                 )
                 lift = _adaptive_ik_path(
                     robot,
@@ -380,6 +390,7 @@ class GraspPlanner:
                     "pick_lift",
                     self._config.maximum_ik_joint_step,
                     self._config.maximum_ik_subdivision_depth,
+                    q_lift,
                 )
                 if assembly_goal is not None:
                     self._require_downstream_transport(
