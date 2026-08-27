@@ -154,6 +154,8 @@ class GraspStabilityCheck:
         tracking: GraspTracking,
         stage: str,
         allow_vertical_settling: bool = False,
+        max_vertical_drift: float | None = None,
+        max_rotation_drift: float | None = None,
     ) -> None:
         """Reject excessive translation or rotation inside the gripper."""
         tcp = self._robot.read_state().tcp_world
@@ -167,17 +169,29 @@ class GraspStabilityCheck:
         finger_drift = abs(float(translation[1 - tracking.grasp_axis]))
         vertical_drift = abs(float(translation[2]))
         jaw_limit = min(0.008, max(0.004, tracking.grasp_width * 0.5))
-        vertical_limit = (
-            self._config.max_initial_vertical_settling
-            if allow_vertical_settling
-            else self._config.max_vertical_drift
+        if max_vertical_drift is None:
+            vertical_limit = (
+                self._config.max_initial_vertical_settling
+                if allow_vertical_settling
+                else self._config.max_vertical_drift
+            )
+        else:
+            if max_vertical_drift <= 0.0:
+                raise ValueError("max_vertical_drift must be positive")
+            vertical_limit = max_vertical_drift
+        rotation_limit = (
+            self._config.max_rotation_drift
+            if max_rotation_drift is None
+            else max_rotation_drift
         )
+        if rotation_limit <= 0.0:
+            raise ValueError("max_rotation_drift must be positive")
         tolerance = self._config.comparison_tolerance
         if (
             jaw_drift > jaw_limit + tolerance
             or finger_drift > self._config.max_finger_axis_drift + tolerance
             or vertical_drift > vertical_limit + tolerance
-            or rotation > self._config.max_rotation_drift
+            or rotation > rotation_limit
         ):
             raise ExecutionError(
                 FailureCode.SLIPPED,
@@ -187,5 +201,6 @@ class GraspStabilityCheck:
                 f"finger={finger_drift:.6f}/"
                 f"{self._config.max_finger_axis_drift:.6f} m, "
                 f"vertical={vertical_drift:.6f}/{vertical_limit:.6f} m, "
-                f"rotation={np.rad2deg(rotation):.2f} deg)",
+                f"rotation={np.rad2deg(rotation):.2f}/"
+                f"{np.rad2deg(rotation_limit):.2f} deg)",
             )

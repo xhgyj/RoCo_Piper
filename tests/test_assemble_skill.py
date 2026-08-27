@@ -5,12 +5,24 @@ from __future__ import annotations
 import asyncio
 
 import numpy as np
+from scipy.spatial.transform import Rotation
 
 from rocobrick.backends.base import RobotState
-from rocobrick.controllers.motion import MotionConfig
+from rocobrick.controllers.motion import (
+    CartesianController,
+    IKController,
+    MotionConfig,
+    _bounded_rotation_step,
+)
 from rocobrick.execution.skill_registry import SkillRegistry
 from rocobrick.execution.types import ExecutionError, FailureCode, HeldObject
-from rocobrick.safety import ForceGuard, PredicateSuccessCheck
+from rocobrick.safety import (
+    CollisionCheck,
+    ForceGuard,
+    GraspStabilityCheck,
+    PredicateSuccessCheck,
+)
+from rocobrick.safety.checks import GraspTracking
 from rocobrick.skills.assemble import AssembleRequest, AssembleSkill
 from rocobrick.skills.base_skill import ManipulationSkillType
 
@@ -43,9 +55,7 @@ class _AssemblyRobot:
         tcp[:3, 3] = self._q[:3]
         return RobotState(self._q.copy(), tcp, self._q[3:].copy())
 
-    def solve_ik(
-        self, world_t_tcp: np.ndarray, seed: np.ndarray
-    ) -> np.ndarray | None:
+    def solve_ik(self, world_t_tcp: np.ndarray, seed: np.ndarray) -> np.ndarray | None:
         result = seed.copy()
         result[:3] = world_t_tcp[:3, 3]
         return result
@@ -158,9 +168,7 @@ def _run_direction(direction: float) -> tuple[_AssemblyRobot, _DirectionalSucces
         AssembleSkill.create(robot, world, _motion_config()).execute(
             AssembleRequest(
                 held=_held(),
-                world_t_preassembly_tcp=_pose(
-                    preassembly_z, x=0.02, y=-0.02
-                ),
+                world_t_preassembly_tcp=_pose(preassembly_z, x=0.02, y=-0.02),
                 world_t_goal_tcp=_pose(0.0),
                 insertion_direction_world=np.array([0.0, 0.0, direction]),
                 success_check=success,
@@ -176,16 +184,73 @@ def _run_direction(direction: float) -> tuple[_AssemblyRobot, _DirectionalSucces
     return robot, success
 
 
-def test_phase_two_enables_both_parameterized_place_skills() -> None:
-    """Place-Up and Place-Down share one available implementation phase."""
+def test_phase_two_exposes_only_implemented_downward_assembly() -> None:
+    """The registry does not advertise future upward assembly support."""
     registry = SkillRegistry.phase_two()
     for skill_type in ManipulationSkillType:
         expected = skill_type in {
             ManipulationSkillType.PICK,
             ManipulationSkillType.PLACE_DOWN,
-            ManipulationSkillType.PLACE_UP,
         }
         assert registry.capability(skill_type).available is expected
+
+
+def test_pi_rotation_step_follows_verified_world_hint() -> None:
+    """The signed hint selects one deterministic branch at 180 degrees."""
+    target = Rotation.from_euler("z", 180.0, degrees=True).as_matrix()
+    step = _bounded_rotation_step(
+        np.eye(3),
+        target,
+        np.deg2rad(1.0),
+        np.array([0.0, 0.0, -1.0]),
+    )
+    rotvec = Rotation.from_matrix(step).as_rotvec()
+    assert np.isclose(np.linalg.norm(rotvec), np.deg2rad(1.0))
+    assert rotvec[2] < 0.0
+
+
+def test_align_servo_allows_only_bounded_vertical_seating() -> None:
+    """Align may accept lift-like seating without weakening normal tracking."""
+    robot = _AssemblyRobot(0.0)
+    world = _AssemblyWorld(robot)
+    world._pose[2, 3] = -0.009
+    collision = CollisionCheck(robot)
+    controller = CartesianController(
+        robot,
+        world,
+        IKController(robot, collision),
+        collision,
+        GraspStabilityCheck(robot, world),
+        _motion_config(),
+    )
+    tracking = GraspTracking("brick_a", np.eye(4), 0, 0.016)
+
+    try:
+        asyncio.run(
+            controller.servo_step(
+                robot.read_state().tcp_world,
+                "approach",
+                0.016,
+                closed=True,
+                tracking=tracking,
+            )
+        )
+    except ExecutionError as exc:
+        assert exc.code is FailureCode.SLIPPED
+    else:
+        raise AssertionError("normal tracking must retain the 4 mm limit")
+
+    asyncio.run(
+        controller.servo_step(
+            robot.read_state().tcp_world,
+            "align",
+            0.016,
+            closed=True,
+            tracking=tracking,
+            allow_vertical_settling=True,
+            max_vertical_drift=0.010,
+        )
+    )
 
 
 def test_place_up_and_down_share_opposite_direction_execution() -> None:

@@ -64,9 +64,7 @@ class BrickSimSuccessCheck:
         """Raise unless every exact requested connection is active."""
         conflict = self.conflict()
         if conflict is not None:
-            raise ExecutionError(
-                FailureCode.VERIFICATION_FAILED, stage, conflict
-            )
+            raise ExecutionError(FailureCode.VERIFICATION_FAILED, stage, conflict)
         if not self.is_satisfied():
             raise ExecutionError(
                 FailureCode.VERIFICATION_FAILED,
@@ -115,9 +113,7 @@ class BrickSimRobotBackend:
     @property
     def robot_id(self) -> str:
         """Return the configured robot name."""
-        return str(
-            self._robot_config.get("Name", f"robot_{self._arm_index}")
-        )
+        return str(self._robot_config.get("Name", f"robot_{self._arm_index}"))
 
     @property
     def home_configuration(self) -> FloatArray:
@@ -152,9 +148,7 @@ class BrickSimRobotBackend:
         gripper = q[list(self._gripper_indices)].copy()
         return RobotState(q, tcp, gripper)
 
-    def solve_ik(
-        self, world_t_tcp: FloatArray, seed: FloatArray
-    ) -> FloatArray | None:
+    def solve_ik(self, world_t_tcp: FloatArray, seed: FloatArray) -> FloatArray | None:
         """Solve and strictly verify one world-frame TCP target.
 
         Returns:
@@ -172,9 +166,7 @@ class BrickSimRobotBackend:
         ]
         position_error = float(np.linalg.norm(solved[:3, 3] - arm_t_tcp[:3, 3]))
         rotation_error = float(
-            Rotation.from_matrix(
-                solved[:3, :3].T @ arm_t_tcp[:3, :3]
-            ).magnitude()
+            Rotation.from_matrix(solved[:3, :3].T @ arm_t_tcp[:3, :3]).magnitude()
         )
         if (
             position_error > SAFE_IK_POSITION_TOLERANCE
@@ -182,6 +174,14 @@ class BrickSimRobotBackend:
         ):
             return None
         return np.asarray(q, dtype=np.float64)
+
+    def forward_kinematics(self, q: FloatArray) -> FloatArray:
+        """Return the world-frame TCP pose for one configuration.
+
+        Returns:
+            TCP transform computed by the configured Pinocchio model.
+        """
+        return self._tcp_world(np.asarray(q, dtype=np.float64))
 
     def command_configuration(self, q: FloatArray) -> None:
         """Write one robot configuration into the global action vector."""

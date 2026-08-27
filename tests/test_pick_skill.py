@@ -51,9 +51,7 @@ class _FakeRobot:
         tcp[:3, 3] = self._q[:3]
         return RobotState(self._q.copy(), tcp, self._q[3:].copy())
 
-    def solve_ik(
-        self, world_t_tcp: np.ndarray, seed: np.ndarray
-    ) -> np.ndarray | None:
+    def solve_ik(self, world_t_tcp: np.ndarray, seed: np.ndarray) -> np.ndarray | None:
         if float(world_t_tcp[0, 3]) > self.unreachable_x:
             return None
         result = seed.copy()
@@ -135,10 +133,15 @@ def test_registry_exposes_six_skills_with_only_pick_available() -> None:
 def test_handover_requires_two_assigned_robots() -> None:
     """Only the coordinated skill reserves two robot resources."""
     ManipulationAction(
-        ("giver", "receiver"), ManipulationSkillType.HANDOVER, "brick_a"
+        "handover-1",
+        ("giver", "receiver"),
+        ManipulationSkillType.HANDOVER,
+        "brick_a",
     )
     try:
-        ManipulationAction(("giver",), ManipulationSkillType.HANDOVER, "brick_a")
+        ManipulationAction(
+            "handover-2", ("giver",), ManipulationSkillType.HANDOVER, "brick_a"
+        )
     except ValueError as exc:
         assert "requires 2" in str(exc)
     else:
@@ -150,9 +153,7 @@ def test_pick_returns_lifted_held_object() -> None:
     robot = _FakeRobot()
     world = _FakeWorld(robot)
     result = asyncio.run(
-        PickSkill.create(robot, world).execute(
-            PickRequest("brick_a", (_candidate(),))
-        )
+        PickSkill.create(robot, world).execute(PickRequest("brick_a", (_candidate(),)))
     )
     assert result.held.object_id == "brick_a"
     assert result.held.robot_id == "robot_1"
@@ -204,9 +205,7 @@ def test_grasp_holds_captured_arm_pose_during_finger_contact() -> None:
         robot,
         world,
         TrajectoryController(robot, world, collision, config),
-        CartesianController(
-            robot, world, ik, collision, grasp_check, config
-        ),
+        CartesianController(robot, world, ik, collision, grasp_check, config),
         collision,
     )
     asyncio.run(Grasp(context).execute(0.016))

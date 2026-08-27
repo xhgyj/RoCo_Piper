@@ -52,10 +52,12 @@ class RobotBackend(Protocol):
         """Read the current robot state."""
         ...
 
-    def solve_ik(
-        self, world_t_tcp: FloatArray, seed: FloatArray
-    ) -> FloatArray | None:
+    def solve_ik(self, world_t_tcp: FloatArray, seed: FloatArray) -> FloatArray | None:
         """Return a verified IK solution, or None when unreachable."""
+        ...
+
+    def forward_kinematics(self, q: FloatArray) -> FloatArray:
+        """Return the world-frame TCP pose for one configuration."""
         ...
 
     def command_configuration(self, q: FloatArray) -> None:

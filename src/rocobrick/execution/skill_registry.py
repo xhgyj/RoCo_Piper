@@ -49,11 +49,10 @@ class SkillRegistry:
 
     @classmethod
     def phase_two(cls) -> SkillRegistry:
-        """Return the assembly rollout with both Place variants enabled."""
+        """Return the rollout with Pick and downward assembly enabled."""
         available = {
             ManipulationSkillType.PICK,
             ManipulationSkillType.PLACE_DOWN,
-            ManipulationSkillType.PLACE_UP,
         }
         return cls(
             tuple(

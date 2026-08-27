@@ -16,9 +16,11 @@ from rocobrick.controllers.motion import (
 )
 from rocobrick.execution.types import (
     ExecutionError,
+    ExecutionMetrics,
     FailureCode,
     HeldObject,
 )
+from rocobrick.planning.models import CartesianPath, GraspPlan
 from rocobrick.primitives.approach import Approach, ApproachRequest
 from rocobrick.primitives.base import PrimitiveContext
 from rocobrick.primitives.gripper import Grasp
@@ -76,9 +78,15 @@ class PickResult:
     """Successful Pick output consumed by later skills."""
 
     held: HeldObject
-    steps: int
+    metrics: ExecutionMetrics
     initial_object_pose: FloatArray
     lifted_object_pose: FloatArray
+    acquisition_object_t_tcp: FloatArray
+
+    @property
+    def steps(self) -> int:
+        """Return physical simulation steps."""
+        return self.metrics.simulation_steps
 
 
 @dataclass(frozen=True)
@@ -119,9 +127,7 @@ class PickSkill:
         collision = CollisionCheck(robot)
         grasp_check = GraspStabilityCheck(robot, world)
         ik = IKController(robot, collision)
-        trajectory = TrajectoryController(
-            robot, world, collision, motion_config
-        )
+        trajectory = TrajectoryController(robot, world, collision, motion_config)
         cartesian = CartesianController(
             robot,
             world,
@@ -130,9 +136,7 @@ class PickSkill:
             grasp_check,
             motion_config,
         )
-        context = PrimitiveContext(
-            robot, world, trajectory, cartesian, collision
-        )
+        context = PrimitiveContext(robot, world, trajectory, cartesian, collision)
         return cls(context, ik)
 
     async def execute(self, request: PickRequest) -> PickResult:
@@ -176,6 +180,7 @@ class PickSkill:
             candidate.grasp_axis,
             candidate.grasp_width,
         )
+        acquisition_object_t_tcp = held.object_t_tcp.copy()
         lift_tcp = state.tcp_world.copy()
         lift_tcp[:3, 3] += lift_direction * request.lift_distance
         retreat_result = await self._retreat.execute(
@@ -189,9 +194,7 @@ class PickSkill:
         )
         lifted_object = self._context.world.object_pose(request.object_id)
         actual_lift = float(
-            np.dot(
-                lifted_object[:3, 3] - initial_object[:3, 3], lift_direction
-            )
+            np.dot(lifted_object[:3, 3] - initial_object[:3, 3], lift_direction)
         )
         if actual_lift < request.lift_distance * 0.55:
             raise ExecutionError(
@@ -207,7 +210,7 @@ class PickSkill:
             candidate.grasp_axis,
             candidate.grasp_width,
         )
-        total_steps = sum(
+        control_iterations = sum(
             result.steps
             for result in (
                 move_result,
@@ -217,7 +220,104 @@ class PickSkill:
                 retreat_result,
             )
         )
-        return PickResult(held, total_steps, initial_object, lifted_object)
+        return PickResult(
+            held,
+            ExecutionMetrics(
+                control_iterations=control_iterations,
+                simulation_steps=control_iterations * 2,
+            ),
+            initial_object,
+            lifted_object,
+            acquisition_object_t_tcp,
+        )
+
+    async def execute_plan(self, plan: GraspPlan) -> PickResult:
+        """Execute the exact continuous IK branch selected by the planner.
+
+        Returns:
+            Held-object state and Pick execution metrics.
+        """
+        if plan.robot_id != self._context.robot.robot_id:
+            raise ValueError("grasp plan belongs to a different robot")
+        initial_object = self._context.world.object_pose(plan.object_id)
+        metrics = await self._execute_path(
+            plan.pregrasp, plan.grasp_width, closed=False, stage="pregrasp"
+        )
+        opened = await self._grasp.prepare(plan.grasp_width)
+        metrics += ExecutionMetrics(
+            control_iterations=opened.steps,
+            simulation_steps=opened.steps * 2,
+        )
+        metrics += await self._execute_path(
+            plan.approach,
+            plan.grasp_width,
+            closed=False,
+            stage="grasp_approach",
+        )
+        grasped = await self._grasp.execute(plan.grasp_width)
+        metrics += ExecutionMetrics(
+            control_iterations=grasped.steps,
+            simulation_steps=grasped.steps * 2,
+        )
+        state = self._context.robot.read_state()
+        grasped_object = self._context.world.object_pose(plan.object_id)
+        acquisition = np.linalg.inv(grasped_object) @ state.tcp_world
+        metrics += await self._execute_path(
+            plan.lift, plan.grasp_width, closed=True, stage="pick_lift"
+        )
+        lifted_object = self._context.world.object_pose(plan.object_id)
+        expected_lift = plan.lift.poses[-1][:3, 3] - plan.lift.poses[0][:3, 3]
+        actual_lift = lifted_object[:3, 3] - initial_object[:3, 3]
+        if float(np.dot(actual_lift, expected_lift)) < float(
+            np.dot(expected_lift, expected_lift) * 0.55
+        ):
+            raise ExecutionError(
+                FailureCode.SLIPPED,
+                "pick_lift",
+                "object did not follow the planned lift",
+            )
+        final_tcp = self._context.robot.read_state().tcp_world
+        settled = np.linalg.inv(lifted_object) @ final_tcp
+        return PickResult(
+            HeldObject(
+                plan.object_id,
+                plan.robot_id,
+                settled,
+                plan.grasp_axis,
+                plan.grasp_width,
+            ),
+            metrics,
+            initial_object,
+            lifted_object,
+            acquisition,
+        )
+
+    async def _execute_path(
+        self,
+        path: CartesianPath,
+        grasp_width: float,
+        closed: bool,
+        stage: str,
+    ) -> ExecutionMetrics:
+        """Command every preverified IK sample in one Cartesian path.
+
+        Returns:
+            Number of backend control cycles advanced.
+        """
+        waypoints = 0
+        for configuration in path.configurations[1:]:
+            command = self._context.robot.with_gripper(
+                configuration, grasp_width, closed
+            )
+            self._context.collision.require_safe(command, stage)
+            self._context.robot.command_configuration(command)
+            await self._context.world.advance(2)
+            waypoints += 1
+        return ExecutionMetrics(
+            waypoints=waypoints,
+            control_iterations=waypoints,
+            simulation_steps=waypoints * 2,
+        )
 
     def _select_candidate(
         self, request: PickRequest, lift_direction: FloatArray

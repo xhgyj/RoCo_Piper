@@ -455,7 +455,7 @@ async def run_gt_assembly_expert(
             f"target slipped during pre-trajectory calibration: "
             f"{initial_grasp_error}",
         )
-    alignment_reachable, _, _ = _alignment_rotation_hint(
+    alignment_reachable, alignment_rotation_hint, _ = _alignment_rotation_hint(
         env,
         prepared,
         runtime_config.max_alignment_rotation_step * 0.5,
@@ -496,6 +496,7 @@ async def run_gt_assembly_expert(
                 world_t_goal_tcp=prepared.world_t_goal_tcp,
                 insertion_direction_world=direction,
                 success_check=success_check,
+                alignment_rotation_hint_goal=alignment_rotation_hint,
                 approach_clearance=0.005,
                 insertion_distance=0.012,
                 insertion_step=0.0001,

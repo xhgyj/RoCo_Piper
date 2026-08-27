@@ -47,6 +47,34 @@ def pose_error(actual: FloatArray, target: FloatArray) -> tuple[float, float]:
     return position, rotation
 
 
+def _bounded_rotation_step(
+    current_rotation: FloatArray,
+    target_rotation: FloatArray,
+    max_step: float,
+    direction_hint_world: FloatArray | None = None,
+) -> FloatArray:
+    """Return one bounded rotation, resolving the pi branch from a hint."""
+    if max_step <= 0.0:
+        raise ValueError("max_step must be positive")
+    current = np.asarray(current_rotation, dtype=np.float64)
+    target = np.asarray(target_rotation, dtype=np.float64)
+    local_rotation = Rotation.from_matrix(current.T @ target).as_rotvec()
+    rotation_norm = float(np.linalg.norm(local_rotation))
+    if direction_hint_world is not None and rotation_norm >= np.deg2rad(170.0):
+        hint = np.asarray(direction_hint_world, dtype=np.float64)
+        if hint.shape != (3,) or not np.isfinite(hint).all():
+            raise ValueError("direction_hint_world must be a finite 3-vector")
+        hint_norm = float(np.linalg.norm(hint))
+        if hint_norm < 1e-9:
+            raise ValueError("direction_hint_world must be nonzero")
+        world_rotation = current @ local_rotation
+        if float(np.dot(world_rotation, hint / hint_norm)) < 0.0:
+            local_rotation *= -1.0
+    if rotation_norm > max_step:
+        local_rotation *= max_step / rotation_norm
+    return current @ Rotation.from_rotvec(local_rotation).as_matrix()
+
+
 class IKController:
     """Verified inverse-kinematics boundary for shared primitives."""
 
@@ -283,6 +311,11 @@ class CartesianController:
         grasp_width: float,
         closed: bool,
         tracking: GraspTracking | None = None,
+        allow_vertical_settling: bool = False,
+        rotation_step_limit: float | None = None,
+        max_vertical_drift: float | None = None,
+        rotation_direction_hint_world: FloatArray | None = None,
+        max_rotation_drift: float | None = None,
     ) -> OperationResult:
         """Execute one bounded Cartesian feedback step.
 
@@ -296,8 +329,37 @@ class CartesianController:
         target = np.asarray(world_t_tcp, dtype=np.float64)
         state = self._robot.read_state()
         if tracking is not None:
-            self._grasp_check.require_stable(tracking, stage)
-        q_target = self._ik.solve(target, state.q, stage)
+            self._grasp_check.require_stable(
+                tracking,
+                stage,
+                allow_vertical_settling,
+                max_vertical_drift,
+                max_rotation_drift,
+            )
+        incremental = state.tcp_world.copy()
+        translation = target[:3, 3] - state.tcp_world[:3, 3]
+        translation_norm = float(np.linalg.norm(translation))
+        translation_limit = (
+            self._config.translation_step_held
+            if closed
+            else self._config.translation_step
+        )
+        if translation_norm > translation_limit:
+            translation *= translation_limit / translation_norm
+        incremental[:3, 3] += translation
+        if rotation_step_limit is None:
+            rotation_limit = np.deg2rad(3.0 if closed else 5.0)
+        else:
+            if rotation_step_limit <= 0.0:
+                raise ValueError("rotation_step_limit must be positive")
+            rotation_limit = rotation_step_limit
+        incremental[:3, :3] = _bounded_rotation_step(
+            state.tcp_world[:3, :3],
+            target[:3, :3],
+            rotation_limit,
+            rotation_direction_hint_world,
+        )
+        q_target = self._ik.solve(incremental, state.q, stage)
         q_target = self._robot.with_gripper(
             q_target, grasp_width, closed=closed
         )
