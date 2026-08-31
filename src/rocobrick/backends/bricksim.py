@@ -184,15 +184,12 @@ class BrickSimRobotBackend:
         return self._tcp_world(np.asarray(q, dtype=np.float64))
 
     def command_configuration(self, q: FloatArray) -> None:
-        """Write one robot configuration into the global action vector."""
-        command = np.asarray(
-            self._env.get_observations()["joint_positions"], dtype=np.float32
-        ).copy()
-        start, _ = self._env.arm_joint_slices[self.robot_id]
+        """Write one configuration only to this robot's articulation."""
+        command = np.empty(len(self._joint_order), dtype=np.float32)
         for offset, joint_name in enumerate(self._joint_order):
             joint = self._joint(joint_name)
-            command[start + offset] = q[joint.idx_q]
-        self._env.robot_apply_action(command)
+            command[offset] = q[joint.idx_q]
+        self._env.robot_apply_arm_action(self._arm_index, command)
 
     def configuration_is_safe(self, q: FloatArray) -> bool:
         """Check finiteness and configured Pinocchio position limits.

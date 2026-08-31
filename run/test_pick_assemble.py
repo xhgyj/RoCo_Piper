@@ -51,6 +51,12 @@ def _arguments() -> argparse.Namespace:
         help="physics steps after optional target-yaw placement (default: 10)",
     )
     parser.add_argument(
+        "--final-hold-seconds",
+        type=float,
+        default=0.0,
+        help="keep the successful final scene visible before shutdown",
+    )
+    parser.add_argument(
         "--output",
         type=Path,
         help="optional JSON summary path",
@@ -148,6 +154,7 @@ async def _run_episode(
     arm_index: int,
     yaw_degrees: float | None,
     settle_steps: int,
+    final_hold_seconds: float,
 ):
     """Run one explicitly assigned Pick -> PlaceDown episode.
 
@@ -209,6 +216,13 @@ async def _run_episode(
             flush=True,
         )
         success = place.status is ActionStatus.SUCCESS
+    if success and final_hold_seconds > 0.0:
+        print(
+            f"[episode] holding final scene for {final_hold_seconds:.1f}s",
+            flush=True,
+        )
+        for _ in range(round(final_hold_seconds * 60)):
+            await env.step()
     return {
         "task_dir": str(task_dir),
         "arm_index": arm_index,
@@ -228,6 +242,8 @@ async def main() -> None:
     arm_indices = tuple(args.arm_index or [0])
     if args.settle_steps < 0:
         raise ValueError("settle-steps cannot be negative")
+    if args.final_hold_seconds < 0.0:
+        raise ValueError("final-hold-seconds cannot be negative")
 
     script_dir = Path(__file__).resolve().parent
     repository = script_dir.parent
@@ -266,6 +282,7 @@ async def main() -> None:
                             arm_index,
                             args.yaw_degrees,
                             args.settle_steps,
+                            args.final_hold_seconds,
                         )
                     except Exception as error:  # noqa: BLE001 -- batch diagnostics.
                         record = {

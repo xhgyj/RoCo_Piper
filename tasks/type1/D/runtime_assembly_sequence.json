@@ -1,0 +1,52 @@
+{
+  "schema": "rocobrick/bricksim_runtime_connection_sequence@1",
+  "preplaced_part_ids": [
+    0,
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7,
+    8,
+    9,
+    11,
+    12
+  ],
+  "to_place_part_ids": [
+    10
+  ],
+  "tasks": [
+    {
+      "task_index": 1,
+      "connection_id": 5,
+      "stud_part_id": 11,
+      "stud_path": "/World/managed/Parts/Part_10",
+      "stud_iface": 1,
+      "hole_part_id": 10,
+      "hole_path": "/World/managed/Parts/Part_12",
+      "hole_iface": 0,
+      "offset": [
+        2,
+        1
+      ],
+      "yaw": 1
+    },
+    {
+      "task_index": 2,
+      "connection_id": 11,
+      "stud_part_id": 12,
+      "stud_path": "/World/managed/Parts/Part_11",
+      "stud_iface": 1,
+      "hole_part_id": 10,
+      "hole_path": "/World/managed/Parts/Part_12",
+      "hole_iface": 0,
+      "offset": [
+        2,
+        -4
+      ],
+      "yaw": 1
+    }
+  ]
+}

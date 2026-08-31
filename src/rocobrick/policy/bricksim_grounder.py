@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
+
 import numpy as np
 
 from rocobrick.planning.models import (
@@ -18,6 +20,9 @@ from rocobrick.policy.gt_assembly import (
     compute_goal_brick_pose,
     resolve_single_step_task,
 )
+from rocobrick.policy.multi_arm_gt_assembly import (
+    resolve_single_step_task as resolve_sequence_task,
+)
 from rocobrick.skills.base_skill import ManipulationAction
 
 BRICK_STUD_PITCH = 0.008
@@ -27,9 +32,18 @@ BRICK_UNIT_HEIGHT = 0.0096
 class BrickSimActionGrounder:
     """Ground a one-step downward assembly without selecting an arm."""
 
-    def __init__(self, env):
-        """Bind the simulator environment used only for world geometry."""
+    def __init__(
+        self,
+        env,
+        target_id: int | None = None,
+        assembled_parts: Mapping[int, str] | None = None,
+    ):
+        """Bind world geometry and an optional sequence-selected target."""
         self._env = env
+        self._target_id = target_id
+        self._assembled_parts = (
+            None if assembled_parts is None else dict(assembled_parts)
+        )
 
     @staticmethod
     def assembly_goal_id(target_object_id: str) -> str:
@@ -48,7 +62,7 @@ class BrickSimActionGrounder:
         Returns:
             Geometry for Pick and, when requested, the downward assembly goal.
         """
-        task = resolve_single_step_task(self._env)
+        task = self._resolve_task()
         if action.object_id != task.target_path:
             raise ValueError(
                 "BrickSim action object must be the target prim path "
@@ -99,6 +113,22 @@ class BrickSimActionGrounder:
             _bricksim_success_check(task),
         )
         return GroundedAction(scene, goal)
+
+    def _resolve_task(self):
+        """Resolve the original task or the sequence-selected turn.
+
+        Returns:
+            Target-centric task consumed by BrickSim grounding.
+        """
+        if self._target_id is None:
+            return resolve_single_step_task(self._env)
+        if self._assembled_parts is None:
+            raise ValueError("sequence grounding requires assembled_parts")
+        return resolve_sequence_task(
+            self._env,
+            target_id=self._target_id,
+            assembled_parts=self._assembled_parts,
+        )
 
     def _target_geometry(self, object_id, pose, payload) -> ObjectGeometry:
         """Build separate collision and grasp frames for a BrickSim target.

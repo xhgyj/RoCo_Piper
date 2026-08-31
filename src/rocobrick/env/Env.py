@@ -639,6 +639,30 @@ class Env():
                     q_i[dof_map[jname]] = q_cmd[input_joint_orders.index(logical)]
 
             robot.apply_action(ArticulationAction(joint_positions=q_i))
+
+    def robot_apply_arm_action(self, arm_index, joint_positions):
+        """Apply an arm-local joint command without touching another robot."""
+        self._ensure_dof_maps()
+        if arm_index < 0 or arm_index >= len(self.robots):
+            raise ValueError(f"invalid arm index {arm_index}")
+        rc = self.robot_configs[arm_index]
+        joint_order = rc.get(
+            "Joint_Order", self.robot_pins[arm_index].controllable_joints
+        )
+        values = np.asarray(joint_positions, dtype=np.float32)
+        if values.shape != (len(joint_order),):
+            raise ValueError(
+                f"arm {arm_index} command has shape {values.shape}; "
+                f"expected {(len(joint_order),)}"
+            )
+        dof_map = self._arm_dof_maps[arm_index]
+        command = np.zeros(self.robot_pins[arm_index].nq, dtype=np.float32)
+        for offset, joint_name in enumerate(joint_order):
+            if joint_name in dof_map:
+                command[dof_map[joint_name]] = values[offset]
+        self.robots[arm_index].apply_action(
+            ArticulationAction(joint_positions=command)
+        )
         
     async def step(self):
         """
