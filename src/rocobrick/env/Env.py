@@ -66,6 +66,7 @@ class Env():
         self.topology, self.pre_placed_parts, self.to_place_placed = self.setup_task(self.task_config)
         await self.world.reset_async()
         self._validate_loose_parts_outside_baseplate()
+        self._validate_initial_loose_part_clearance()
         await self._initialize_cameras()
         self.apply_pose_offset_world("/World/Cube", 0, 0.3)
         await self.step()
@@ -115,13 +116,65 @@ class Env():
         to_place_not_placed = set(part['id'] for part in to_place_topology['parts']) - set(to_place_placed.keys())
         if len(to_place_not_placed) > 0:
             raise RuntimeError(f"Failed to place parts for assembly; not placed: {to_place_not_placed}")
-        arranged, not_arranged = arrange_parts_in_workspace(
-            workspace_path="/World/LegoWorkspace",
-            parts_to_arrange=[path for id, path in to_place_placed.items()],
+        initial_slots = self.config["Env_Config"].get(
+            "Initial_Loose_Part_Slots"
         )
-        if len(not_arranged) > 0:
-            raise RuntimeError(f"Failed to arrange all parts in workspace; not arranged: {not_arranged}")
+        if initial_slots is None:
+            arranged, not_arranged = arrange_parts_in_workspace(
+                workspace_path="/World/LegoWorkspace",
+                parts_to_arrange=[path for id, path in to_place_placed.items()],
+            )
+            if len(not_arranged) > 0:
+                raise RuntimeError(f"Failed to arrange all parts in workspace; not arranged: {not_arranged}")
+        else:
+            self._place_loose_parts_in_initial_slots(
+                to_place_placed, initial_slots
+            )
         return topology, pre_placed_parts, to_place_placed
+
+    def _place_loose_parts_in_initial_slots(self, parts, slots):
+        """Set all loose parts at their episode-configured pickup slots.
+
+        This runs during scene construction, before the first simulation step.
+        Consequently a part is never restaged or teleported before its pick.
+        """
+        if not isinstance(slots, dict):
+            raise ValueError("Initial_Loose_Part_Slots must be an object")
+        expected = {str(part_id) for part_id in parts}
+        if set(slots) != expected:
+            raise ValueError(
+                "Initial_Loose_Part_Slots must cover exactly the loose parts; "
+                f"expected {sorted(expected)}, got {sorted(slots)}"
+            )
+        for part_id, path in parts.items():
+            slot = slots[str(part_id)]
+            if not isinstance(slot, dict):
+                raise ValueError(f"initial slot for part {part_id} must be an object")
+            xy = slot.get("xy")
+            yaw_degrees = slot.get("yaw_degrees")
+            if (
+                not isinstance(xy, list)
+                or len(xy) != 2
+                or not all(isinstance(value, (int, float)) for value in xy)
+                or not isinstance(yaw_degrees, (int, float))
+            ):
+                raise ValueError(
+                    f"initial slot for part {part_id} requires numeric xy and yaw_degrees"
+                )
+            desired = with_planar_yaw(
+                self.get_prim_world_T(path), float(yaw_degrees)
+            )
+            desired[0, 3], desired[1, 3] = float(xy[0]), float(xy[1])
+            quaternion = Rotation.from_matrix(desired[:3, :3]).as_quat()
+            SingleXFormPrim(
+                prim_path=path, name=f"episode_initial_slot_{part_id}"
+            ).set_world_pose(
+                position=desired[:3, 3],
+                orientation=np.array(
+                    [quaternion[3], quaternion[0], quaternion[1], quaternion[2]],
+                    dtype=np.float64,
+                ),
+            )
 
     def _validate_loose_parts_outside_baseplate(self):
         """Reject loose targets whose footprint overlaps the base plate."""
@@ -153,6 +206,37 @@ class Env():
                     f"target {format_aabb(target_bounds)}; "
                     f"clearance={actual_clearance:.3f} m"
                 )
+
+    def _validate_initial_loose_part_clearance(self):
+        """Reject episode slots whose loose parts overlap at initialization."""
+        minimum_clearance = self.config["Env_Config"].get(
+            "Initial_Loose_Part_Clearance", 0.01
+        )
+        if (
+            not isinstance(minimum_clearance, (int, float))
+            or minimum_clearance < 0
+        ):
+            raise ValueError("Initial_Loose_Part_Clearance must be non-negative")
+        parts = {part["id"]: part for part in self.topology["parts"]}
+        bounds = {
+            part_id: footprint_aabb(
+                self.get_prim_world_T(path),
+                parts[part_id]["payload"]["L"],
+                parts[part_id]["payload"]["W"],
+            )
+            for part_id, path in self.to_place_placed.items()
+        }
+        part_ids = sorted(bounds)
+        for index, first_id in enumerate(part_ids):
+            for second_id in part_ids[index + 1 :]:
+                clearance = aabb_clearance(bounds[first_id], bounds[second_id])
+                if clearance < float(minimum_clearance):
+                    raise ValueError(
+                        "initial loose-part slots are too close: "
+                        f"parts {first_id} and {second_id} have "
+                        f"{clearance:.3f} m clearance, require "
+                        f"{float(minimum_clearance):.3f} m"
+                    )
 
     def set_loose_target_yaw(self, yaw_degrees):
         """Set the only loose target to an absolute continuous world yaw.

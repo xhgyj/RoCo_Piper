@@ -15,6 +15,13 @@ from rocobrick.planning.models import (
     SceneGeometry,
 )
 from rocobrick.planning.planners import AssemblyPlanner, GraspPlanner, PlannerConfig
+from rocobrick.planning.task_planner import (
+    AssemblyTask,
+    PlanningProblem,
+    TaskPlan,
+    TaskPlanner,
+    TopologyTaskPlanner,
+)
 
 __all__ = [
     "AssemblyGoal",
@@ -32,4 +39,9 @@ __all__ = [
     "ObjectGeometry",
     "PlannerConfig",
     "SceneGeometry",
+    "AssemblyTask",
+    "PlanningProblem",
+    "TaskPlan",
+    "TaskPlanner",
+    "TopologyTaskPlanner",
 ]

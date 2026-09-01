@@ -1,0 +1,48 @@
+{
+  "schema": "rocobrick/episode@1",
+  "episode_id": "task_d",
+  "scene": {
+    "system_config": "../../system_config.json",
+    "user_config": "../../user_config.json"
+  },
+  "task": {
+    "initial_structure": "../../../tasks/type1/D/structure_empty.json",
+    "goal_structure": "../../../tasks/type1/D/structure_goal.json"
+  },
+  "available_arms": ["piper_0", "piper_1"],
+  "robots": {
+    "piper_0": {
+      "base_position": [0.22, -0.40, 0.0],
+      "base_orientation": [0.70710678, 0.0, 0.0, 0.70710678]
+    },
+    "piper_1": {
+      "base_position": [-0.22, -0.40, 0.0],
+      "base_orientation": [0.70710678, 0.0, 0.0, 0.70710678]
+    }
+  },
+  "staging": {
+    "initial_yaw_degrees": 90.0,
+    "settle_steps": 30,
+    "workspace_size": [0.64, 0.34, 0.10],
+    "workspace_position": [0.0, 0.12, 0.05],
+    "arms": {
+      "piper_0": {
+        "parking_slots": [
+          [0.30, -0.17], [0.30, -0.09], [0.25, -0.17],
+          [0.25, -0.09], [0.1625, 0.005], [0.20, -0.17]
+        ]
+      },
+      "piper_1": {
+        "parking_slots": [
+          [-0.30, -0.17], [-0.30, -0.09], [-0.25, -0.17],
+          [-0.25, -0.09], [-0.1625, 0.005], [-0.20, -0.17]
+        ]
+      }
+    }
+  },
+  "execution": {
+    "shared_resource": "assembly_workspace",
+    "allow_prefetch": false,
+    "max_retries": 1
+  }
+}

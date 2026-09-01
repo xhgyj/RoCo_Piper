@@ -10,6 +10,32 @@ This establishes the default configuration for the BrickSim environment.
 ✅ **Modify this configuration as you see fit.**
 This file contains the customizable variables for your specific assembly task, robotic hardware, and spatial environment. 
 
+### 4. `episodes/<name>/episode.json`
+Defines one planner-driven simulation run. An episode references the shared
+scene configurations and task structures, declares the robot arms available to
+the upper planner, and supplies static simulator-only settings such as robot
+base overrides and staging locations. The planner receives the resulting
+topology and returns the assembly DAG in memory; it does not need to know
+about pickup points, safety resources, or BrickSim control actions.
+
+For a planned episode, `staging.arms.<arm>.parking_slots` are the loose
+bricks' initial pickup locations. During scene construction the runtime maps
+the planner's arm assignments to these slots; the corresponding arm later
+picks each brick directly from its original slot, without a second restaging
+teleport.
+
+`execution.allow_prefetch` controls whether the next task may pick while the
+previous task is still placing. Keep it `false` for layouts such as Task D,
+where a waiting arm or held brick can obstruct the shared assembly approach.
+Enable it only for episodes with independently validated safe pickup and
+holding regions.
+
+Run an episode through the single entry point:
+
+```bash
+uv run bricksim ./run/main.py --episode config/episodes/task_d/episode.json
+```
+
 #### Task Configuration (`Task_Config`)
 Defines the objectives and foundational setup of the current assembly task.
 * **`Task_Path`**: File path pointing to the specific task folder.

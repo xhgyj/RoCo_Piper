@@ -135,24 +135,19 @@ uv run bricksim ./run/demo_symbolic_assembly.py \
   --video-output ./symbolic_dense1.mp4
 ```
 
-Run the six-brick `dense1` goal from an empty plate with strict dual-arm
-alternation.  The default opens the Isaac Sim window and does not create a
-video:
+Run a complete planner-driven episode through the single BrickSim entry point:
 
 ```bash
-uv run python ./run/launch_dual_arm_dense1.py --show --no-save-video
-uv run python ./run/launch_dual_arm_dense1.py --show --save-video
-uv run python ./run/launch_dual_arm_dense1.py \
-  --headless --save-video --video-view assembly-close \
-  --video-output /tmp/dense1.mp4
+uv run bricksim ./run/main.py \
+  --episode config/episodes/task_d/episode.json \
+  --output /tmp/task_d_result.json
 ```
 
-The sequence is fixed to `piper_0, piper_1, ...`.  A turn begins only after
-the preceding arm has released, retreated, returned home, and preserved its
-BrickSim connection. Before assembly, every pickup pose must pass
-pregrasp/grasp/lift IK for its assigned arm. Saved video defaults to the
-1280x720 `assembly-close` global-camera view at 30 FPS. Pass
-`--video-view overview` to retain the original 960x540 full-scene framing.
+The episode loader builds a topology problem, calls the reference Python task
+planner, expands its immutable arm assignments into manipulation actions, and
+runs them with per-arm and shared-assembly resource synchronization. Task D
+retains the calibrated dual-Piper bases, pickup points, and parking slots in
+its episode configuration.
 
 Generated tasks are grouped as `tasks/type1/<family>/<sequence>/`, and every
 sequence directory contains only `structure_start.json` and

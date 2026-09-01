@@ -20,9 +20,7 @@ from rocobrick.policy.gt_assembly import (
     compute_goal_brick_pose,
     resolve_single_step_task,
 )
-from rocobrick.policy.multi_arm_gt_assembly import (
-    resolve_single_step_task as resolve_sequence_task,
-)
+from rocobrick.policy.task_grounding import resolve_planned_task
 from rocobrick.skills.base_skill import ManipulationAction
 
 BRICK_STUD_PITCH = 0.008
@@ -37,13 +35,13 @@ class BrickSimActionGrounder:
         env,
         target_id: int | None = None,
         assembled_parts: Mapping[int, str] | None = None,
+        connection_ids: tuple[int, ...] | None = None,
     ):
         """Bind world geometry and an optional sequence-selected target."""
         self._env = env
         self._target_id = target_id
-        self._assembled_parts = (
-            None if assembled_parts is None else dict(assembled_parts)
-        )
+        self._assembled_parts = assembled_parts
+        self._connection_ids = connection_ids
 
     @staticmethod
     def assembly_goal_id(target_object_id: str) -> str:
@@ -124,10 +122,13 @@ class BrickSimActionGrounder:
             return resolve_single_step_task(self._env)
         if self._assembled_parts is None:
             raise ValueError("sequence grounding requires assembled_parts")
-        return resolve_sequence_task(
+        if self._connection_ids is None:
+            raise ValueError("planned grounding requires connection_ids")
+        return resolve_planned_task(
             self._env,
             target_id=self._target_id,
             assembled_parts=self._assembled_parts,
+            connection_ids=self._connection_ids,
         )
 
     def _target_geometry(self, object_id, pose, payload) -> ObjectGeometry:
