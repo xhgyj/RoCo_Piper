@@ -1,0 +1,26 @@
+{
+  "1": {
+    "brick_id": 2,
+    "color": "Red",
+    "ori": 0,
+    "x": 1,
+    "y": 0,
+    "z": 0
+  },
+  "2": {
+    "brick_id": 9,
+    "color": "Dark Turquoise",
+    "ori": 0,
+    "x": 0,
+    "y": 4,
+    "z": 0
+  },
+  "3": {
+    "brick_id": 9,
+    "color": "Dark Turquoise",
+    "ori": 0,
+    "x": 4,
+    "y": 2,
+    "z": 0
+  }
+}
