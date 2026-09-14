@@ -1,0 +1,73 @@
+[
+    {
+        "Architecture": "amd64",
+        "Config": {
+            "Entrypoint": [
+                "/planner-entrypoint.sh"
+            ],
+            "Env": [
+                "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+                "LANG=C.UTF-8",
+                "LC_ALL=C.UTF-8",
+                "ROS_DISTRO=humble",
+                "DEBIAN_FRONTEND=noninteractive",
+                "LC_NUMERIC=C.UTF-8"
+            ],
+            "ExposedPorts": {
+                "50051/tcp": {}
+            },
+            "Labels": {
+                "org.opencontainers.image.version": "22.04"
+            },
+            "Shell": [
+                "/bin/bash",
+                "-o",
+                "pipefail",
+                "-c"
+            ],
+            "WorkingDir": "/workspace/planner_ws"
+        },
+        "Created": "2026-09-14T12:17:36.688906834+08:00",
+        "Descriptor": {
+            "digest": "sha256:6add8334e6b1ed02383951e48e4cf6a61a112bdcedd39999c5acbb1c8f730b05",
+            "mediaType": "application/vnd.oci.image.manifest.v1+json",
+            "size": 4239
+        },
+        "Id": "sha256:6add8334e6b1ed02383951e48e4cf6a61a112bdcedd39999c5acbb1c8f730b05",
+        "Metadata": {
+            "LastTagTime": "2026-09-14T04:17:37.183594687Z"
+        },
+        "Os": "linux",
+        "Parent": "sha256:acb030aba0df2bb4a173e01c59855bd4b7636d768e38b8f72e8211c6977fd70c",
+        "RepoDigests": [
+            "rocobrick-planner@sha256:6add8334e6b1ed02383951e48e4cf6a61a112bdcedd39999c5acbb1c8f730b05"
+        ],
+        "RepoTags": [
+            "rocobrick-planner:humble"
+        ],
+        "RootFS": {
+            "Layers": [
+                "sha256:c0359c5b6ede84d4a083d06d35ee77f0b338dfb17423771854d007d89953fb3e",
+                "sha256:af32f255b38fb8212ecf0357b2c36aecc9d0ad6ab1ec53cc6e6200900b3708c8",
+                "sha256:f7227b5951ecf5f80fef0137a98ce38be04549ca5193eb0e2d932394e9eb38bb",
+                "sha256:25316d3f120696294277461db551c3fc32d4d19f82a029c4d0a566526e79bdb2",
+                "sha256:ee9f08234041c955c583badbec1abdaa1392fb22e85c5c083c521bc163e4d4d0",
+                "sha256:41d2980e0fbf6449aef2f4a1bfd7f1969675b2e6581dad6a48c57a230777f4a7",
+                "sha256:df7acdfc062885331e8afbd29190a9cae0bc5f1420c786e8018a06d0552d023d",
+                "sha256:83e3f1047758983b96f4ace6dc692d8a57dcc96eef70e0e368d89a6c9b892071",
+                "sha256:c5b6593b118e035eb902eecadecc7cda0e4670493c6a9223cb139d9683b72327",
+                "sha256:f6aa38c717c34fc105aa38ff12d4864e0ee933e775e12c2c2d163229d72d3e8f",
+                "sha256:9f4e66149c6ed7f9146e52312bdd231cb13e988e0ac2364641a972e18e3540ce",
+                "sha256:be28eae65be4c9da98587ca3c9f30e6c41d3e33354b7de42d7269d4e74e646d7",
+                "sha256:c9984fdacc959ab8c0c5f80aa4f05aa6942dccd0bc70175a437e6ffd22db8924",
+                "sha256:f4057f13f084a6cfb8de2bb470c89e265b87607beb45d960c66d1d83e2f9b3be",
+                "sha256:275c8001568d295382dfcc807f20d6842488328277a83f04a2a943524c498bf4",
+                "sha256:bec46688b047ad616c968ecda43720157c145dad809e08e43d5c375e919abcf6",
+                "sha256:8b218aa8d660a29c433931a475f2ffd124ff4527f82e147639609720e4aaa559",
+                "sha256:0dfdccdf2be688ce5d0b45f0d883d64fab7d43e9f5f16ba4ee019bbd648a7e39"
+            ],
+            "Type": "layers"
+        },
+        "Size": 1145826102
+    }
+]

@@ -1,0 +1,6 @@
+{
+  "success": false,
+  "stage": "STARTUP",
+  "reason": "RuntimeError",
+  "message": "approach planning failed: PLANNING_FAILED: ('MoveIt did not find an admitted path',)"
+}

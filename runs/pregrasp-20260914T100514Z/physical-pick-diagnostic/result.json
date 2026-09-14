@@ -1,0 +1,6 @@
+{
+  "success": false,
+  "stage": "STARTUP",
+  "reason": "RuntimeError",
+  "message": "gripper closed without capturing the part: opening=1.1786747400321929e-06"
+}

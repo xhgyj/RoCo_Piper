@@ -1,0 +1,6 @@
+{
+  "success": false,
+  "stage": "STARTUP",
+  "reason": "RuntimeError",
+  "message": "lift start remained unstable after 8 fresh planning attempts"
+}

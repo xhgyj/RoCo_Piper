@@ -1,0 +1,19 @@
+{
+  "request_id": "assembly-plan-25a5d5cc586a1e5c65f2141d:approach:1",
+  "status": "PLANNING_FAILED",
+  "revisions": {
+    "world": 1,
+    "robot_state": 2,
+    "motion": 2
+  },
+  "required_resources": [],
+  "start_digest": "6bc0fde8c8044dee",
+  "goal_digest": "eeb0fb973dd5ad8d",
+  "scene_digest": "5554b4ecc8f047a7",
+  "collision_report": [
+    "MoveIt did not find an admitted path",
+    "target collision: ground <-> piper_0_gripper_link1",
+    "target collision: ground <-> piper_0_gripper_link2"
+  ],
+  "trajectory": null
+}

@@ -1,0 +1,6 @@
+{
+  "success": false,
+  "stage": "STARTUP",
+  "reason": "RuntimeError",
+  "message": "lift result stale because measured robot state changed"
+}

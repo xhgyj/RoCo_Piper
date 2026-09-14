@@ -30,7 +30,7 @@
                     "Wrist_Camera": {
                         "FPS": 30,
                         "Resolution": [640, 480],
-                        "Prim_Path": "/World/Robot_0/d435_camera_link/camera_link/camera_link/Camera"
+                        "Prim_Path": "/World/Robot_0/camera_link/Camera"
                     }
                 },
                 "Gripper_Config": {
@@ -63,7 +63,7 @@
                     "Wrist_Camera": {
                         "FPS": 30,
                         "Resolution": [640, 480],
-                        "Prim_Path": "/World/Robot_1/d435_camera_link/camera_link/camera_link/Camera"
+                        "Prim_Path": "/World/Robot_1/camera_link/Camera"
                     }
                 },
                 "Gripper_Config": {
@@ -87,5 +87,24 @@
             "Position": [0.0, 0, 0.05],
             "Orientation": [1.0, 0.0, 0.0, 0.0]
         }
+    },
+
+    "Manipulation_Config": {
+        "Pregrasp_Clearance": 0.17,
+        "Grasp_TCP_Top_Offset": -0.0053,
+        "Gripper_Open_Clearance": 0.015,
+        "Gripper_Position_Tolerance": 0.003,
+        "Minimum_Confirmed_Grasp_Opening": 0.005,
+        "Gripper_Stable_Delta": 0.0005,
+        "Gripper_Stable_Steps": 12,
+        "Holding_Relative_Tolerance": 0.01,
+        "Lift_Height": 0.10,
+        "Start_Tolerance_Rad": 0.02,
+        "State_Change_Tolerance_Rad": 0.0001,
+        "Maximum_Stale_Replans": 8,
+        "World_Change_Tolerance_M": 0.0001,
+        "Ground_Top_Z": -0.001,
+        "Ground_Thickness": 0.02,
+        "Ground_Size": [2.0, 2.0]
     }
 }

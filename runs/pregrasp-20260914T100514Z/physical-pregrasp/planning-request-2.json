@@ -1,0 +1,154 @@
+{
+  "request_id": "assembly-plan-25a5d5cc586a1e5c65f2141d:pregrasp:2",
+  "action": "PICK",
+  "robot_id": "piper_0",
+  "revisions": {
+    "world": "1",
+    "robot_state": "2"
+  },
+  "start": {
+    "names": [
+      "piper_0_joint1",
+      "piper_0_joint2",
+      "piper_0_joint3",
+      "piper_0_joint4",
+      "piper_0_joint5",
+      "piper_0_joint6"
+    ],
+    "positions": [
+      -4.6304597844937234e-07,
+      0.00033884530421346426,
+      -2.4090260922093876e-05,
+      0.0007202053675428033,
+      0.00014790242130402476,
+      2.380742671448388e-06
+    ]
+  },
+  "target": {
+    "frame_id": "world",
+    "position_m": [
+      -0.06799998879432678,
+      0.030000098049640656,
+      0.1812999612465501
+    ],
+    "orientation_xyzw": [
+      1.0,
+      0.0,
+      0.0,
+      0.0
+    ]
+  },
+  "objects": [
+    {
+      "object_id": "part:brick-4bbba49bec24496bb21e",
+      "pose": {
+        "frame_id": "world",
+        "position_m": [
+          -0.01599958032677368,
+          -0.19199981956445544,
+          0.008849760149383077
+        ],
+        "orientation_xyzw": [
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ]
+      },
+      "dimensions_m": [
+        0.03190004033099462,
+        0.015900008664644666,
+        0.011300122146716211
+      ]
+    },
+    {
+      "object_id": "part:brick-768de5a17827920c48d4",
+      "pose": {
+        "frame_id": "world",
+        "position_m": [
+          -0.06799998879432678,
+          0.030000098049640656,
+          0.00564996116310358
+        ],
+        "orientation_xyzw": [
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ]
+      },
+      "dimensions_m": [
+        0.03189999982714653,
+        0.01590000092983246,
+        0.011300000166893006
+      ]
+    },
+    {
+      "object_id": "ground",
+      "pose": {
+        "frame_id": "world",
+        "position_m": [
+          0.0,
+          0.0,
+          -0.011000000000000001
+        ],
+        "orientation_xyzw": [
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ]
+      },
+      "dimensions_m": [
+        2.0,
+        2.0,
+        0.02
+      ]
+    }
+  ],
+  "other_robot_remaining_motion": {},
+  "robots": [
+    {
+      "robot_id": "piper_0",
+      "joints": {
+        "names": [
+          "piper_0_joint1",
+          "piper_0_joint2",
+          "piper_0_joint3",
+          "piper_0_joint4",
+          "piper_0_joint5",
+          "piper_0_joint6"
+        ],
+        "positions": [
+          -4.6304597844937234e-07,
+          0.00033884530421346426,
+          -2.4090260922093876e-05,
+          0.0007202053675428033,
+          0.00014790242130402476,
+          2.380742671448388e-06
+        ]
+      }
+    },
+    {
+      "robot_id": "piper_1",
+      "joints": {
+        "names": [
+          "piper_1_joint1",
+          "piper_1_joint2",
+          "piper_1_joint3",
+          "piper_1_joint4",
+          "piper_1_joint5",
+          "piper_1_joint6"
+        ],
+        "positions": [
+          -4.630591945442575e-07,
+          0.00033884530421346426,
+          -2.409042281215079e-05,
+          0.0007202146225608885,
+          0.00014790463319513947,
+          2.3809757294657174e-06
+        ]
+      }
+    }
+  ]
+}

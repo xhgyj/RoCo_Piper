@@ -1,0 +1,6 @@
+{
+  "success": false,
+  "stage": "STARTUP",
+  "reason": "RuntimeError",
+  "message": "pregrasp playback failed: TRACKING_FAILED"
+}

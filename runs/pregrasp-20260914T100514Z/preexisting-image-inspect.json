@@ -1,0 +1,67 @@
+[
+    {
+        "Architecture": "amd64",
+        "Config": {
+            "Cmd": [
+                "bash"
+            ],
+            "Entrypoint": [
+                "/ros_entrypoint.sh"
+            ],
+            "Env": [
+                "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+                "LANG=C.UTF-8",
+                "LC_ALL=C.UTF-8",
+                "ROS_DISTRO=humble",
+                "DEBIAN_FRONTEND=noninteractive"
+            ],
+            "Labels": {
+                "org.opencontainers.image.version": "22.04"
+            },
+            "Shell": [
+                "/bin/bash",
+                "-c"
+            ],
+            "WorkingDir": "/workspace/ros_ws"
+        },
+        "Created": "2026-09-09T17:41:53.562763522+08:00",
+        "Descriptor": {
+            "digest": "sha256:e9a30fbc4058c215bba2fdc48f14b5f3734cf12c8239d89b811cf11fdae4f8e8",
+            "mediaType": "application/vnd.oci.image.manifest.v1+json",
+            "size": 3578
+        },
+        "Id": "sha256:e9a30fbc4058c215bba2fdc48f14b5f3734cf12c8239d89b811cf11fdae4f8e8",
+        "Metadata": {
+            "LastTagTime": "2026-09-09T09:41:53.954149196Z"
+        },
+        "Os": "linux",
+        "Parent": "sha256:6ba3201af96dffa60d4a057f43878b128022d87730aef20c77f799a59d5583ee",
+        "RepoDigests": [
+            "roco-piper-ros@sha256:e9a30fbc4058c215bba2fdc48f14b5f3734cf12c8239d89b811cf11fdae4f8e8"
+        ],
+        "RepoTags": [
+            "roco-piper-ros:humble"
+        ],
+        "RootFS": {
+            "Layers": [
+                "sha256:c0359c5b6ede84d4a083d06d35ee77f0b338dfb17423771854d007d89953fb3e",
+                "sha256:af32f255b38fb8212ecf0357b2c36aecc9d0ad6ab1ec53cc6e6200900b3708c8",
+                "sha256:f7227b5951ecf5f80fef0137a98ce38be04549ca5193eb0e2d932394e9eb38bb",
+                "sha256:25316d3f120696294277461db551c3fc32d4d19f82a029c4d0a566526e79bdb2",
+                "sha256:ee9f08234041c955c583badbec1abdaa1392fb22e85c5c083c521bc163e4d4d0",
+                "sha256:41d2980e0fbf6449aef2f4a1bfd7f1969675b2e6581dad6a48c57a230777f4a7",
+                "sha256:df7acdfc062885331e8afbd29190a9cae0bc5f1420c786e8018a06d0552d023d",
+                "sha256:83e3f1047758983b96f4ace6dc692d8a57dcc96eef70e0e368d89a6c9b892071",
+                "sha256:c5b6593b118e035eb902eecadecc7cda0e4670493c6a9223cb139d9683b72327",
+                "sha256:f6aa38c717c34fc105aa38ff12d4864e0ee933e775e12c2c2d163229d72d3e8f",
+                "sha256:9f4e66149c6ed7f9146e52312bdd231cb13e988e0ac2364641a972e18e3540ce",
+                "sha256:87e3a71adc7d26593ed47f25e9658cd69042ee93b7af21b492a595edc7cd2040",
+                "sha256:7863af3bbfad4b6f2818eb1e93f99fe05096357cfeebfbaad16712de68e0a74b",
+                "sha256:6ac1949586311c713ee5a95f2d252283ec123d0e9969fc212f599dd451700d3d",
+                "sha256:82afed45cb734c76f5fcc076d488053f8bfa8dfa4ef373667e7b563da499e54e"
+            ],
+            "Type": "layers"
+        },
+        "Size": 1118848243
+    }
+]

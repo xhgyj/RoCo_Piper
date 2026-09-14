@@ -1,0 +1,15 @@
+default_velocity_scaling_factor: 0.1
+default_acceleration_scaling_factor: 0.1
+joint_limits:
+  piper_0_joint1: {has_velocity_limits: true, max_velocity: 5.0, has_acceleration_limits: true, max_acceleration: 5.0}
+  piper_0_joint2: {has_velocity_limits: true, max_velocity: 5.0, has_acceleration_limits: true, max_acceleration: 5.0}
+  piper_0_joint3: {has_velocity_limits: true, max_velocity: 5.0, has_acceleration_limits: true, max_acceleration: 5.0}
+  piper_0_joint4: {has_velocity_limits: true, max_velocity: 5.0, has_acceleration_limits: true, max_acceleration: 5.0}
+  piper_0_joint5: {has_velocity_limits: true, max_velocity: 5.0, has_acceleration_limits: true, max_acceleration: 5.0}
+  piper_0_joint6: {has_velocity_limits: true, max_velocity: 5.0, has_acceleration_limits: true, max_acceleration: 5.0}
+  piper_1_joint1: {has_velocity_limits: true, max_velocity: 5.0, has_acceleration_limits: true, max_acceleration: 5.0}
+  piper_1_joint2: {has_velocity_limits: true, max_velocity: 5.0, has_acceleration_limits: true, max_acceleration: 5.0}
+  piper_1_joint3: {has_velocity_limits: true, max_velocity: 5.0, has_acceleration_limits: true, max_acceleration: 5.0}
+  piper_1_joint4: {has_velocity_limits: true, max_velocity: 5.0, has_acceleration_limits: true, max_acceleration: 5.0}
+  piper_1_joint5: {has_velocity_limits: true, max_velocity: 5.0, has_acceleration_limits: true, max_acceleration: 5.0}
+  piper_1_joint6: {has_velocity_limits: true, max_velocity: 5.0, has_acceleration_limits: true, max_acceleration: 5.0}

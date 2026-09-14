@@ -1,0 +1,153 @@
+{
+  "schema": "assembly-plan/v2",
+  "source": {
+    "goal_sha256": "483b9f1b0e889dd9d14c07f4d4c77e4127506b324843e8d059840108848247b9",
+    "start_sha256": "f97acb590a2c546a3b1ca3f9fcc36322bdddecd530a9b4c642047ac1575c942c"
+  },
+  "robots": [
+    {
+      "robot_id": "piper_0"
+    },
+    {
+      "robot_id": "piper_1"
+    }
+  ],
+  "planner": {
+    "name": "hierarchical-ltl-stap",
+    "core": "Hierarchical-LTL-STAP",
+    "cost": 4.1
+  },
+  "structural_semantics": {
+    "coordinate_system": "grid",
+    "position_unit": "stud/layer grid units",
+    "orientation": {
+      "encoding": "quarter_turn",
+      "values": [
+        0,
+        1
+      ],
+      "one_means": "one-quarter turn (footprint axis swap)"
+    },
+    "motion_geometry": "omitted"
+  },
+  "goal_structure": {
+    "instances": [
+      {
+        "physical_instance_id": "brick-4bbba49bec24496bb21e",
+        "brick_id": 2,
+        "x": 0,
+        "y": 0,
+        "z": 0,
+        "ori": 0,
+        "color": "Red",
+        "source_goal_key": "1",
+        "source_start_key": "1"
+      },
+      {
+        "physical_instance_id": "brick-768de5a17827920c48d4",
+        "brick_id": 2,
+        "x": 0,
+        "y": 0,
+        "z": 1,
+        "ori": 0,
+        "color": "Blue",
+        "source_goal_key": "2"
+      }
+    ]
+  },
+  "initial_structure": {
+    "facts": [
+      {
+        "fact_id": "assembled:brick-4bbba49bec24496bb21e",
+        "predicate": "assembled",
+        "physical_instance_id": "brick-4bbba49bec24496bb21e",
+        "source_start_key": "1"
+      }
+    ]
+  },
+  "parts": [
+    {
+      "physical_instance_id": "brick-768de5a17827920c48d4",
+      "brick_id": 2,
+      "x": 0,
+      "y": 0,
+      "z": 1,
+      "ori": 0,
+      "color": "Blue",
+      "source_goal_key": "2",
+      "task_id": "assemble-768de5a17827920c48d4",
+      "skill_type": "PLACE_DOWN",
+      "primary_robot": "piper_0",
+      "supporting_robot": null
+    }
+  ],
+  "dependencies": [],
+  "initial_dependencies": [
+    [
+      "brick-4bbba49bec24496bb21e",
+      "assemble-768de5a17827920c48d4"
+    ]
+  ],
+  "allocation": {
+    "piper_0": [
+      "assemble-768de5a17827920c48d4"
+    ],
+    "piper_1": []
+  },
+  "execution_layers": [
+    [
+      "assemble-768de5a17827920c48d4"
+    ]
+  ],
+  "planned_schedule": [
+    [
+      {
+        "robot": "piper_0",
+        "task": "assemble-768de5a17827920c48d4"
+      }
+    ]
+  ],
+  "specification": {
+    "type": "hierarchical-ltl",
+    "root_formula": "(<> p1a)",
+    "hierarchy": [
+      {
+        "p0": "(<> p1a)"
+      },
+      {
+        "p1a": "<> assemble1"
+      }
+    ]
+  },
+  "diagnostics": {
+    "parallel_candidates": [],
+    "specification_kind": "flat-ltl-baseline",
+    "dag_enforced_in_actions": false,
+    "metrics": {
+      "wall_time_seconds": 0.01338433101773262,
+      "makespan_steps": 1,
+      "assembly_actions": 1,
+      "peak_parallel_actions": 1,
+      "max_robot_task_load": 1,
+      "automata": {
+        "count": 2,
+        "total_states": 5,
+        "total_transitions": 3,
+        "max_states": 3,
+        "max_transitions": 2
+      }
+    },
+    "structure_difference": {
+      "goal_instances": 2,
+      "initial_instances": 1,
+      "pending_instances": 1,
+      "full_goal_dependencies": [
+        [
+          "brick-4bbba49bec24496bb21e",
+          "brick-768de5a17827920c48d4"
+        ]
+      ]
+    }
+  },
+  "plan_id": "assembly-plan-25a5d5cc586a1e5c65f2141d"
+}

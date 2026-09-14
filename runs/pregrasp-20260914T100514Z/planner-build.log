@@ -1,0 +1,57 @@
+DEPRECATED: The legacy builder is deprecated and will be removed in a future release.
+            Install the buildx component to build images with BuildKit:
+            https://docs.docker.com/go/buildx/
+
+Sending build context to Docker daemon  36.28MB
+Step 1/12 : FROM osrf/ros:humble-desktop-jammy
+ ---> c3eb3a8576b8
+Step 2/12 : SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+ ---> Using cache
+ ---> 42f08b2bcd7c
+Step 3/12 : ENV DEBIAN_FRONTEND=noninteractive LC_NUMERIC=C.UTF-8
+ ---> Using cache
+ ---> 7eb4b3c73b18
+Step 4/12 : RUN apt-get update && apt-get install -y --no-install-recommends     grpc-proto libgrpc++-dev libprotobuf-dev protobuf-compiler-grpc     python3-colcon-common-extensions     ros-humble-moveit     ros-humble-moveit-configs-utils     ros-humble-xacro     && rm -rf /var/lib/apt/lists/*
+ ---> Using cache
+ ---> 40f0d62824e8
+Step 5/12 : WORKDIR /workspace/planner_ws
+ ---> Using cache
+ ---> 16cebbf8221a
+Step 6/12 : COPY planner_ws/src ./src
+ ---> 3c2f72165ceb
+Step 7/12 : COPY planner_ws/UPSTREAM.json ./UPSTREAM.json
+ ---> 2ef391c365a9
+Step 8/12 : RUN source /opt/ros/humble/setup.bash &&     colcon build --merge-install --packages-select agx_arm_description &&     source install/setup.bash &&     xacro src/agx_arm_description/agx_arm_urdf/piper_l/urdf/piper_l_with_gripper_description.xacro       > /tmp/piper_l_gripper.urdf &&     python3 src/rocobrick_moveit_config/scripts/generate_dual_model.py       --single /tmp/piper_l_gripper.urdf       --urdf src/rocobrick_moveit_config/config/dual_piper.urdf       --srdf src/rocobrick_moveit_config/config/dual_piper.srdf &&     colcon build --merge-install
+ ---> Running in 928b7d29c43c
+Starting >>> agx_arm_description
+Finished <<< agx_arm_description [0.80s]
+
+Summary: 1 package finished [0.88s]
+Starting >>> agx_arm_description
+Starting >>> rocobrick_moveit_config
+Starting >>> rocobrick_planner
+Finished <<< agx_arm_description [0.05s]
+Starting >>> agx_arm_moveit
+Finished <<< rocobrick_moveit_config [0.39s]
+Finished <<< agx_arm_moveit [0.40s]
+Finished <<< rocobrick_planner [7.04s]
+
+Summary: 4 packages finished [7.13s]
+ ---> Removed intermediate container 928b7d29c43c
+ ---> f984fbd81a04
+Step 9/12 : COPY docker/planner-entrypoint.sh /planner-entrypoint.sh
+ ---> 02904cadeba5
+Step 10/12 : RUN chmod 0555 /planner-entrypoint.sh
+ ---> Running in fc4dd1a26f59
+ ---> Removed intermediate container fc4dd1a26f59
+ ---> d43fdb01aae0
+Step 11/12 : EXPOSE 50051
+ ---> Running in c956f088844c
+ ---> Removed intermediate container c956f088844c
+ ---> dd5badaff396
+Step 12/12 : ENTRYPOINT ["/planner-entrypoint.sh"]
+ ---> Running in 1c61772f5917
+ ---> Removed intermediate container 1c61772f5917
+ ---> c4d38e8ff8ea
+Successfully built c4d38e8ff8ea
+Successfully tagged rocobrick-planner:pregrasp-20260914T100514Z

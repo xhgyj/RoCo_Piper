@@ -1,0 +1,268 @@
+{
+  "valid": true,
+  "motion_commanded": false,
+  "robots": {
+    "piper_0": {
+      "root_path": "/World/Robot_0",
+      "articulation_root_paths": [
+        "/World/Robot_0/root_joint"
+      ],
+      "articulation_root": true,
+      "dof_names": [
+        "joint1",
+        "joint2",
+        "joint3",
+        "joint4",
+        "joint5",
+        "joint6",
+        "gripper_joint1",
+        "gripper_joint2"
+      ],
+      "joints": {
+        "joint1": {
+          "dof_present": true,
+          "joint_prim_paths": [
+            "/World/Robot_0/joints/joint1"
+          ],
+          "valid": true
+        },
+        "joint2": {
+          "dof_present": true,
+          "joint_prim_paths": [
+            "/World/Robot_0/joints/joint2"
+          ],
+          "valid": true
+        },
+        "joint3": {
+          "dof_present": true,
+          "joint_prim_paths": [
+            "/World/Robot_0/joints/joint3"
+          ],
+          "valid": true
+        },
+        "joint4": {
+          "dof_present": true,
+          "joint_prim_paths": [
+            "/World/Robot_0/joints/joint4"
+          ],
+          "valid": true
+        },
+        "joint5": {
+          "dof_present": true,
+          "joint_prim_paths": [
+            "/World/Robot_0/joints/joint5"
+          ],
+          "valid": true
+        },
+        "joint6": {
+          "dof_present": true,
+          "joint_prim_paths": [
+            "/World/Robot_0/joints/joint6"
+          ],
+          "valid": true
+        },
+        "gripper_joint1": {
+          "dof_present": true,
+          "joint_prim_paths": [
+            "/World/Robot_0/joints/gripper_joint1"
+          ],
+          "valid": true
+        },
+        "gripper_joint2": {
+          "dof_present": true,
+          "joint_prim_paths": [
+            "/World/Robot_0/joints/gripper_joint2"
+          ],
+          "valid": true
+        }
+      },
+      "arm_joints_complete": true,
+      "gripper_complete": true,
+      "tcp": {
+        "path": "/World/Robot_0/link6",
+        "valid": true
+      },
+      "cameras": {
+        "/World/Robot_0/camera_link/Camera": true
+      },
+      "collision_prim_paths": [
+        "/World/Robot_0/GroundPlane/CollisionPlane",
+        "/World/Robot_0/base_link/collisions/base_link/node_STL_BINARY_",
+        "/World/Robot_0/camera_link/collisions/mesh_0/box",
+        "/World/Robot_0/camera_stand_link/collisions/realsense_mid_stand/Scene",
+        "/World/Robot_0/gripper_base/collisions/gripper_base/node_STL_BINARY_",
+        "/World/Robot_0/gripper_link1/collisions/gripper_link1/node_STL_BINARY_",
+        "/World/Robot_0/gripper_link2/collisions/gripper_link2/node_STL_BINARY_",
+        "/World/Robot_0/link1/collisions/link1/node_STL_BINARY_",
+        "/World/Robot_0/link2/collisions/link2/node_STL_BINARY_",
+        "/World/Robot_0/link3/collisions/link3/node_STL_BINARY_",
+        "/World/Robot_0/link4/collisions/link4/node_STL_BINARY_",
+        "/World/Robot_0/link5/collisions/link5/node_STL_BINARY_",
+        "/World/Robot_0/link6/collisions/link6/node_STL_BINARY_"
+      ],
+      "disabled_collision_prim_paths": [
+        "/World/Robot_0/joints/camera_link_joint",
+        "/World/Robot_0/joints/camera_stand_joint",
+        "/World/Robot_0/joints/gripper_base_joint",
+        "/World/Robot_0/joints/gripper_joint1",
+        "/World/Robot_0/joints/gripper_joint2",
+        "/World/Robot_0/joints/joint1",
+        "/World/Robot_0/joints/joint2",
+        "/World/Robot_0/joints/joint3",
+        "/World/Robot_0/joints/joint4",
+        "/World/Robot_0/joints/joint5",
+        "/World/Robot_0/joints/joint6",
+        "/World/Robot_0/joints/world_to_base_link",
+        "/World/Robot_0/root_joint"
+      ],
+      "rigid_body_prim_paths": [
+        "/World/Robot_0/base_link",
+        "/World/Robot_0/camera_link",
+        "/World/Robot_0/camera_stand_link",
+        "/World/Robot_0/gripper_base",
+        "/World/Robot_0/gripper_link1",
+        "/World/Robot_0/gripper_link2",
+        "/World/Robot_0/link1",
+        "/World/Robot_0/link2",
+        "/World/Robot_0/link3",
+        "/World/Robot_0/link4",
+        "/World/Robot_0/link5",
+        "/World/Robot_0/link6",
+        "/World/Robot_0/world"
+      ],
+      "unresolved_assets": [],
+      "physical_model_complete": true
+    },
+    "piper_1": {
+      "root_path": "/World/Robot_1",
+      "articulation_root_paths": [
+        "/World/Robot_1/root_joint"
+      ],
+      "articulation_root": true,
+      "dof_names": [
+        "joint1",
+        "joint2",
+        "joint3",
+        "joint4",
+        "joint5",
+        "joint6",
+        "gripper_joint1",
+        "gripper_joint2"
+      ],
+      "joints": {
+        "joint1": {
+          "dof_present": true,
+          "joint_prim_paths": [
+            "/World/Robot_1/joints/joint1"
+          ],
+          "valid": true
+        },
+        "joint2": {
+          "dof_present": true,
+          "joint_prim_paths": [
+            "/World/Robot_1/joints/joint2"
+          ],
+          "valid": true
+        },
+        "joint3": {
+          "dof_present": true,
+          "joint_prim_paths": [
+            "/World/Robot_1/joints/joint3"
+          ],
+          "valid": true
+        },
+        "joint4": {
+          "dof_present": true,
+          "joint_prim_paths": [
+            "/World/Robot_1/joints/joint4"
+          ],
+          "valid": true
+        },
+        "joint5": {
+          "dof_present": true,
+          "joint_prim_paths": [
+            "/World/Robot_1/joints/joint5"
+          ],
+          "valid": true
+        },
+        "joint6": {
+          "dof_present": true,
+          "joint_prim_paths": [
+            "/World/Robot_1/joints/joint6"
+          ],
+          "valid": true
+        },
+        "gripper_joint1": {
+          "dof_present": true,
+          "joint_prim_paths": [
+            "/World/Robot_1/joints/gripper_joint1"
+          ],
+          "valid": true
+        },
+        "gripper_joint2": {
+          "dof_present": true,
+          "joint_prim_paths": [
+            "/World/Robot_1/joints/gripper_joint2"
+          ],
+          "valid": true
+        }
+      },
+      "arm_joints_complete": true,
+      "gripper_complete": true,
+      "tcp": {
+        "path": "/World/Robot_1/link6",
+        "valid": true
+      },
+      "cameras": {
+        "/World/Robot_1/camera_link/Camera": true
+      },
+      "collision_prim_paths": [
+        "/World/Robot_1/GroundPlane/CollisionPlane",
+        "/World/Robot_1/base_link/collisions/base_link/node_STL_BINARY_",
+        "/World/Robot_1/camera_link/collisions/mesh_0/box",
+        "/World/Robot_1/camera_stand_link/collisions/realsense_mid_stand/Scene",
+        "/World/Robot_1/gripper_base/collisions/gripper_base/node_STL_BINARY_",
+        "/World/Robot_1/gripper_link1/collisions/gripper_link1/node_STL_BINARY_",
+        "/World/Robot_1/gripper_link2/collisions/gripper_link2/node_STL_BINARY_",
+        "/World/Robot_1/link1/collisions/link1/node_STL_BINARY_",
+        "/World/Robot_1/link2/collisions/link2/node_STL_BINARY_",
+        "/World/Robot_1/link3/collisions/link3/node_STL_BINARY_",
+        "/World/Robot_1/link4/collisions/link4/node_STL_BINARY_",
+        "/World/Robot_1/link5/collisions/link5/node_STL_BINARY_",
+        "/World/Robot_1/link6/collisions/link6/node_STL_BINARY_"
+      ],
+      "disabled_collision_prim_paths": [
+        "/World/Robot_1/joints/camera_link_joint",
+        "/World/Robot_1/joints/camera_stand_joint",
+        "/World/Robot_1/joints/gripper_base_joint",
+        "/World/Robot_1/joints/gripper_joint1",
+        "/World/Robot_1/joints/gripper_joint2",
+        "/World/Robot_1/joints/joint1",
+        "/World/Robot_1/joints/joint2",
+        "/World/Robot_1/joints/joint3",
+        "/World/Robot_1/joints/joint4",
+        "/World/Robot_1/joints/joint5",
+        "/World/Robot_1/joints/joint6",
+        "/World/Robot_1/joints/world_to_base_link",
+        "/World/Robot_1/root_joint"
+      ],
+      "rigid_body_prim_paths": [
+        "/World/Robot_1/base_link",
+        "/World/Robot_1/camera_link",
+        "/World/Robot_1/camera_stand_link",
+        "/World/Robot_1/gripper_base",
+        "/World/Robot_1/gripper_link1",
+        "/World/Robot_1/gripper_link2",
+        "/World/Robot_1/link1",
+        "/World/Robot_1/link2",
+        "/World/Robot_1/link3",
+        "/World/Robot_1/link4",
+        "/World/Robot_1/link5",
+        "/World/Robot_1/link6",
+        "/World/Robot_1/world"
+      ],
+      "unresolved_assets": [],
+      "physical_model_complete": true
+    }
+  }
+}

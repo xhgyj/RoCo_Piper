@@ -1,0 +1,62 @@
+{
+  "valid": true,
+  "plan_id": "assembly-plan-25a5d5cc586a1e5c65f2141d",
+  "robots": {
+    "piper_0": {
+      "joints": [
+        -2.8771526672244363e-07,
+        0.0002263529459014535,
+        -2.4086373741738498e-05,
+        0.00047140210517682135,
+        9.596214658813551e-05,
+        1.514446125838731e-06
+      ],
+      "joint_names": [
+        "joint1",
+        "joint2",
+        "joint3",
+        "joint4",
+        "joint5",
+        "joint6"
+      ]
+    },
+    "piper_1": {
+      "joints": [
+        -2.877603719753097e-07,
+        0.00022635288769379258,
+        -2.4085718905553222e-05,
+        0.00047140743117779493,
+        9.5962910563685e-05,
+        1.5147132899073767e-06
+      ],
+      "joint_names": [
+        "joint1",
+        "joint2",
+        "joint3",
+        "joint4",
+        "joint5",
+        "joint6"
+      ]
+    }
+  },
+  "parts": {
+    "brick-4bbba49bec24496bb21e": {
+      "prim_path": "/World/managed/Parts/Part_1",
+      "position_m": [
+        -0.015999577939510345,
+        -0.19199985265731812,
+        0.003199751488864422
+      ]
+    },
+    "brick-768de5a17827920c48d4": {
+      "prim_path": "/World/managed/Parts/Part_2",
+      "position_m": [
+        -0.06799998879432678,
+        0.030000051483511925,
+        -4.563480615615845e-08
+      ]
+    }
+  },
+  "initial_connection_count": 1,
+  "goal_connection_count": 2
+}

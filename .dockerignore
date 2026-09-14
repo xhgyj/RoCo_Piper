@@ -1,0 +1,6 @@
+**
+!docker/
+!docker/planner.Dockerfile
+!docker/planner-entrypoint.sh
+!planner_ws/
+!planner_ws/**

@@ -1,0 +1,6 @@
+{
+  "success": false,
+  "stage": "STARTUP",
+  "reason": "RuntimeError",
+  "message": "lift planning failed: PLANNING_FAILED: ('MoveIt did not find an admitted path', 'target IK is collision-free; path search failed')"
+}
