@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!-- P1.A rootless-boundary Fast DDS gate: exactly ONE listening endpoint
+     exists across the rootless boundary (the host listener, fixed TCP 17650).
+     The generator renders this template into two roles:
+       - host-listener:  TCP server block (fixed listening port + wan_addr),
+                         no initialPeersList (it accepts container clients);
+       - container-client: NO TCP server block (client-only TCPv4, binds no
+                         port) plus an explicit initialPeersList locator at
+                         host-address:17650.
+     Shared-memory, UDP and multicast transports are all disabled. -->
+<profiles xmlns="http://www.eprosima.com/XMLSchemas/fastRTPS_Profiles">
+  <transport_descriptors>
+    <transport_descriptor>
+      <transport_id>rocobrick_tcp</transport_id>
+      <type>TCPv4</type>
+__TRANSPORT_SERVER__
+    </transport_descriptor>
+  </transport_descriptors>
+  <participant profile_name="__PROFILE_NAME__" is_default_profile="true">
+    <rtps>
+__PARTICIPANT_ID__
+      <useBuiltinTransports>false</useBuiltinTransports>
+      <userTransports><transport_id>rocobrick_tcp</transport_id></userTransports>
+      <builtin>
+        <discovery_config><discoveryProtocol>SIMPLE</discoveryProtocol></discovery_config>
+        <avoid_builtin_multicast>true</avoid_builtin_multicast>
+__INITIAL_PEER__
+      </builtin>
+    </rtps>
+  </participant>
+</profiles>

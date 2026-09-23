@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from enum import StrEnum
 
+from rocobrick.compat import StrEnum
 from rocobrick.models import ActionType, FailureReason, SkillType
 
 

@@ -1,0 +1,1154 @@
+{
+  "schema": "rocobrick-piper-l-tcp-binding-contract/v1",
+  "phase": "P0.4/R3",
+  "model": "agilex_piper_l",
+  "collected_date_utc": "2026-09-21",
+  "offline": true,
+  "inputs": {
+    "pinned_files": [
+      {
+        "path": "ros_ws/src/agx_arm_ros/src/agx_arm_description/agx_arm_urdf/piper_l/urdf/piper_l_description.urdf",
+        "sha256": "d289652c494017ca8d50152343fdbd02fd25c4f1ac3bb80d59d1f2f3cfab6fda",
+        "source": "repository checkout"
+      },
+      {
+        "path": "ros_ws/src/agx_arm_ros/src/agx_arm_description/agx_arm_urdf/piper_l/urdf/piper_l_with_gripper_description.xacro",
+        "sha256": "8136b85f30043421fffbde0299806e652ac283a28f5ce7485d52903eb4aa4c4c",
+        "source": "repository checkout"
+      },
+      {
+        "path": "isaac/vendor/agx_arm_sim/agx_arm_description/urdf/piper_l_gripper_d435.urdf",
+        "sha256": "8a5e4a77c53947e234f7f8a15db14e30ca85eb2c9f7ae3dc1784f07057626b0d",
+        "source": "repository checkout"
+      },
+      {
+        "path": "robot_assets/piper_l/USD/piper_l_gripper_d435.usd",
+        "sha256": "a781d52f9d55291fca9c8f2695abf9e311640d996314d272f47639d5323e2375",
+        "source": "repository checkout"
+      },
+      {
+        "path": "isaac/vendor/agx_arm_sim/Moveit2/piper_l_gripper_moveit_config/config/piper_l.srdf",
+        "sha256": "8f0610c725213e5d0e2765c2d27b1c39ed575149fa763113c137fa2a91eff33c",
+        "source": "repository checkout"
+      },
+      {
+        "path": "config/calibration/piper_l_tcp_source.json",
+        "sha256": "5dc84e3a49844b44fa55312c96cb7507238967c5360569a9a0114e444c2c6d49",
+        "source": "project calibration (live Isaac 5.1)"
+      },
+      {
+        "path": "artifacts/model-audit/piper_l_tcp_selector_discovery.json",
+        "sha256": "22955bdee22cc7248251be101457b4a9a4478d249b13ff5ed9d3982387f43d9c",
+        "source": "project calibration (live Isaac 5.1)"
+      },
+      {
+        "path": "artifacts/model-audit/piper_l_tcp_calibration.json",
+        "sha256": "4e342f2cdf6d34970d741a091a46e671aee2e6da67be4189136260068b19645d",
+        "source": "project calibration (live Isaac 5.1)"
+      }
+    ],
+    "local_files": [
+      {
+        "path": "config/user_config.json",
+        "sha256": "af41dbea5f50f861c985c572beac0f8d7336e13b8e311d9caf92d2d17fc919b4",
+        "role": "local calibration"
+      },
+      {
+        "path": "run/user_config.json",
+        "sha256": "a58401b8019752177282c3659088db2c66f1844bc381716dee2ea56c3dfd8d82",
+        "role": "older local copy"
+      },
+      {
+        "path": "run/pregrasp_v2.py",
+        "sha256": "4ad96b12a359d2d4a75210486fbb837f7ccebbbf0e9be1beb489a619aeaaed67",
+        "role": "legacy script"
+      }
+    ],
+    "example1_files": [
+      {
+        "path": "runs/example1-compound-pick-20260915T130000Z/generated-plan.json",
+        "sha256": "02b5f86513f1daaf6763b787c5a791b1acd0a7656e8cf0fb1e5420e623f9cae3",
+        "bytes": 3383
+      },
+      {
+        "path": "tasks/type1/example1/structure_start.json",
+        "sha256": "0f1e83e7d4f128c068a8aee259b6b7909db4220818a6a03bd84d7e8955e0d91c",
+        "bytes": 132
+      },
+      {
+        "path": "tasks/type1/example1/structure_goal.json",
+        "sha256": "dcc76bb2fb730c0ca28b2c0673beed24e09ba1ccf7f067298dcf2288a9a9f8d5",
+        "bytes": 263
+      }
+    ],
+    "repository_commits": {
+      "agx_arm_ros": "b9ad14de2a6eb818a2d206fbd1adba48343662f7",
+      "agx_arm_sim": "f8cd8b147c75d59e14f90fb0646770eefa268ed0",
+      "agx_arm_urdf_submodule_pin": "f6642ce0d7872c686f29c99e9e10cd23d1d49313",
+      "agx_arm_sim_agx_arm_urdf_gitlink": "1ee5659d02b33b9379fd647a2e5647800d67f0f4",
+      "source_artifact": {
+        "path": "artifacts/model-audit/piper_l_model_contract.json",
+        "schema": "rocobrick-piper-l-model-contract/v1"
+      }
+    }
+  },
+  "observed_frame_chain": {
+    "planning_urdf": [
+      {
+        "joint": "world_to_base_link",
+        "parent": "world",
+        "child": "base_link",
+        "xyz_m": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "rpy_rad": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "joint": "joint1",
+        "parent": "base_link",
+        "child": "link1",
+        "xyz_m": [
+          0.0,
+          0.0,
+          0.123
+        ],
+        "rpy_rad": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "joint": "joint2",
+        "parent": "link1",
+        "child": "link2",
+        "xyz_m": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "rpy_rad": [
+          1.5707963,
+          -0.1357866,
+          -3.1415926
+        ]
+      },
+      {
+        "joint": "joint3",
+        "parent": "link2",
+        "child": "link3",
+        "xyz_m": [
+          0.33823,
+          0.0,
+          0.0
+        ],
+        "rpy_rad": [
+          0.0,
+          0.0,
+          -1.7938494
+        ]
+      },
+      {
+        "joint": "joint4",
+        "parent": "link3",
+        "child": "link4",
+        "xyz_m": [
+          -0.02301,
+          -0.32075,
+          0.0
+        ],
+        "rpy_rad": [
+          1.5707963,
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "joint": "joint5",
+        "parent": "link4",
+        "child": "link5",
+        "xyz_m": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "rpy_rad": [
+          -1.5707963,
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "joint": "joint6",
+        "parent": "link5",
+        "child": "link6",
+        "xyz_m": [
+          0.0,
+          -0.091,
+          0.0
+        ],
+        "rpy_rad": [
+          1.5707963,
+          0.0,
+          0.0
+        ]
+      }
+    ],
+    "pinned_submodule_gripper_extension": [
+      {
+        "joint": "flange_joint",
+        "parent": "link6",
+        "child": "flange_link",
+        "xyz_m": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "type": "fixed"
+      },
+      {
+        "joint": "gripper_base_joint",
+        "parent": "flange_link",
+        "child": "gripper_base",
+        "xyz_m": [
+          0.0,
+          0.0,
+          0.0045
+        ],
+        "type": "fixed"
+      },
+      {
+        "joint": "gripper",
+        "parent": "gripper_base",
+        "child": "gripper_link",
+        "xyz_m": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "type": "prismatic",
+        "note": "logical master joint, child link has geometry placeholder"
+      },
+      {
+        "joint": "gripper_joint1",
+        "parent": "gripper_base",
+        "child": "gripper_link1",
+        "xyz_m": [
+          0.0,
+          0.0,
+          0.138
+        ],
+        "type": "prismatic"
+      },
+      {
+        "joint": "gripper_joint2",
+        "parent": "gripper_base",
+        "child": "gripper_link2",
+        "xyz_m": [
+          0.0,
+          0.0,
+          0.138
+        ],
+        "type": "prismatic"
+      }
+    ],
+    "runtime_vendor_urdf": [
+      {
+        "joint": "gripper_base_joint",
+        "parent": "link6",
+        "child": "gripper_base",
+        "xyz_m": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "type": "fixed",
+        "note": "flange_link does not exist in this model"
+      },
+      {
+        "joint": "gripper_joint1",
+        "parent": "gripper_base",
+        "child": "gripper_link1",
+        "xyz_m": [
+          0.0,
+          0.0,
+          0.1358
+        ],
+        "type": "prismatic"
+      },
+      {
+        "joint": "gripper_joint2",
+        "parent": "gripper_base",
+        "child": "gripper_link2",
+        "xyz_m": [
+          0.0,
+          0.0,
+          0.1358
+        ],
+        "type": "prismatic"
+      },
+      {
+        "joints": [
+          "camera_stand_joint",
+          "camera_joint",
+          "camera_link_joint",
+          "d435_camera_joint"
+        ],
+        "note": "d435 camera chain hangs off gripper_base; not a TCP"
+      }
+    ],
+    "usd_stage": "Mirrors the execution URDF link set; the model contract composed facts record no TCP or tool prim.",
+    "srdf": {
+      "arm_chain": {
+        "base_link": "base_link",
+        "tip_link": "link6"
+      },
+      "tool_group": null
+    }
+  },
+  "candidates": [
+    {
+      "frame": "link6",
+      "origin": "SRDF chain tip + local EE_Frames",
+      "declared_tool_frame": false
+    },
+    {
+      "frame": "flange_link",
+      "origin": "pinned submodule fixed joint",
+      "declared_tool_frame": false
+    },
+    {
+      "frame": "gripper_base",
+      "origin": "fixed joints in both pinned models",
+      "declared_tool_frame": false
+    },
+    {
+      "frame": "gripper_link",
+      "origin": "logical prismatic master child",
+      "declared_tool_frame": false
+    },
+    {
+      "frame": "gripper_link1",
+      "origin": "prismatic finger",
+      "declared_tool_frame": false
+    },
+    {
+      "frame": "gripper_link2",
+      "origin": "prismatic finger",
+      "declared_tool_frame": false
+    },
+    {
+      "frame": "python_tcp",
+      "origin": "historical runtime construct",
+      "declared_tool_frame": false
+    },
+    {
+      "frame": "legacy_tcp_link",
+      "origin": "legacy 0.1358 m assumption",
+      "declared_tool_frame": false
+    }
+  ],
+  "evidence": [
+    {
+      "id": "planning-urdf-arm-chain",
+      "kind": "pinned_geometry",
+      "classification": "pinned_geometry",
+      "source": "ros_ws/src/agx_arm_ros/src/agx_arm_description/agx_arm_urdf/piper_l/urdf/piper_l_description.urdf",
+      "source_sha256": "d289652c494017ca8d50152343fdbd02fd25c4f1ac3bb80d59d1f2f3cfab6fda",
+      "declared_tool_frame": false,
+      "joints": [
+        "world_to_base_link",
+        "joint1",
+        "joint2",
+        "joint3",
+        "joint4",
+        "joint5",
+        "joint6"
+      ],
+      "transforms": {
+        "world_to_base_link": {
+          "parent": "world",
+          "child": "base_link",
+          "xyz_m": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "rpy_rad": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "rotation_xyzw": [
+            0.0,
+            0.0,
+            0.0,
+            1.0
+          ]
+        },
+        "joint1": {
+          "parent": "base_link",
+          "child": "link1",
+          "xyz_m": [
+            0.0,
+            0.0,
+            0.123
+          ],
+          "rpy_rad": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "rotation_xyzw": [
+            0.0,
+            0.0,
+            0.0,
+            1.0
+          ]
+        },
+        "joint2": {
+          "parent": "link1",
+          "child": "link2",
+          "xyz_m": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "rpy_rad": [
+            1.5707963,
+            -0.1357866,
+            -3.1415926
+          ],
+          "rotation_xyzw": [
+            -0.04797092106238244,
+            -0.705477694515071,
+            -0.7054777108475203,
+            0.04797095758341025
+          ]
+        },
+        "joint3": {
+          "parent": "link2",
+          "child": "link3",
+          "xyz_m": [
+            0.33823,
+            0.0,
+            0.0
+          ],
+          "rpy_rad": [
+            0.0,
+            0.0,
+            -1.7938494
+          ],
+          "rotation_xyzw": [
+            0.0,
+            0.0,
+            -0.7814115713627777,
+            0.6240159902921996
+          ]
+        },
+        "joint4": {
+          "parent": "link3",
+          "child": "link4",
+          "xyz_m": [
+            -0.02301,
+            -0.32075,
+            0.0
+          ],
+          "rpy_rad": [
+            1.5707963,
+            0.0,
+            0.0
+          ],
+          "rotation_xyzw": [
+            0.707106771713121,
+            0.0,
+            0.0,
+            0.707106790659974
+          ]
+        },
+        "joint5": {
+          "parent": "link4",
+          "child": "link5",
+          "xyz_m": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "rpy_rad": [
+            -1.5707963,
+            0.0,
+            0.0
+          ],
+          "rotation_xyzw": [
+            -0.707106771713121,
+            0.0,
+            0.0,
+            0.707106790659974
+          ]
+        },
+        "joint6": {
+          "parent": "link5",
+          "child": "link6",
+          "xyz_m": [
+            0.0,
+            -0.091,
+            0.0
+          ],
+          "rpy_rad": [
+            1.5707963,
+            0.0,
+            0.0
+          ],
+          "rotation_xyzw": [
+            0.707106771713121,
+            0.0,
+            0.0,
+            0.707106790659974
+          ]
+        }
+      },
+      "note": "Official planning model chain world->base_link->link1..link6; the deepest arm link is link6 and no tool0/TCP frame is declared.",
+      "parent_frame": "link5",
+      "child_frame": "link6"
+    },
+    {
+      "id": "pinned-submodule-flange-joint",
+      "kind": "pinned_explicit_transform",
+      "classification": "pinned_explicit_transform",
+      "source": "ros_ws/src/agx_arm_ros/src/agx_arm_description/agx_arm_urdf/piper_l/urdf/piper_l_with_gripper_description.xacro",
+      "source_sha256": "8136b85f30043421fffbde0299806e652ac283a28f5ce7485d52903eb4aa4c4c",
+      "declared_tool_frame": false,
+      "parent_frame": "link6",
+      "child_frame": "flange_link",
+      "translation_m": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "rotation_xyzw": [
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ],
+      "note": "flange_link is fixed to link6 with identity transform in the pinned agx_arm_urdf submodule; the source does not designate it as a TCP."
+    },
+    {
+      "id": "pinned-submodule-gripper-base-joint",
+      "kind": "pinned_explicit_transform",
+      "classification": "pinned_explicit_transform",
+      "source": "ros_ws/src/agx_arm_ros/src/agx_arm_description/agx_arm_urdf/piper_l/urdf/piper_l_with_gripper_description.xacro",
+      "source_sha256": "8136b85f30043421fffbde0299806e652ac283a28f5ce7485d52903eb4aa4c4c",
+      "declared_tool_frame": false,
+      "parent_frame": "flange_link",
+      "child_frame": "gripper_base",
+      "translation_m": [
+        0.0,
+        0.0,
+        0.0045
+      ],
+      "rotation_xyzw": [
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ],
+      "note": "gripper_base sits +0.0045 m along flange_link Z (+0.0045 m from link6) in the pinned submodule; not designated as a TCP."
+    },
+    {
+      "id": "runtime-vendor-gripper-base-joint",
+      "kind": "pinned_explicit_transform",
+      "classification": "pinned_explicit_transform",
+      "source": "isaac/vendor/agx_arm_sim/agx_arm_description/urdf/piper_l_gripper_d435.urdf",
+      "source_sha256": "8a5e4a77c53947e234f7f8a15db14e30ca85eb2c9f7ae3dc1784f07057626b0d",
+      "declared_tool_frame": false,
+      "parent_frame": "link6",
+      "child_frame": "gripper_base",
+      "translation_m": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "rotation_xyzw": [
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ],
+      "note": "In the pinned agx_arm_sim execution URDF (byte-identical to robot_assets/piper_l/piper_l_gripper_d435.urdf) gripper_base sits directly at link6 with identity transform and flange_link does not exist; not designated as a TCP."
+    },
+    {
+      "id": "pinned-submodule-gripper-fingers",
+      "kind": "pinned_geometry",
+      "classification": "pinned_geometry",
+      "source": "ros_ws/src/agx_arm_ros/src/agx_arm_description/agx_arm_urdf/piper_l/urdf/piper_l_with_gripper_description.xacro",
+      "source_sha256": "8136b85f30043421fffbde0299806e652ac283a28f5ce7485d52903eb4aa4c4c",
+      "declared_tool_frame": false,
+      "parent_frame": "gripper_base",
+      "child_frame": "gripper_link1",
+      "translation_m": [
+        0.0,
+        0.0,
+        0.138
+      ],
+      "rotation_xyzw": [
+        0.707106771713121,
+        0.0,
+        0.0,
+        0.707106790659974
+      ],
+      "frames": {
+        "logical_master": {
+          "joint": "gripper",
+          "parent": "gripper_base",
+          "child": "gripper_link",
+          "type": "prismatic",
+          "xyz_m": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "opening_range_m": [
+            0.0,
+            0.1
+          ],
+          "child_link_has_geometry": true
+        },
+        "gripper_joint1": {
+          "xyz_m": [
+            0.0,
+            0.0,
+            0.138
+          ],
+          "rpy_rad": [
+            1.5707963,
+            0.0,
+            0.0
+          ],
+          "mimic": {
+            "joint": "gripper",
+            "multiplier": 0.5,
+            "offset": 0.0
+          }
+        },
+        "gripper_joint2": {
+          "xyz_m": [
+            0.0,
+            0.0,
+            0.138
+          ],
+          "rpy_rad": [
+            1.5707963,
+            0.0,
+            -3.1415926
+          ],
+          "mimic": {
+            "joint": "gripper",
+            "multiplier": -0.5,
+            "offset": 0.0
+          }
+        }
+      },
+      "note": "Finger origins at gripper_base +0.138 m in the pinned submodule. Finger frames are prismatic, so any finger-midpoint TCP would move with the gripper command; no fixed TCP is defined here."
+    },
+    {
+      "id": "pinned-submodule-gripper-logical-master",
+      "kind": "pinned_geometry",
+      "classification": "pinned_geometry",
+      "source": "ros_ws/src/agx_arm_ros/src/agx_arm_description/agx_arm_urdf/piper_l/urdf/piper_l_with_gripper_description.xacro",
+      "source_sha256": "8136b85f30043421fffbde0299806e652ac283a28f5ce7485d52903eb4aa4c4c",
+      "declared_tool_frame": false,
+      "parent_frame": "gripper_base",
+      "child_frame": "gripper_link",
+      "translation_m": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "rotation_xyzw": [
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ],
+      "note": "The logical master prismatic joint 'gripper' (range 0..0.1 m) moves its child gripper_link with the gripper command; the child link carries no collision or visual geometry and no TCP is declared on it. Present only in the pinned submodule."
+    },
+    {
+      "id": "runtime-vendor-gripper-finger2",
+      "kind": "pinned_geometry",
+      "classification": "pinned_geometry",
+      "source": "isaac/vendor/agx_arm_sim/agx_arm_description/urdf/piper_l_gripper_d435.urdf",
+      "source_sha256": "8a5e4a77c53947e234f7f8a15db14e30ca85eb2c9f7ae3dc1784f07057626b0d",
+      "declared_tool_frame": false,
+      "parent_frame": "gripper_base",
+      "child_frame": "gripper_link2",
+      "translation_m": [
+        0.0,
+        0.0,
+        0.1358
+      ],
+      "rotation_xyzw": [
+        1.8946852822626527e-08,
+        -0.7071067717131208,
+        -0.7071067906599737,
+        1.894685333030549e-08
+      ],
+      "note": "Second prismatic finger at gripper_base +0.1358 m in the execution URDF; prismatic and undeclared as a tool frame."
+    },
+    {
+      "id": "runtime-vendor-gripper-fingers",
+      "kind": "pinned_geometry",
+      "classification": "pinned_geometry",
+      "source": "isaac/vendor/agx_arm_sim/agx_arm_description/urdf/piper_l_gripper_d435.urdf",
+      "source_sha256": "8a5e4a77c53947e234f7f8a15db14e30ca85eb2c9f7ae3dc1784f07057626b0d",
+      "declared_tool_frame": false,
+      "parent_frame": "gripper_base",
+      "child_frame": "gripper_link1",
+      "translation_m": [
+        0.0,
+        0.0,
+        0.1358
+      ],
+      "rotation_xyzw": [
+        0.707106771713121,
+        0.0,
+        0.0,
+        0.707106790659974
+      ],
+      "frames": {
+        "gripper_joint1": {
+          "xyz_m": [
+            0.0,
+            0.0,
+            0.1358
+          ]
+        },
+        "gripper_joint2": {
+          "xyz_m": [
+            0.0,
+            0.0,
+            0.1358
+          ]
+        }
+      },
+      "note": "Finger origins at gripper_base +0.1358 m in the execution URDF (no mimic declarations); 2.2 mm shallower than the submodule."
+    },
+    {
+      "id": "srdf-arm-chain",
+      "kind": "pinned_geometry",
+      "classification": "pinned_geometry",
+      "source": "isaac/vendor/agx_arm_sim/Moveit2/piper_l_gripper_moveit_config/config/piper_l.srdf",
+      "source_sha256": "8f0610c725213e5d0e2765c2d27b1c39ed575149fa763113c137fa2a91eff33c",
+      "declared_tool_frame": false,
+      "parent_frame": "base_link",
+      "child_frame": "link6",
+      "frames": {
+        "arm_chain": {
+          "base_link": "base_link",
+          "tip_link": "link6"
+        },
+        "gripper_group_joints": [
+          "gripper_joint1",
+          "gripper_joint2"
+        ]
+      },
+      "note": "The official MoveIt SRDF ends the arm chain at link6 and defines no tool group or TCP frame."
+    },
+    {
+      "id": "usd-stage-frames",
+      "kind": "pinned_geometry",
+      "classification": "pinned_geometry",
+      "source": "robot_assets/piper_l/USD/piper_l_gripper_d435.usd",
+      "source_sha256": "a781d52f9d55291fca9c8f2695abf9e311640d996314d272f47639d5323e2375",
+      "declared_tool_frame": false,
+      "parent_frame": "link5",
+      "child_frame": "link6",
+      "note": "The USD stage (byte-identical to the vendor USD, model contract hash a781d52f...) mirrors the execution URDF link set including gripper_base and fingers plus the d435 camera chain; no TCP or tool prim is recorded in the model contract composed facts."
+    },
+    {
+      "id": "local-config-ee-frames",
+      "kind": "local_config",
+      "classification": "local_config",
+      "source": "config/user_config.json",
+      "source_sha256": "af41dbea5f50f861c985c572beac0f8d7336e13b8e311d9caf92d2d17fc919b4",
+      "declared_tool_frame": false,
+      "values": {
+        "EE_Frames": [
+          "link6"
+        ],
+        "robots": [
+          "piper_0",
+          "piper_1"
+        ]
+      },
+      "note": "EE_Frames=['link6'] is a local fork selection that aims IK at link6; it selects an existing link and does not designate a documented official TCP."
+    },
+    {
+      "id": "local-config-grasp-offsets",
+      "kind": "local_config",
+      "classification": "local_config",
+      "source": "config/user_config.json",
+      "source_sha256": "af41dbea5f50f861c985c572beac0f8d7336e13b8e311d9caf92d2d17fc919b4",
+      "declared_tool_frame": false,
+      "values": {
+        "Pregrasp_Clearance": 0.17,
+        "Grasp_TCP_Top_Offset": -0.0053,
+        "Gripper_Open_Clearance": 0.015,
+        "Holding_Relative_Tolerance": 0.01
+      },
+      "note": "Locally tuned manipulation offsets named 'TCP' by convention; they are not documented official TCP parameters and cannot resolve the TCP claim."
+    },
+    {
+      "id": "run-config-older-copy",
+      "kind": "local_config",
+      "classification": "local_config",
+      "source": "run/user_config.json",
+      "source_sha256": "a58401b8019752177282c3659088db2c66f1844bc381716dee2ea56c3dfd8d82",
+      "declared_tool_frame": false,
+      "values": {
+        "has_grasp_tcp_top_offset": false,
+        "differs_from_config_copy": true
+      },
+      "note": "The older run/user_config.json copy lacks the grasp offset keys entirely, demonstrating the offsets are mutable local tuning and not pinned model truth."
+    },
+    {
+      "id": "historical-python-tcp-frame",
+      "kind": "historical_runtime",
+      "classification": "historical_runtime",
+      "source": "runs/example1-compound-pick-20260915T130000Z/tcp-closed-loop/events.jsonl",
+      "source_sha256": "25acef85d11dd19bd5ab5d53ce68254d11028cb55380b7ec43bd1dc033108724",
+      "declared_tool_frame": false,
+      "parent_frame": "link6",
+      "child_frame": "python_tcp",
+      "translation_m": [
+        0.0,
+        0.0,
+        0.1358
+      ],
+      "rotation_xyzw": [
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ],
+      "measured_world": {
+        "link6_position_m": [
+          0.2500000298023224,
+          -0.1768515259027481,
+          0.22751113772392273
+        ],
+        "link6_orientation_xyzw": [
+          -0.47759617490904677,
+          0.4784418753784305,
+          0.5215148722207877,
+          0.5205934149114384
+        ],
+        "python_tcp_position_m": [
+          0.2500000791273435,
+          -0.04155453530946063,
+          0.23918865185996407
+        ],
+        "python_tcp_orientation_xyzw": [
+          -0.47759617490904677,
+          0.4784418753784305,
+          0.5215148722207877,
+          0.5205934149114384
+        ]
+      },
+      "note": "Historical runtime construct: 'python_tcp' was computed in-process as link6 position + 0.1358 m along link6 local Z; it is run evidence of the legacy assumption, never an official frame."
+    },
+    {
+      "id": "historical-approach-target",
+      "kind": "historical_runtime",
+      "classification": "historical_runtime",
+      "source": "runs/example1-compound-pick-20260915T130000Z/tcp-closed-loop/approach-planning-request.json",
+      "source_sha256": "e48b31f7947c5b73ae1d5242afaf75e297bb6b83d1977c512680e0a3b06bedcf",
+      "declared_tool_frame": false,
+      "values": {
+        "request_id": "assembly-plan-25a5d5cc586a1e5c65f2141d:approach:1",
+        "robot_id": "piper_0",
+        "target_frame_id": "world",
+        "target_position_m": [
+          -0.06799993891172629,
+          0.03000020729933447,
+          0.005999995099784771
+        ],
+        "target_orientation_xyzw": [
+          1.0,
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      "note": "Historical approach request whose target applied the local Grasp_TCP_Top_Offset on top of a measured part AABB; recorded as evidence of local offset usage, not of an official TCP."
+    },
+    {
+      "id": "legacy-pregrasp-01358-offset",
+      "kind": "legacy_assumption",
+      "classification": "legacy_assumption",
+      "source": "run/pregrasp_v2.py",
+      "source_sha256": "4ad96b12a359d2d4a75210486fbb837f7ccebbbf0e9be1beb489a619aeaaed67",
+      "declared_tool_frame": false,
+      "parent_frame": "link6",
+      "child_frame": "legacy_tcp_link",
+      "translation_m": [
+        0.0,
+        0.0,
+        0.1358
+      ],
+      "rotation_xyzw": [
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ],
+      "lines": {
+        "412": "return tuple(float(value) for value in np.asarray(position) + 0.1358 * local_z)"
+      },
+      "note": "Local legacy assumption, not official truth: run/pregrasp_v2.py hardcodes link6 position + 0.1358 m along link6 local Z as the grasp TCP. The value coincides with the execution-URDF finger origin z=0.1358 (gripper_base sits at link6 identity there), so it is finger-origin geometry reused as a TCP; the pinned submodule's own geometry gives 0.0045 + 0.138 = 0.1425 m from link6, so no single official number validates this offset."
+    },
+    {
+      "id": "project-calibration-link6-rocobrick-tcp",
+      "kind": "project_calibration",
+      "classification": "project_calibration",
+      "source": "artifacts/model-audit/piper_l_tcp_calibration.json",
+      "source_sha256": "4e342f2cdf6d34970d741a091a46e671aee2e6da67be4189136260068b19645d",
+      "declared_tool_frame": true,
+      "passed": true,
+      "method": "symmetric-opposed-contact-patch-centroids",
+      "scope": "runtime_model_hash",
+      "hardware_validated": false,
+      "parent_frame": "link6",
+      "child_frame": "rocobrick_tcp",
+      "translation_m": [
+        -2.189439796129733e-09,
+        -1.8041124150158794e-16,
+        0.06300922673030293
+      ],
+      "rotation_xyzw": [
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ],
+      "runtime_model_sha256": "a781d52f9d55291fca9c8f2695abf9e311640d996314d272f47639d5323e2375",
+      "selector_source": "config/calibration/piper_l_tcp_source.json",
+      "selector_source_sha256": "5dc84e3a49844b44fa55312c96cb7507238967c5360569a9a0114e444c2c6d49",
+      "selector_artifact": "artifacts/model-audit/piper_l_tcp_selector_discovery.json",
+      "selector_artifact_sha256": "22955bdee22cc7248251be101457b4a9a4478d249b13ff5ed9d3982387f43d9c",
+      "selector_checks_passed": true,
+      "calibration_authority": "project",
+      "simulation_only": true,
+      "runtime_usd_scoped": true,
+      "isaac_sim_version": "5.1",
+      "note": "LIVE headless Isaac Sim 5.1 project calibration of the CURRENT runtime USD only (hash a781d52f...): TCP = midpoint of the area-weighted centroids of the two opposed distal finger contact patches (USD faces [2..8] of gripper_link1/gripper_link2 collision meshes), 15 samples (3 arm poses x 5 openings), all mandatory gates passed. Project authority only: simulation-only, never hardware validated, never an official/hardware TCP; scoped to this exact runtime model hash."
+    }
+  ],
+  "explicit_frame_comparisons": {
+    "link6": {
+      "present_in": [
+        "ros_ws/src/agx_arm_ros/src/agx_arm_description/agx_arm_urdf/piper_l/urdf/piper_l_description.urdf",
+        "isaac/vendor/agx_arm_sim/agx_arm_description/urdf/piper_l_gripper_d435.urdf",
+        "robot_assets/piper_l/piper_l_gripper_d435.urdf",
+        "isaac/vendor/agx_arm_sim/Moveit2/piper_l_gripper_moveit_config/config/piper_l.srdf",
+        "robot_assets/piper_l/USD/piper_l_gripper_d435.usd"
+      ],
+      "role": "Deepest arm link; SRDF chain tip and local EE_Frames selection. Both pinned URDFs define joint6 identically (xyz 0 -0.091 0, rpy 1.5707963 0 0). link6 itself is a link frame, not a declared TCP."
+    },
+    "flange_link": {
+      "present_in": [
+        "ros_ws/src/agx_arm_ros/src/agx_arm_description/agx_arm_urdf/piper_l/urdf/piper_l_with_gripper_description.xacro"
+      ],
+      "transform_from_link6_m": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "role": "Exists only in the pinned agx_arm_urdf submodule, fixed to link6 with identity. Absent from the execution URDF/USD."
+    },
+    "gripper_base": {
+      "present_in": [
+        "ros_ws/src/agx_arm_ros/src/agx_arm_description/agx_arm_urdf/piper_l/urdf/piper_l_with_gripper_description.xacro",
+        "isaac/vendor/agx_arm_sim/agx_arm_description/urdf/piper_l_gripper_d435.urdf",
+        "robot_assets/piper_l/piper_l_gripper_d435.urdf"
+      ],
+      "transform_from_link6_m_submodule": [
+        0.0,
+        0.0,
+        0.0045
+      ],
+      "transform_from_link6_m_runtime": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "role": "Explicit fixed transforms in both pinned sources disagree by 4.5 mm (submodule: flange_link +0.0045; execution URDF: identity from link6). Neither source designates gripper_base as a TCP, so this is recorded divergence between intermediate frames, not a TCP conflict."
+    },
+    "gripper_finger_frames": {
+      "present_in": [
+        "ros_ws/src/agx_arm_ros/src/agx_arm_description/agx_arm_urdf/piper_l/urdf/piper_l_with_gripper_description.xacro",
+        "isaac/vendor/agx_arm_sim/agx_arm_description/urdf/piper_l_gripper_d435.urdf",
+        "robot_assets/piper_l/piper_l_gripper_d435.urdf"
+      ],
+      "origin_from_gripper_base_m_submodule": 0.138,
+      "origin_from_gripper_base_m_runtime": 0.1358,
+      "link6_to_finger_origin_m_submodule": 0.1425,
+      "link6_to_finger_origin_m_runtime": 0.1358,
+      "role": "Prismatic finger frames gripper_link1/gripper_link2 (and the logical master child gripper_link, submodule only). Their origins differ by 2.2 mm between pinned sources and they move with the gripper command, so no fixed TCP can be defined on them."
+    },
+    "legacy_01358_m_offset": {
+      "value_m": 0.1358,
+      "classification": "legacy_assumption",
+      "sources": [
+        "run/pregrasp_v2.py",
+        "runs/example1-compound-pick-20260915T130000Z/tcp-closed-loop/events.jsonl"
+      ],
+      "comparison": "The legacy TCP equals the execution-URDF finger origin z=0.1358 from gripper_base (which is identity from link6 in that model), i.e. 0.1358 m from link6; the pinned submodule geometry gives 0.1425 m from link6. The offset is therefore local legacy assumption reuse of one model's finger geometry, not an official TCP parameter, and cannot resolve the TCP."
+    }
+  },
+  "tcp_contract": {
+    "robot_model": "agilex_piper_l",
+    "status": "RESOLVED",
+    "transform": {
+      "parent_frame": "link6",
+      "child_frame": "rocobrick_tcp",
+      "translation_m": [
+        -2.189439796129733e-09,
+        -1.8041124150158794e-16,
+        0.06300922673030293
+      ],
+      "rotation_xyzw": [
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ],
+      "source": "artifacts/model-audit/piper_l_tcp_calibration.json",
+      "sha256": "4e342f2cdf6d34970d741a091a46e671aee2e6da67be4189136260068b19645d"
+    },
+    "candidate_frames": [
+      "link6",
+      "flange_link",
+      "gripper_base",
+      "gripper_link1",
+      "gripper_link",
+      "gripper_link2",
+      "python_tcp",
+      "legacy_tcp_link",
+      "rocobrick_tcp"
+    ],
+    "evidence": [
+      "planning-urdf-arm-chain",
+      "pinned-submodule-flange-joint",
+      "pinned-submodule-gripper-base-joint",
+      "runtime-vendor-gripper-base-joint",
+      "pinned-submodule-gripper-fingers",
+      "pinned-submodule-gripper-logical-master",
+      "runtime-vendor-gripper-finger2",
+      "runtime-vendor-gripper-fingers",
+      "srdf-arm-chain",
+      "usd-stage-frames",
+      "local-config-ee-frames",
+      "local-config-grasp-offsets",
+      "run-config-older-copy",
+      "historical-python-tcp-frame",
+      "historical-approach-target",
+      "legacy-pregrasp-01358-offset",
+      "project-calibration-link6-rocobrick-tcp"
+    ],
+    "blockers": []
+  },
+  "example1_binding": {
+    "accepted": true,
+    "reason": "task assemble-768de5a17827920c48d4 is the plan's single pending PLACE_DOWN task, allocated exactly to piper_0, and bound to the exact supplied task structure bytes",
+    "plan_id": "assembly-plan-25a5d5cc586a1e5c65f2141d",
+    "task_id": "assemble-768de5a17827920c48d4",
+    "physical_instance_id": "brick-768de5a17827920c48d4",
+    "brick_id": 2,
+    "robot_id": "piper_0",
+    "source_goal_key": "2",
+    "grid_xyz": [
+      0,
+      0,
+      1
+    ],
+    "orientation_quarter_turns": 0,
+    "color": "Blue",
+    "motion_geometry": "omitted",
+    "plan_sha256": "02b5f86513f1daaf6763b787c5a791b1acd0a7656e8cf0fb1e5420e623f9cae3",
+    "task_start_sha256": "0f1e83e7d4f128c068a8aee259b6b7909db4220818a6a03bd84d7e8955e0d91c",
+    "task_goal_sha256": "dcc76bb2fb730c0ca28b2c0673beed24e09ba1ccf7f067298dcf2288a9a9f8d5",
+    "binding_requires_tcp": true,
+    "plan_file": "runs/example1-compound-pick-20260915T130000Z/generated-plan.json",
+    "task_start_file": "tasks/type1/example1/structure_start.json",
+    "task_goal_file": "tasks/type1/example1/structure_goal.json",
+    "canonical_task_sha256": {
+      "start": "f97acb590a2c546a3b1ca3f9fcc36322bdddecd530a9b4c642047ac1575c942c",
+      "goal": "483b9f1b0e889dd9d14c07f4d4c77e4127506b324843e8d059840108848247b9"
+    },
+    "plan_source_sha256": {
+      "start": "f97acb590a2c546a3b1ca3f9fcc36322bdddecd530a9b4c642047ac1575c942c",
+      "goal": "483b9f1b0e889dd9d14c07f4d4c77e4127506b324843e8d059840108848247b9"
+    },
+    "plan_immutability": {
+      "input_sha256_before": {
+        "plan": "02b5f86513f1daaf6763b787c5a791b1acd0a7656e8cf0fb1e5420e623f9cae3",
+        "task_start": "0f1e83e7d4f128c068a8aee259b6b7909db4220818a6a03bd84d7e8955e0d91c",
+        "task_goal": "dcc76bb2fb730c0ca28b2c0673beed24e09ba1ccf7f067298dcf2288a9a9f8d5"
+      },
+      "input_sha256_after": {
+        "plan": "02b5f86513f1daaf6763b787c5a791b1acd0a7656e8cf0fb1e5420e623f9cae3",
+        "task_start": "0f1e83e7d4f128c068a8aee259b6b7909db4220818a6a03bd84d7e8955e0d91c",
+        "task_goal": "dcc76bb2fb730c0ca28b2c0673beed24e09ba1ccf7f067298dcf2288a9a9f8d5"
+      },
+      "before_equals_after": true
+    },
+    "selected_robot": "piper_0",
+    "pending_task_ids": [
+      "assemble-768de5a17827920c48d4"
+    ],
+    "allocation": {
+      "piper_0": [
+        "assemble-768de5a17827920c48d4"
+      ],
+      "piper_1": []
+    },
+    "tcp_note": "recorded before TCP resolution; the TCP gate for this binding now resolves via the project calibration (project authority, simulation-only, runtime-USD-scoped)"
+  },
+  "tcp_execution_allowed": true,
+  "checks": {
+    "pinned_input_hashes_match_disk": true,
+    "repository_commits_match_model_contract": true,
+    "runtime_vendor_urdf_byte_identical": true,
+    "tcp_status_consistent_with_strict_rule": true,
+    "tcp_unresolved_or_conflict_records_blockers": true,
+    "tcp_transform_present_iff_resolved": true,
+    "tcp_execution_allowed_iff_resolved": true,
+    "example1_binding_accepted": true,
+    "example1_binding_matches_parser": true,
+    "example1_plan_bytes_immutable": true,
+    "example1_plan_sha256_matches_bytes": true,
+    "example1_motion_geometry_omitted": true,
+    "example1_binding_carries_no_metric_pose": true,
+    "no_tcp_resolution_claimed": true,
+    "tcp_resolved_via_project_calibration_only": true,
+    "no_official_tcp_resolution_claimed": true,
+    "project_calibration_scope_recorded": true,
+    "project_calibration_selector_passed": true,
+    "project_calibration_all_gates_passed": true,
+    "project_calibration_artifact_hashes_match_disk": true,
+    "project_calibration_runtime_usd_scoped": true,
+    "project_calibration_simulation_only": true
+  },
+  "passed": true,
+  "calibration_authority": "project",
+  "simulation_only": true,
+  "hardware_validated": false,
+  "runtime_usd_scoped": true
+}

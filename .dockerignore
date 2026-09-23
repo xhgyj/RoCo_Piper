@@ -1,6 +1,4 @@
 **
 !docker/
-!docker/planner.Dockerfile
-!docker/planner-entrypoint.sh
-!planner_ws/
-!planner_ws/**
+!docker/ros.Dockerfile
+!docker/ros-entrypoint.sh

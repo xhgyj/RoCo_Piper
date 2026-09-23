@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from enum import StrEnum
 from typing import Mapping
 
+from rocobrick.compat import StrEnum
 from rocobrick.models import AssemblyPlan, FailureReason, TaskStatus
 
 

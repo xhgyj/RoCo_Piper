@@ -2,13 +2,19 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
-from enum import StrEnum
 import math
 import time
+from dataclasses import dataclass, replace
 from typing import Mapping, Protocol
 
-from rocobrick.models import ActionType, Candidate, FailureReason, Revisions, RobotSnapshot
+from rocobrick.compat import StrEnum
+from rocobrick.models import (
+    ActionType,
+    Candidate,
+    FailureReason,
+    Revisions,
+    RobotSnapshot,
+)
 
 
 class AdmissionStatus(StrEnum):

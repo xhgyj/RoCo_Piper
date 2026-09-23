@@ -1,20 +1,32 @@
 services:
-  planner:
+  ros:
     build:
       context: .
-      dockerfile: docker/planner.Dockerfile
-    image: rocobrick-planner:humble
-    network_mode: host
-    read_only: true
-    tmpfs:
-      - /tmp
-      - /root/.ros
+      dockerfile: docker/ros.Dockerfile
+      args:
+        ROS_BASE_IMAGE: ${ROS_BASE_IMAGE:-osrf/ros@sha256:c3eb3a8576b8b4fee5988244135855a1a2146df93ee1523878cebdc0fb1be9a6}
+    image: roco-piper-ros:humble
+    init: true
     environment:
-      ROS_LOCALHOST_ONLY: "1"
-      LC_NUMERIC: C.UTF-8
+      ROS_DISTRO: humble
+      ROS_DOMAIN_ID: ${ROS_DOMAIN_ID:-73}
+      ROS_LOCALHOST_ONLY: "0"
+      RMW_IMPLEMENTATION: rmw_fastrtps_cpp
+      FASTRTPS_DEFAULT_PROFILES_FILE: /etc/rocobrick/dds/fastdds-container.xml
+    volumes:
+      - ./ros_ws:/workspace/ros_ws
+      - ./.runtime/dds/fastdds-container.xml:/etc/rocobrick/dds/fastdds-container.xml:ro
+      - ./tools/container_dds_probe.py:/usr/local/lib/rocobrick/container_dds_probe.py:ro
+    networks:
+      - ros_runtime
     healthcheck:
-      test: ["CMD-SHELL", "bash -lc 'exec 3<>/dev/tcp/127.0.0.1/50051'"]
-      interval: 2s
-      timeout: 2s
-      retries: 90
+      test: ["CMD", "self-check"]
+      interval: 10s
+      timeout: 10s
+      retries: 6
+      start_period: 10s
     stop_grace_period: 10s
+
+networks:
+  ros_runtime:
+    driver: bridge

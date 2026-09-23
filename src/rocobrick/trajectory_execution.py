@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from enum import StrEnum
 import math
+from dataclasses import dataclass
 from typing import Protocol
 
+from rocobrick.compat import StrEnum
 from rocobrick.execution import Trajectory
 from rocobrick.models import FailureReason
 

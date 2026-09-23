@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!-- P1.B container MESH profile (additive to the P1.A profiles, emitted only
+     with tools/generate_dds_profiles.py --container-mesh).
+
+     The P1.A contract is untouched: across the rootless boundary this
+     participant is still a CLIENT-ONLY TCPv4 participant (no listening port,
+     single initial peer = the host listener on fixed TCP 17650).
+
+     What is added is transport INSIDE the container network namespace: with
+     SIMPLE discovery over TCP, a client only discovers its initial peer (the
+     host listener) and never the other container processes, so a multi-process
+     stack (ros2_control_node, move_group, robot_state_publisher, spawners,
+     probes) cannot see itself through the P1.A client-only profile alone
+     (live-evidenced during P1.B bring-up). A second, netns-local UDPv4
+     transport plus the domain SPDP multicast locator as a second initial peer
+     gives the container processes a local rendezvous that never crosses the
+     rootless boundary (no TCP listener, nothing published). -->
+<profiles xmlns="http://www.eprosima.com/XMLSchemas/fastRTPS_Profiles">
+  <transport_descriptors>
+    <transport_descriptor>
+      <transport_id>rocobrick_tcp</transport_id>
+      <type>TCPv4</type>
+__TRANSPORT_SERVER__
+    </transport_descriptor>
+    <transport_descriptor>
+      <transport_id>rocobrick_local_udp</transport_id>
+      <type>UDPv4</type>
+    </transport_descriptor>
+  </transport_descriptors>
+  <participant profile_name="__PROFILE_NAME__" is_default_profile="true">
+    <rtps>
+__PARTICIPANT_ID__
+      <useBuiltinTransports>false</useBuiltinTransports>
+      <userTransports>
+        <transport_id>rocobrick_tcp</transport_id>
+        <transport_id>rocobrick_local_udp</transport_id>
+      </userTransports>
+      <builtin>
+        <discovery_config><discoveryProtocol>SIMPLE</discoveryProtocol></discovery_config>
+        <avoid_builtin_multicast>false</avoid_builtin_multicast>
+__INITIAL_PEER__
+      </builtin>
+    </rtps>
+  </participant>
+</profiles>
