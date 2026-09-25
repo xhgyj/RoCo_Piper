@@ -1,0 +1,68 @@
+# Adapted from the pinned vendor reference
+# isaac/vendor/agx_arm_sim/Moveit2/piper_l_gripper_moveit_config/config/joint_limits.yaml
+# (velocity/acceleration entries unchanged).
+#
+# Rocobrick addition: explicit position limits for the arm joints, set to the
+# execution limits = intersection of the two pinned official sources
+# (agx_arm_sim URDF/USD narrow values; agx_arm_urdf is wider for joint4/5).
+# This is the planning-side execution-limit narrowing; the URDF keeps the
+# official wide joint4/joint5 values (2.2165681/1.5620696 rad).
+joint_limits:
+  gripper_joint1:
+    has_velocity_limits: true
+    max_velocity: 3.0
+    has_acceleration_limits: false
+    max_acceleration: 1.0
+  gripper_joint2:
+    has_velocity_limits: true
+    max_velocity: 3.0
+    has_acceleration_limits: false
+    max_acceleration: 1.0
+  joint1:
+    has_position_limits: true
+    min_position: -2.6179938
+    max_position: 2.6179938
+    has_velocity_limits: true
+    max_velocity: 5.0
+    has_acceleration_limits: false
+    max_acceleration: 1.0
+  joint2:
+    has_position_limits: true
+    min_position: 0.0
+    max_position: 3.1415926
+    has_velocity_limits: true
+    max_velocity: 5.0
+    has_acceleration_limits: false
+    max_acceleration: 1.0
+  joint3:
+    has_position_limits: true
+    min_position: -2.9670597
+    max_position: 0.0
+    has_velocity_limits: true
+    max_velocity: 5.0
+    has_acceleration_limits: false
+    max_acceleration: 1.0
+  joint4:
+    has_position_limits: true
+    min_position: -1.7453292
+    max_position: 1.7453292
+    has_velocity_limits: true
+    max_velocity: 5.0
+    has_acceleration_limits: false
+    max_acceleration: 1.0
+  joint5:
+    has_position_limits: true
+    min_position: -1.2217304
+    max_position: 1.2217304
+    has_velocity_limits: true
+    max_velocity: 5.0
+    has_acceleration_limits: false
+    max_acceleration: 1.0
+  joint6:
+    has_position_limits: true
+    min_position: -2.0943951
+    max_position: 2.0943951
+    has_velocity_limits: true
+    max_velocity: 5.0
+    has_acceleration_limits: false
+    max_acceleration: 1.0

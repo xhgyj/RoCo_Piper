@@ -18,14 +18,33 @@ list_controllers request and the GoalStatus constants) is injectable through
 :data:`RosMoveItFactories`, and the clock/spin/sleep hooks are injectable too,
 so offline fakes can drive the full flow. No Isaac, no tools imports; no node
 is created here - the caller injects an existing node.
+
+Per-robot routing (A5): a runtime constructed with a
+:class:`rocobrick.robot_runtime_profile.RobotRuntimeProfile` takes EVERY
+endpoint from that profile (robot-scoped state topics, controller/FK/plan
+services, arm+gripper actions, MoveGroup action, MoveGroup planning-scene
+services) and no canonical default is ever substituted, so a piper_1 runtime
+cannot observe, command or report on piper_0. The injected scene-state
+Trigger stays the single global host-bridge service of the A4 contract and
+is sliced per robot through :func:`robot_scene_view`. State messages are
+normalized onto the canonical joint names at ingest and are rejected when
+they do not carry exactly this robot's ``<robot_id>_<joint>`` names, so
+cross-injected samples can never become readiness or feedback evidence.
+:class:`RosMoveItRobotSession` hosts one isolated runtime per plan robot on
+ONE node, one ROS domain and one shared /clock; its
+:meth:`RosMoveItRobotSession.wait_until_ready` requires every robot's
+capability readiness (joints, controllers, MoveGroup, FK, gripper and the
+robot-scoped scene query).
 """
 
 from __future__ import annotations
 
+import json
 import math
 import threading
 import time
 from collections import deque
+from collections.abc import Sequence
 from dataclasses import asdict, dataclass
 from typing import Any, Callable, Mapping
 
@@ -40,8 +59,10 @@ from rocobrick.feedback import (
     position_error_m,
     state_is_stable,
 )
+from rocobrick.gripper import fingers_to_logical_gripper, logical_gripper_to_fingers
 from rocobrick.moveit_contract import (
     ACTION_ARM_FOLLOW,
+    ACTION_GRIPPER_FOLLOW,
     ARM_JOINT_NAMES,
     BASE_FRAME,
     EXACT_STATE_MATCH_TOLERANCE,
@@ -62,6 +83,7 @@ from rocobrick.moveit_contract import (
     TOPIC_ISAAC_JOINT_STATES,
     TOPIC_JOINT_STATES,
     AdmissionDecision,
+    GripperTarget,
     JointTarget,
     Link6PoseTarget,
     TcpPoseTarget,
@@ -78,6 +100,10 @@ from rocobrick.readiness import (
     state_is_complete,
     states_match,
 )
+from rocobrick.robot_runtime_profile import (
+    RobotRuntimeProfile,
+    assert_profiles_disjoint,
+)
 
 PLANNING_GROUP = "arm"
 # MoveGroup group for project-calibrated TCP goals (SRDF chain arm_tcp).
@@ -88,6 +114,12 @@ MAX_SCALING_FACTOR = 0.1
 
 # Formal planning-scene service (moveit_msgs/srv/ApplyPlanningScene).
 SERVICE_APPLY_PLANNING_SCENE = "/apply_planning_scene"
+SERVICE_GET_PLANNING_SCENE = "/get_planning_scene"
+PLANNING_SCENE_ALLOWED_COLLISION_MATRIX = 128
+# Live host-bridge scene-state service (std_srvs/srv/Trigger) answering the
+# canonical JSON scene-state document of schema rocobrick-scene-state/v1.
+SERVICE_SCENE_STATE = "/p05_host_bridge/scene_state"
+SCENE_STATE_SCHEMA = "rocobrick-scene-state/v1"
 
 # Bounded-wait pacing and deadlines (mirrors the live P1 probe discipline).
 POLL_INTERVAL_S = 0.2
@@ -95,6 +127,8 @@ WAIT_STEP_S = 0.05
 ACCEPT_TIMEOUT_S = 15.0
 CANCEL_TIMEOUT_S = 10.0
 SERVICE_CALL_TIMEOUT_S = 5.0
+# Bound of the read-only robot-scoped scene probe used by readiness.
+SCENE_PROBE_TIMEOUT_S = 2.0
 
 # Feedback evidence gates (mirrors the live P1 probe final-state contract).
 STATE_FRESH_SECONDS = 3.0
@@ -135,22 +169,267 @@ class RuntimeTopics:
 class RuntimeServices:
     """Live-resolved service names recorded in the P1 evidence.
 
-    ``apply_planning_scene`` is the formal R5.A planning-scene service; the
-    P1-evidence names above are unchanged.
+    ``apply_planning_scene`` is the formal R5.A planning-scene service and
+    ``scene_state`` the host-bridge Trigger service; the P1-evidence names
+    above are unchanged.
     """
 
     list_controllers: str = SERVICE_LIST_CONTROLLERS
     plan: str = SERVICE_PLAN
     compute_fk: str = SERVICE_COMPUTE_FK
     apply_planning_scene: str = SERVICE_APPLY_PLANNING_SCENE
+    get_planning_scene: str = SERVICE_GET_PLANNING_SCENE
+    scene_state: str = SERVICE_SCENE_STATE
 
 
 @dataclass(frozen=True)
 class RuntimeActions:
-    """Arm follow action plus the first live MoveGroup action candidate."""
+    """Arm and gripper follow actions plus the first MoveGroup candidate.
+
+    The gripper follow action is registered for gripper goals only and is
+    deliberately NOT part of the motion-readiness gates.
+    """
 
     arm_follow: str = ACTION_ARM_FOLLOW
     move_group: str = MOVE_GROUP_ACTION_CANDIDATES[0]
+    gripper_follow: str = ACTION_GRIPPER_FOLLOW
+
+
+def robot_endpoint_root(profile: RobotRuntimeProfile) -> str:
+    """Namespace prefix of a profile's endpoints ("" for the ROS root)."""
+    namespace = str(profile.namespace)
+    if namespace in ("", "/"):
+        return ""
+    return namespace
+
+
+def runtime_topics_for_profile(profile: RobotRuntimeProfile) -> RuntimeTopics:
+    """The profile's exact robot-scoped state topics (shared ``/clock``)."""
+    return RuntimeTopics(
+        clock=profile.clock,
+        isaac_joint_states=profile.isaac_joint_states,
+        joint_states=profile.joint_states,
+        isaac_joint_command=profile.isaac_joint_command,
+    )
+
+
+def runtime_services_for_profile(profile: RobotRuntimeProfile) -> RuntimeServices:
+    """The profile's robot-scoped MoveIt services.
+
+    ``list_controllers``/``plan``/``compute_fk`` come from the profile
+    verbatim. A namespaced move_group exposes its planning-scene pair below
+    the same namespace, so ``apply_planning_scene``/``get_planning_scene``
+    follow the profile namespace. The host-bridge scene-state Trigger is a
+    SINGLE global service by the A4 contract (robot slicing happens in the
+    response), never a namespaced per-robot endpoint, so it is never derived
+    from the namespace.
+    """
+    root = robot_endpoint_root(profile)
+    return RuntimeServices(
+        list_controllers=profile.list_controllers,
+        plan=profile.plan,
+        compute_fk=profile.compute_fk,
+        apply_planning_scene=root + SERVICE_APPLY_PLANNING_SCENE,
+        get_planning_scene=root + SERVICE_GET_PLANNING_SCENE,
+        scene_state=SERVICE_SCENE_STATE,
+    )
+
+
+def runtime_actions_for_profile(profile: RobotRuntimeProfile) -> RuntimeActions:
+    """The profile's exact arm/gripper/MoveGroup actions."""
+    return RuntimeActions(
+        arm_follow=profile.arm_follow,
+        move_group=profile.move_group_action,
+        gripper_follow=profile.gripper_follow,
+    )
+
+
+# Every capability component a robot-scoped operation readiness must satisfy
+# (A5): the motion-readiness components of one robot plus its gripper follow
+# action and its robot-scoped scene observation.
+CAPABILITY_COMPONENTS = (
+    "clock_increasing",
+    "isaac_state_complete",
+    "joint_state_complete",
+    "broadcaster_match",
+    "controllers_active",
+    "arm_action_ready",
+    "move_group_action_ready",
+    "gripper_action_ready",
+    "compute_fk_ready",
+    "scene_query_ready",
+)
+
+
+@dataclass(frozen=True)
+class RobotCapabilityReadiness:
+    """One robot's capability readiness verdict, with its exact endpoints.
+
+    Extends :class:`ReadinessSnapshot` with the gripper follow action and the
+    robot-scoped scene-observation service, keeps the robot identity and the
+    endpoints the verdict was measured on, and passes only when every
+    component holds. Every component is measured on THIS robot's own
+    subscriptions and clients, so a verdict can never mix robots.
+    """
+
+    robot_id: str = ""
+    namespace: str = ""
+    clock_increasing: bool = False
+    isaac_state_complete: bool = False
+    joint_state_complete: bool = False
+    broadcaster_match: bool = False
+    controllers_active: bool = False
+    arm_action_ready: bool = False
+    move_group_action_ready: bool = False
+    gripper_action_ready: bool = False
+    compute_fk_ready: bool = False
+    scene_query_ready: bool = False
+    endpoints: tuple[tuple[str, str], ...] = ()
+
+    @property
+    def passed(self) -> bool:
+        """True only when every capability component of this robot holds."""
+        return all(getattr(self, name) for name in CAPABILITY_COMPONENTS)
+
+    @classmethod
+    def component_names(cls) -> tuple[str, ...]:
+        """The exact capability component vocabulary."""
+        return CAPABILITY_COMPONENTS
+
+    def serialize(self) -> dict[str, object]:
+        """JSON-safe per-robot readiness report."""
+        return {
+            "robot_id": self.robot_id,
+            "namespace": self.namespace,
+            "passed": self.passed,
+            "components": {
+                name: bool(getattr(self, name)) for name in CAPABILITY_COMPONENTS
+            },
+            "endpoints": {name: value for name, value in self.endpoints},
+        }
+
+
+def robot_scene_view(
+    document: Mapping[str, object],
+    robot_id: str,
+    *,
+    joint_names: Sequence[str] | None = None,
+) -> dict[str, object]:
+    """Robot-scoped slice of the A4 dual scene-state document.
+
+    The global ``/p05_host_bridge/scene_state`` document carries the shared
+    ``sim_time_s``/``bricks``/``connections`` plus an additive
+    ``robots[robot_id]`` block with that robot's ``robot_id``, ``sim_time_s``,
+    ``gripper`` (exactly ``gripper_joint1``/``gripper_joint2``), ``opening_m``
+    and the optional ``opening_error``. The returned view carries the shared
+    scene plus only this robot's observation, in the shape the scene-query
+    filter consumes. There is NO fallback: a missing ``robots`` mapping, a
+    missing block for ``robot_id``, a block owned by another robot or a
+    malformed gripper block raise ``RuntimeError`` instead of answering with
+    another robot's (or the top-level single-robot) observation.
+
+    When the block carries the host binding evidence ``joint_names`` it is
+    validated: it must be exactly the device joint names of this robot
+    (``joint_names`` when supplied, fail-closed on any mismatch), so a scene
+    snapshot bound to a designated robot can never be presented as another
+    robot's observation.
+    """
+    if not isinstance(robot_id, str) or not robot_id or "/" in robot_id:
+        raise ValueError("robot_id must be a non-empty ROS-safe id")
+    if (
+        not isinstance(document, Mapping)
+        or document.get("schema") != SCENE_STATE_SCHEMA
+    ):
+        raise RuntimeError(
+            f"scene-state schema must be exactly {SCENE_STATE_SCHEMA!r}"
+        )
+    robots = document.get("robots")
+    if not isinstance(robots, Mapping):
+        raise RuntimeError(
+            "scene-state document carries no robots mapping; refusing to "
+            f"fall back to another robot's observation for {robot_id!r}"
+        )
+    block = robots.get(robot_id)
+    if not isinstance(block, Mapping):
+        raise RuntimeError(
+            f"scene-state document carries no block for robot {robot_id!r} "
+            f"(present: {sorted(str(key) for key in robots)})"
+        )
+    if str(block.get("robot_id")) != robot_id:
+        raise RuntimeError(
+            f"scene-state block for robot {robot_id!r} is owned by "
+            f"{block.get('robot_id')!r}"
+        )
+    bound_joint_names = block.get("joint_names")
+    if bound_joint_names is not None:
+        if (
+            not isinstance(bound_joint_names, Sequence)
+            or isinstance(bound_joint_names, (str, bytes, bytearray))
+            or not bound_joint_names
+            or not all(
+                isinstance(name, str) and name for name in bound_joint_names
+            )
+        ):
+            raise RuntimeError(
+                f"scene-state binding joint_names of robot {robot_id!r} are "
+                "malformed"
+            )
+        expected = (
+            tuple(joint_names) if joint_names is not None else None
+        )
+        if expected is not None and (
+            len(bound_joint_names) != len(expected)
+            or set(str(name) for name in bound_joint_names) != set(expected)
+        ):
+            raise RuntimeError(
+                f"scene-state block for robot {robot_id!r} is bound to a "
+                "different robot's joint names; refusing the observation"
+            )
+    bricks = document.get("bricks")
+    connections = document.get("connections")
+    if not isinstance(bricks, Mapping) or not isinstance(connections, Mapping):
+        raise RuntimeError(
+            "scene-state document carries no shared bricks/connections mapping"
+        )
+    gripper = block.get("gripper")
+    if not isinstance(gripper, Mapping) or set(gripper) != set(GRIPPER_JOINT_NAMES):
+        raise RuntimeError(
+            f"scene-state block for robot {robot_id!r} carries no complete "
+            f"gripper reading {sorted(GRIPPER_JOINT_NAMES)}"
+        )
+    for name in GRIPPER_JOINT_NAMES:
+        value = gripper[name]
+        if not isinstance(value, (int, float)) or not math.isfinite(float(value)):
+            raise RuntimeError(
+                f"scene-state gripper joint {name!r} of robot {robot_id!r} "
+                "is not a finite number"
+            )
+    sim_time = block.get("sim_time_s", document.get("sim_time_s"))
+    if not isinstance(sim_time, (int, float)) or not math.isfinite(float(sim_time)):
+        raise RuntimeError(
+            f"scene-state block for robot {robot_id!r} carries no finite sim_time_s"
+        )
+    opening = block.get("opening_m")
+    if opening is not None and (
+        not isinstance(opening, (int, float)) or not math.isfinite(float(opening))
+    ):
+        raise RuntimeError(
+            f"scene-state opening_m of robot {robot_id!r} is not a finite number"
+        )
+    view: dict[str, object] = {
+        "schema": SCENE_STATE_SCHEMA,
+        "robot_id": robot_id,
+        "sim_time_s": float(sim_time),
+        "bricks": bricks,
+        "connections": connections,
+        "gripper": {name: float(gripper[name]) for name in GRIPPER_JOINT_NAMES},
+        "opening_m": None if opening is None else float(opening),
+    }
+    if "opening_error" in block:
+        view["opening_error"] = block["opening_error"]
+    if bound_joint_names is not None:
+        view["joint_names"] = [str(name) for name in bound_joint_names]
+    return view
 
 
 @dataclass(frozen=True)
@@ -216,31 +495,22 @@ class RosMoveItFactories:
     apply_planning_scene_type: Callable[[], Any] | None = None
     apply_planning_scene_request_factory: Callable[[], Any] | None = None
     collision_object_factory: Callable[[], Any] | None = None
-
-
-def _positions_by_name(message: Any) -> dict[str, float]:
-    """JointState message positions keyed by joint name."""
-    return {
-        str(name): float(value)
-        for name, value in zip(message.name, message.position)
-    }
+    allowed_collision_entry_factory: Callable[[], Any] | None = None
+    get_planning_scene_type: Callable[[], Any] | None = None
+    get_planning_scene_request_factory: Callable[[], Any] | None = None
+    # Scene-state Trigger and gripper trajectory transport boundaries; the
+    # same lazy-resolved/optional-injection pattern as the planning scene.
+    trigger_type: Callable[[], Any] | None = None
+    trigger_request_factory: Callable[[], Any] | None = None
+    follow_joint_trajectory_goal_factory: Callable[[], Any] | None = None
+    joint_trajectory_point_factory: Callable[[], Any] | None = None
+    joint_tolerance_factory: Callable[[], Any] | None = None
+    duration_factory: Callable[[], Any] | None = None
 
 
 def _clock_nanos(message: Any) -> int:
     """Clock message as integer nanoseconds."""
     return int(message.clock.sec) * 1_000_000_000 + int(message.clock.nanosec)
-
-
-def _state_message_is_valid(message: Any) -> bool:
-    """Complete 8-DOF finite positions and a velocity array of length 0 or 8."""
-    try:
-        state = _positions_by_name(message)
-        velocity = list(message.velocity)
-    except (AttributeError, TypeError, ValueError):
-        return False
-    if not state_is_complete(state):
-        return False
-    return len(velocity) in (0, len(JOINT_NAMES))
 
 
 def _parse_controller_states(future: Any) -> dict[str, str] | None:
@@ -262,6 +532,66 @@ def _map_goal_status(status: Any, goal_status: Any) -> ExecutionStatus:
     return ExecutionStatus.FAILED
 
 
+def _terminal_status_name(status: Any, goal_status: Any) -> str:
+    """Human-readable terminal action status name for the evidence details."""
+    value = int(status)
+    if value == int(goal_status.STATUS_SUCCEEDED):
+        return "SUCCEEDED"
+    if value == int(goal_status.STATUS_CANCELED):
+        return "CANCELED"
+    aborted = getattr(goal_status, "STATUS_ABORTED", None)
+    if aborted is not None and value == int(aborted):
+        return "ABORTED"
+    return f"UNKNOWN({value})"
+
+
+def _merge_allowed_collision_pairs(
+    matrix: Any,
+    pairs: tuple[tuple[str, str], ...],
+    entry_factory: Callable[[], Any],
+) -> Any:
+    """Append allowed pairs without discarding MoveIt's existing ACM.
+
+    ``ApplyPlanningScene`` treats a non-empty ACM in a diff as a replacement
+    matrix.  The caller therefore reads the current full matrix first, then
+    extends its rows and changes only the requested pairs.
+    """
+    try:
+        names = [str(name) for name in matrix.entry_names]
+        source_rows = [list(entry.enabled) for entry in matrix.entry_values]
+    except (AttributeError, TypeError, ValueError) as error:
+        raise ValueError(f"current allowed collision matrix is unreadable: {error}") from error
+    if not names or len(set(names)) != len(names):
+        raise ValueError("current allowed collision matrix has no unique entries")
+    if len(source_rows) != len(names) or any(
+        len(row) != len(names) for row in source_rows
+    ):
+        raise ValueError(
+            "current allowed collision matrix is not square: "
+            f"entries={len(names)} rows={len(source_rows)}"
+        )
+    rows = [[bool(value) for value in row] for row in source_rows]
+    for first, second in pairs:
+        for name in (first, second):
+            if name in names:
+                continue
+            names.append(name)
+            for row in rows:
+                row.append(False)
+            rows.append([False] * len(names))
+        first_index = names.index(first)
+        second_index = names.index(second)
+        rows[first_index][second_index] = True
+        rows[second_index][first_index] = True
+    matrix.entry_names = list(names)
+    matrix.entry_values = []
+    for row in rows:
+        entry = entry_factory()
+        entry.enabled = list(row)
+        matrix.entry_values.append(entry)
+    return matrix
+
+
 class RosMoveItRuntime:
     """ROS-side MoveIt runtime; every transport boundary is injectable.
 
@@ -270,19 +600,31 @@ class RosMoveItRuntime:
     :meth:`wait_until_ready` and only then send goals. QoS profiles default to
     the live P1 probe profiles (RELIABLE / BEST_EFFORT, KEEP_LAST depth 50)
     and are resolved lazily, so injected fakes can pass opaque placeholders.
+
+    With a ``profile`` every endpoint is the profile's robot-scoped name and
+    states are only accepted when they carry exactly that robot's device
+    joint names; without a profile the historical canonical single-robot
+    names are used (no profile ever falls back to them per endpoint).
     """
 
     def __init__(
         self,
         node: Any,
         *,
+        profile: RobotRuntimeProfile | None = None,
         topics: RuntimeTopics | None = None,
         services: RuntimeServices | None = None,
         actions: RuntimeActions | None = None,
+        base_frame: str | None = None,
+        link6_link: str | None = None,
+        tcp_link: str | None = None,
+        arm_planning_group: str | None = None,
+        tcp_planning_group: str | None = None,
         qos_sensor: Any = None,
         qos_state: Any = None,
         factories: RosMoveItFactories | None = None,
         fk_verifier: FkVerifier | None = None,
+        tcp_fk_verifier: FkVerifier | None = None,
         planning_scene_applier: (
             Callable[[PlanningSceneUpdate, float], PlanningSceneResult] | None
         ) = None,
@@ -292,14 +634,85 @@ class RosMoveItRuntime:
         poll_interval_s: float = POLL_INTERVAL_S,
         wait_step_s: float = WAIT_STEP_S,
     ) -> None:
+        if profile is not None:
+            if not isinstance(profile, RobotRuntimeProfile):
+                raise ValueError(
+                    "profile must be a RobotRuntimeProfile, got "
+                    f"{type(profile).__name__}"
+                )
+            if topics is not None or services is not None or actions is not None:
+                raise ValueError(
+                    "topics/services/actions must not be overridden when a "
+                    "RobotRuntimeProfile is supplied"
+                )
+            topics = runtime_topics_for_profile(profile)
+            services = runtime_services_for_profile(profile)
+            actions = runtime_actions_for_profile(profile)
         self.node = node
+        self.profile = profile
         self.topics = topics if topics is not None else RuntimeTopics()
         self.services = services if services is not None else RuntimeServices()
         self.actions = actions if actions is not None else RuntimeActions()
+        self._robot_id = profile.robot_id if profile is not None else ""
+        self._namespace = profile.namespace if profile is not None else ""
+        self._joint_names = (
+            tuple(profile.joint_names) if profile is not None else JOINT_NAMES
+        )
+        self._arm_joint_names = (
+            tuple(profile.arm_joint_names) if profile is not None else ARM_JOINT_NAMES
+        )
+        self._gripper_joint_names = (
+            tuple(profile.gripper_joint_names)
+            if profile is not None
+            else GRIPPER_JOINT_NAMES
+        )
+        if (
+            len(self._joint_names) != len(JOINT_NAMES)
+            or len(self._arm_joint_names) != len(ARM_JOINT_NAMES)
+            or len(self._gripper_joint_names) != len(GRIPPER_JOINT_NAMES)
+            or self._joint_names
+            != self._arm_joint_names + self._gripper_joint_names
+        ):
+            raise ValueError(
+                "robot joint names must be the 6 arm + 2 gripper joints of "
+                "the canonical order"
+            )
+        self._base_frame = (
+            base_frame
+            if base_frame is not None
+            else (profile.base_frame if profile is not None else BASE_FRAME)
+        )
+        self._link6_link = (
+            link6_link
+            if link6_link is not None
+            else (profile.link6_link if profile is not None else TIP_LINK)
+        )
+        self._tcp_link = (
+            tcp_link
+            if tcp_link is not None
+            else (profile.tip_link if profile is not None else TCP_LINK)
+        )
+        self._arm_planning_group = (
+            arm_planning_group
+            if arm_planning_group is not None
+            else (
+                profile.link6_planning_group
+                if profile is not None
+                else PLANNING_GROUP
+            )
+        )
+        self._tcp_planning_group = (
+            tcp_planning_group
+            if tcp_planning_group is not None
+            else (
+                profile.planning_group if profile is not None else TCP_PLANNING_GROUP
+            )
+        )
         self._qos_sensor = qos_sensor
         self._qos_state = qos_state
         self._factories = factories
         self._fk_verifier = fk_verifier
+        self._tcp_fk_verifier = tcp_fk_verifier
         self._planning_scene_applier = planning_scene_applier
         self._clock_fn = clock if clock is not None else time.monotonic
         self._spin_fn = spin if spin is not None else (lambda: None)
@@ -321,22 +734,108 @@ class RosMoveItRuntime:
         self._plan_client: Any = None
         self._fk_client: Any = None
         self._planning_scene_client: Any = None
+        self._get_planning_scene_client: Any = None
+        self._scene_state_client: Any = None
         self._arm_client: Any = None
         self._move_group_client: Any = None
+        self._gripper_client: Any = None
         self._active_handle: Any = None
         self._resolved_factories: RosMoveItFactories | None = None
         self.shutdown_errors: list[str] = []
+
+    # --------------------------------------------------------------- identity
+
+    @property
+    def robot_id(self) -> str:
+        """The profile's robot id, or "" for a canonical single-robot runtime."""
+        return self._robot_id
+
+    @property
+    def namespace(self) -> str:
+        """The profile's ROS namespace, or "" for the canonical runtime."""
+        return self._namespace
+
+    @property
+    def joint_names(self) -> tuple[str, ...]:
+        """Device joint names of this runtime (canonical without a profile)."""
+        return self._joint_names
+
+    @property
+    def arm_joint_names(self) -> tuple[str, ...]:
+        """Device arm joint names of this runtime."""
+        return self._arm_joint_names
+
+    @property
+    def gripper_joint_names(self) -> tuple[str, ...]:
+        """Device gripper joint names of this runtime."""
+        return self._gripper_joint_names
+
+    @property
+    def base_frame(self) -> str:
+        """FK/pose base frame of this runtime."""
+        return self._base_frame
+
+    @property
+    def link6_link(self) -> str:
+        """Raw link6 flange frame of this runtime."""
+        return self._link6_link
+
+    @property
+    def tip_link(self) -> str:
+        """Calibrated skill TCP frame of this runtime."""
+        return self._tcp_link
+
+    @property
+    def tcp_link(self) -> str:
+        """Calibrated TCP frame of this runtime (alias of ``tip_link``)."""
+        return self._tcp_link
+
+    @property
+    def arm_planning_group(self) -> str:
+        """MoveIt group of the raw link6 arm chain of this runtime."""
+        return self._arm_planning_group
+
+    @property
+    def tcp_planning_group(self) -> str:
+        """MoveIt group of the calibrated TCP chain of this runtime."""
+        return self._tcp_planning_group
+
+    def endpoint_map(self) -> dict[str, str]:
+        """Every transport endpoint this runtime measures, verbatim."""
+        return {
+            "clock": self.topics.clock,
+            "isaac_joint_states": self.topics.isaac_joint_states,
+            "joint_states": self.topics.joint_states,
+            "isaac_joint_command": self.topics.isaac_joint_command,
+            "list_controllers": self.services.list_controllers,
+            "plan": self.services.plan,
+            "compute_fk": self.services.compute_fk,
+            "apply_planning_scene": self.services.apply_planning_scene,
+            "get_planning_scene": self.services.get_planning_scene,
+            "scene_state": self.services.scene_state,
+            "arm_follow": self.actions.arm_follow,
+            "move_group": self.actions.move_group,
+            "gripper_follow": self.actions.gripper_follow,
+            "base_frame": self._base_frame,
+            "link6_link": self._link6_link,
+            "tcp_link": self._tcp_link,
+            "arm_planning_group": self._arm_planning_group,
+            "tcp_planning_group": self._tcp_planning_group,
+        }
 
     # ------------------------------------------------------------- transport
 
     def _default_factories(self) -> RosMoveItFactories:
         """Real ROS/MoveIt factories; the lazy ROS imports live only here."""
         from action_msgs.msg import GoalStatus
+        from builtin_interfaces.msg import Duration
         from control_msgs.action import FollowJointTrajectory
+        from control_msgs.msg import JointTolerance
         from controller_manager_msgs.srv import ListControllers
         from geometry_msgs.msg import Pose
         from moveit_msgs.action import MoveGroup
         from moveit_msgs.msg import (
+            AllowedCollisionEntry,
             CollisionObject,
             Constraints,
             JointConstraint,
@@ -344,11 +843,18 @@ class RosMoveItRuntime:
             OrientationConstraint,
             PositionConstraint,
         )
-        from moveit_msgs.srv import ApplyPlanningScene, GetMotionPlan, GetPositionFK
+        from moveit_msgs.srv import (
+            ApplyPlanningScene,
+            GetMotionPlan,
+            GetPlanningScene,
+            GetPositionFK,
+        )
         from rclpy.action import ActionClient
         from rosgraph_msgs.msg import Clock
         from sensor_msgs.msg import JointState
         from shape_msgs.msg import SolidPrimitive
+        from std_srvs.srv import Trigger
+        from trajectory_msgs.msg import JointTrajectoryPoint
 
         def action_client(node: Any, action_type: Any, name: str) -> Any:
             return ActionClient(node, action_type, name)
@@ -375,6 +881,15 @@ class RosMoveItRuntime:
             apply_planning_scene_type=lambda: ApplyPlanningScene,
             apply_planning_scene_request_factory=ApplyPlanningScene.Request,
             collision_object_factory=CollisionObject,
+            allowed_collision_entry_factory=AllowedCollisionEntry,
+            get_planning_scene_type=lambda: GetPlanningScene,
+            get_planning_scene_request_factory=GetPlanningScene.Request,
+            trigger_type=lambda: Trigger,
+            trigger_request_factory=Trigger.Request,
+            follow_joint_trajectory_goal_factory=FollowJointTrajectory.Goal,
+            joint_trajectory_point_factory=JointTrajectoryPoint,
+            joint_tolerance_factory=JointTolerance,
+            duration_factory=Duration,
         )
 
     def _resolve_factories(self) -> RosMoveItFactories:
@@ -429,7 +944,14 @@ class RosMoveItRuntime:
         }
 
     def register_clients(self) -> None:
-        """Create the service and action clients once (lazy ROS imports)."""
+        """Create the service and action clients once (lazy ROS imports).
+
+        The scene-state Trigger client and the gripper follow action client
+        are registered too. They are not components of the historical motion
+        snapshot (:meth:`readiness_snapshot`), but they ARE components of
+        :meth:`capability_readiness`, which is the gate a per-robot session
+        runtime dispatches on.
+        """
         if self._move_group_client is not None:
             return
         factories = self._resolve_factories()
@@ -443,11 +965,27 @@ class RosMoveItRuntime:
         self._fk_client = node.create_client(
             factories.get_position_fk_type(), self.services.compute_fk
         )
+        if (
+            factories.get_planning_scene_type is not None
+            and factories.get_planning_scene_request_factory is not None
+        ):
+            self._get_planning_scene_client = node.create_client(
+                factories.get_planning_scene_type(), self.services.get_planning_scene
+            )
+        if factories.trigger_type is not None:
+            self._scene_state_client = node.create_client(
+                factories.trigger_type(), self.services.scene_state
+            )
         self._arm_client = factories.action_client_factory(
             node, factories.follow_joint_trajectory_type(), self.actions.arm_follow
         )
         self._move_group_client = factories.action_client_factory(
             node, factories.move_group_type(), self.actions.move_group
+        )
+        self._gripper_client = factories.action_client_factory(
+            node,
+            factories.follow_joint_trajectory_type(),
+            self.actions.gripper_follow,
         )
 
     # ------------------------------------------------------------- callbacks
@@ -456,19 +994,51 @@ class RosMoveItRuntime:
         with self._lock:
             self._clock_values.append(_clock_nanos(message))
 
+    def _normalized_state(self, message: Any) -> dict[str, float] | None:
+        """Normalize a state message onto the canonical joint names, or None.
+
+        The message must carry EXACTLY this runtime's device joint names (the
+        profile's ``<robot_id>_<joint>`` names) with finite positions and a
+        velocity array of length 0 or 8. Any other name set - in particular a
+        state message of a different robot delivered to this subscription -
+        is rejected outright, so cross-injected samples never become
+        readiness or feedback evidence here. Accepted states are keyed by the
+        canonical joint names, which is the API contract of every state
+        getter; the wire-level ``<robot_id>_`` prefix never appears in them.
+        """
+        try:
+            raw = {
+                str(name): float(value)
+                for name, value in zip(message.name, message.position)
+            }
+            velocity = list(message.velocity)
+        except (AttributeError, TypeError, ValueError):
+            return None
+        if len(raw) != len(self._joint_names) or set(raw) != set(self._joint_names):
+            return None
+        if len(velocity) not in (0, len(self._joint_names)):
+            return None
+        state: dict[str, float] = {}
+        for canonical, device in zip(JOINT_NAMES, self._joint_names):
+            value = raw[device]
+            if not math.isfinite(value):
+                return None
+            state[canonical] = value
+        return state
+
     def _on_isaac_state(self, message: Any) -> None:
-        if not _state_message_is_valid(message):
+        state = self._normalized_state(message)
+        if state is None:
             return
-        state = _positions_by_name(message)
         with self._lock:
             self._isaac_states.append(state)
             self._isaac_receipts.append(self._clock_fn())
             self._isaac_state_count += 1
 
     def _on_joint_state(self, message: Any) -> None:
-        if not _state_message_is_valid(message):
+        state = self._normalized_state(message)
+        if state is None:
             return
-        state = _positions_by_name(message)
         with self._lock:
             self._joint_states.append(state)
 
@@ -602,36 +1172,117 @@ class RosMoveItRuntime:
                 return False
             self._sleep_fn(self._poll_interval_s)
 
+    # ---------------------------------------------------- capability readiness
+
+    def scene_query_probe(
+        self, timeout_s: float = SCENE_PROBE_TIMEOUT_S
+    ) -> dict[str, object] | None:
+        """Bounded live robot-scoped scene probe; None when unverifiable.
+
+        Read-only: it performs the same bounded global Trigger call as
+        :meth:`query_robot_scene_state` and returns the validated view of
+        THIS robot's block, or ``None`` when the client is unavailable, the
+        query fails, the schema is wrong, or the block is missing, foreign or
+        bound to another robot's joint names. Readiness uses it so a robot
+        whose scene response cannot be verified never becomes ready.
+        """
+        try:
+            return self.query_robot_scene_state(timeout_s=timeout_s)
+        except (RuntimeError, ValueError):
+            return None
+
+    def capability_readiness(
+        self, *, probe_scene: bool = False
+    ) -> RobotCapabilityReadiness:
+        """This robot's full capability readiness, endpoints included.
+
+        Without ``probe_scene`` it is read-only and side-effect free: it
+        reads the injected pump's latest state, the cached controller states
+        and the action/service availability of THIS runtime's clients (the
+        scene component is then the Trigger client availability). No motion
+        is ever sent.
+
+        With ``probe_scene`` the scene component is verified against the LIVE
+        robot-scoped response: the bounded Trigger answer must carry this
+        robot's own block (and, when the block carries the host binding
+        evidence, this robot's device joint names), so a snapshot bound to
+        another robot can never satisfy it. The verdict carries the profiled
+        robot id, its namespace and the exact endpoints so a caller can audit
+        that no canonical fallback leaked in.
+        """
+        snapshot = self.readiness_snapshot()
+        scene_query_ready = self._service_ready(self._scene_state_client)
+        if probe_scene and scene_query_ready:
+            scene_query_ready = self.scene_query_probe() is not None
+        return RobotCapabilityReadiness(
+            robot_id=self._robot_id,
+            namespace=self._namespace,
+            clock_increasing=snapshot.clock_increasing,
+            isaac_state_complete=snapshot.isaac_state_complete,
+            joint_state_complete=snapshot.joint_state_complete,
+            broadcaster_match=snapshot.broadcaster_match,
+            controllers_active=snapshot.controllers_active,
+            arm_action_ready=snapshot.arm_action_ready,
+            move_group_action_ready=snapshot.move_group_action_ready,
+            gripper_action_ready=self._action_ready(self._gripper_client),
+            compute_fk_ready=snapshot.compute_fk_ready,
+            scene_query_ready=scene_query_ready,
+            endpoints=tuple(sorted(self.endpoint_map().items())),
+        )
+
+    def wait_until_capability_ready(
+        self, timeout_s: float, *, probe_scene: bool = True
+    ) -> bool:
+        """Bounded per-robot capability readiness wait; never sends motion.
+
+        The scene component is probed live by default, so a robot whose
+        per-robot scene response is missing, foreign or mis-bound never
+        reaches readiness.
+        """
+        if not math.isfinite(float(timeout_s)) or float(timeout_s) < 0.0:
+            raise ValueError(
+                f"timeout_s must be finite and non-negative, got {timeout_s!r}"
+            )
+        deadline = self._clock_fn() + float(timeout_s)
+        while True:
+            self._spin_fn()
+            if self.capability_readiness(probe_scene=probe_scene).passed:
+                return True
+            if self._clock_fn() >= deadline:
+                return False
+            self._sleep_fn(self._poll_interval_s)
+
     # ------------------------------------------------------------------ FK
 
     def compute_link6_fk(
         self, state: Mapping[str, float], timeout_s: float = SERVICE_CALL_TIMEOUT_S
     ) -> FkVerification | None:
-        """Live ``base_link -> link6`` pose of ``state`` via /compute_fk.
+        """Live raw-flange (link6) FK of ``state`` via this robot's compute_fk.
 
         The explicitly minimal public FK adapter hook: the GetPositionFK
         request is built through the injected factories and the registered
-        client from the EXACT canonical 8-DOF names of ``state``, waited on
+        client from the EXACT canonical 8-DOF names of ``state`` (the wire
+        names of this runtime's profile are used transparently), waited on
         bounded through the injected clock/spin/sleep hooks, and answered with
         ``((x, y, z), (x, y, z, w))`` or ``None``. No pose is ever hardcoded
         or interpolated: a non-SUCCESS code, an incomplete state, a missing
         answer, a nonfinite or near-zero result all return ``None`` so the
         caller fails explicitly instead of faking a pose.
         """
-        return self._compute_fk(state, TIP_LINK, timeout_s)
+        return self._compute_fk(state, self._link6_link, timeout_s)
 
     def compute_tcp_fk(
         self, state: Mapping[str, float], timeout_s: float = SERVICE_CALL_TIMEOUT_S
     ) -> FkVerification | None:
-        """Live ``base_link -> rocobrick_tcp`` pose of ``state`` via /compute_fk.
+        """Live calibrated-TCP FK of ``state`` via this robot's compute_fk.
 
         Identical contract to :meth:`compute_link6_fk` but the requested link
-        is the project-calibrated ``rocobrick_tcp`` frame of the expanded
-        MoveIt model, so the answered pose is exactly the link6 FK composed
-        with the generated calibration joint. The same failure rules apply:
-        nothing is hardcoded, interpolated, or faked.
+        is the project-calibrated TCP frame of that robot's expanded MoveIt
+        model, so the answered pose is exactly the link6 FK composed with the
+        generated calibration joint. The same failure rules apply: nothing is
+        hardcoded, interpolated, or faked.
         """
-        return self._compute_fk(state, TCP_LINK, timeout_s)
+        return self._compute_fk(state, self._tcp_link, timeout_s)
 
     def _compute_fk(
         self, state: Mapping[str, float], link: str, timeout_s: float
@@ -651,9 +1302,9 @@ class RosMoveItRuntime:
         if not state_is_complete(state):
             return None
         request = self._resolve_factories().get_position_fk_type().Request()
-        request.header.frame_id = BASE_FRAME
+        request.header.frame_id = self._base_frame
         request.fk_link_names = [link]
-        request.robot_state.joint_state.name = list(JOINT_NAMES)
+        request.robot_state.joint_state.name = list(self._joint_names)
         request.robot_state.joint_state.position = [
             float(state[name]) for name in JOINT_NAMES
         ]
@@ -757,6 +1408,62 @@ class RosMoveItRuntime:
         )
         return self._planning_scene_client
 
+    def _ensure_get_planning_scene_client(self) -> Any:
+        """Return the lazy GetPlanningScene client, if the transport exists."""
+        if self._get_planning_scene_client is not None:
+            return self._get_planning_scene_client
+        factories = self._resolve_factories()
+        if (
+            factories.get_planning_scene_type is None
+            or factories.get_planning_scene_request_factory is None
+        ):
+            return None
+        self._get_planning_scene_client = self.node.create_client(
+            factories.get_planning_scene_type(), self.services.get_planning_scene
+        )
+        return self._get_planning_scene_client
+
+    def _read_current_allowed_collision_matrix(
+        self, timeout_s: float, factories: RosMoveItFactories
+    ) -> tuple[Any | None, str | None]:
+        """Read the complete MoveIt ACM before constructing a scene diff."""
+        client = self._ensure_get_planning_scene_client()
+        if client is None or not self._service_ready(client):
+            return None, (
+                f"{self.services.get_planning_scene} client is not available; "
+                "refusing to replace the existing allowed collision matrix"
+            )
+        request_factory = factories.get_planning_scene_request_factory
+        if request_factory is None:
+            return None, "no GetPlanningScene request factory is available"
+        request = request_factory()
+        components = getattr(request, "components", None)
+        if components is None:
+            return None, "GetPlanningScene request has no components field"
+        components.components = PLANNING_SCENE_ALLOWED_COLLISION_MATRIX
+        future = client.call_async(request)
+        if not self._wait_future(future, self._clock_fn() + float(timeout_s)):
+            return None, (
+                f"{self.services.get_planning_scene} did not answer within "
+                f"{timeout_s}s"
+            )
+        try:
+            response = future.result()
+            scene = response.scene
+            matrix = scene.allowed_collision_matrix
+            names = list(matrix.entry_names)
+            rows = list(matrix.entry_values)
+        except Exception as error:
+            return None, f"GetPlanningScene response is invalid: {error}"
+        if not names or len(rows) != len(names) or any(
+            len(entry.enabled) != len(names) for entry in rows
+        ):
+            return None, (
+                "GetPlanningScene returned a non-square or empty allowed "
+                "collision matrix; refusing fail-open scene application"
+            )
+        return matrix, None
+
     def _default_planning_scene_applier(
         self, update: PlanningSceneUpdate, timeout_s: float
     ) -> PlanningSceneResult:
@@ -798,6 +1505,36 @@ class RosMoveItRuntime:
             )
         request = factories.apply_planning_scene_request_factory()
         request.scene.is_diff = True
+        if update.allowed_collision_pairs:
+            entry_factory = factories.allowed_collision_entry_factory
+            if entry_factory is None:
+                return PlanningSceneResult(
+                    passed=False,
+                    details={
+                        "scene_id": update.scene_id,
+                        "error": (
+                            "allowed collision pairs were requested but the "
+                            "AllowedCollisionEntry factory is unavailable"
+                        ),
+                    },
+                )
+            matrix, matrix_error = self._read_current_allowed_collision_matrix(
+                timeout_s, factories
+            )
+            if matrix is None:
+                return PlanningSceneResult(
+                    passed=False,
+                    details={"scene_id": update.scene_id, "error": matrix_error},
+                )
+            try:
+                request.scene.allowed_collision_matrix = _merge_allowed_collision_pairs(
+                    matrix, update.allowed_collision_pairs, entry_factory
+                )
+            except ValueError as error:
+                return PlanningSceneResult(
+                    passed=False,
+                    details={"scene_id": update.scene_id, "error": str(error)},
+                )
         for box in update.boxes:
             collision_object = factories.collision_object_factory()
             collision_object.header.frame_id = box.frame_id
@@ -868,6 +1605,87 @@ class RosMoveItRuntime:
             details=details,
         )
 
+    # ------------------------------------------------------------ scene state
+
+    def query_scene_state(self, timeout_s: float) -> dict[str, object]:
+        """Fetch the live scene-state document from the host bridge (bounded).
+
+        Calls the ``std_srvs/srv/Trigger`` service on
+        ``/p05_host_bridge/scene_state`` and parses ``response.message`` as
+        canonical JSON. Only a document whose ``schema`` is exactly
+        ``rocobrick-scene-state/v1`` is returned; an unavailable client, a
+        timeout, a malformed message or a wrong schema raise ``RuntimeError``
+        so the caller reports a failed result instead of guessing.
+        """
+        if (
+            not isinstance(timeout_s, (int, float))
+            or not math.isfinite(float(timeout_s))
+            or float(timeout_s) <= 0.0
+        ):
+            raise ValueError(
+                f"timeout_s must be finite and positive, got {timeout_s!r}"
+            )
+        client = self._scene_state_client
+        if client is None or not self._service_ready(client):
+            raise RuntimeError(
+                f"{self.services.scene_state} client is not available"
+            )
+        factories = self._resolve_factories()
+        if factories.trigger_request_factory is None:
+            raise RuntimeError(
+                "the injected factories carry no Trigger transport for the "
+                "scene-state query"
+            )
+        future = client.call_async(factories.trigger_request_factory())
+        if not self._wait_future(future, self._clock_fn() + float(timeout_s)):
+            raise RuntimeError(
+                f"{self.services.scene_state} did not answer within "
+                f"{timeout_s}s"
+            )
+        try:
+            response = future.result()
+            message = str(response.message)
+        except Exception as exc:
+            raise RuntimeError(
+                f"{self.services.scene_state} answer is malformed: "
+                f"{type(exc).__name__}: {exc}"
+            ) from exc
+        try:
+            document = json.loads(message)
+        except ValueError as exc:
+            raise RuntimeError(
+                f"{self.services.scene_state} message is not JSON: {exc}"
+            ) from exc
+        if not isinstance(document, dict) or document.get("schema") != (
+            SCENE_STATE_SCHEMA
+        ):
+            raise RuntimeError(
+                f"{self.services.scene_state} message schema is not "
+                f"{SCENE_STATE_SCHEMA!r}"
+            )
+        return document
+
+    def query_robot_scene_state(self, timeout_s: float) -> dict[str, object]:
+        """This robot's own slice of the live scene-state document (bounded).
+
+        Requires a profiled robot runtime: the global A4 service is queried
+        once (same bounded call as :meth:`query_scene_state`) and the answer
+        is sliced by :func:`robot_scene_view` with this robot's device joint
+        names, so only this robot's gripper reading can ever be reported, a
+        missing/foreign block fails explicitly, and a snapshot bound to
+        another robot's joint names is rejected instead of falling back to
+        another robot's observation.
+        """
+        if not self._robot_id:
+            raise RuntimeError(
+                "robot-scoped scene observation requires a profiled robot "
+                "runtime; this runtime has no robot id"
+            )
+        document = self.query_scene_state(timeout_s)
+        return robot_scene_view(
+            document, self._robot_id, joint_names=self._joint_names
+        )
+
     # ------------------------------------------------------------------ sends
 
     def send_joint(self, target: JointTarget, timeout_s: float) -> ExecutionResult:
@@ -887,6 +1705,273 @@ class RosMoveItRuntime:
         transform lives only in the model, so it can never be double-applied.
         """
         return self._send_goal("tcp_pose", target, timeout_s)
+
+    def send_gripper(self, target: GripperTarget, timeout_s: float) -> ExecutionResult:
+        """Admit, build and send one two-point gripper trajectory (bounded).
+
+        Point 0 holds the latest observed finger positions at t=0 so the
+        command starts from the measured state; point 1 commands the logical
+        opening mapped onto the symmetric finger positions through
+        ``rocobrick.gripper.logical_gripper_to_fingers``. The verdict is
+        measured, never assumed: fingers stalled on a brick legitimately
+        terminate the action ABORTED, so after ANY terminal state the latest
+        finger positions are re-sampled and the measured opening decides
+        success against ``expected_opening_m`` (inclusive). A missing or
+        mimic-violating measurement fails explicitly instead of faking
+        success.
+        """
+        decision = strict_action_admission(target)
+        if not decision.accepted:
+            return ExecutionResult(
+                status=ExecutionStatus.REJECTED,
+                details={
+                    "kind": "gripper",
+                    "reason": decision.reason,
+                    "admission": dict(decision.details),
+                },
+                command_messages=0,
+            )
+        if (
+            not isinstance(timeout_s, (int, float))
+            or not math.isfinite(float(timeout_s))
+            or float(timeout_s) <= 0.0
+        ):
+            return ExecutionResult(
+                status=ExecutionStatus.REJECTED,
+                details={
+                    "kind": "gripper",
+                    "reason": (
+                        f"timeout_s must be finite and positive, got {timeout_s!r}"
+                    ),
+                },
+                command_messages=0,
+            )
+        if self._gripper_client is None:
+            return ExecutionResult(
+                status=ExecutionStatus.FAILED,
+                details={
+                    "kind": "gripper",
+                    "error": (
+                        "gripper action client is not registered; call "
+                        "register_clients() first"
+                    ),
+                },
+                command_messages=0,
+            )
+        factories = self._resolve_factories()
+        if (
+            factories.follow_joint_trajectory_goal_factory is None
+            or factories.joint_trajectory_point_factory is None
+            or factories.joint_tolerance_factory is None
+            or factories.duration_factory is None
+        ):
+            return ExecutionResult(
+                status=ExecutionStatus.FAILED,
+                details={
+                    "kind": "gripper",
+                    "error": (
+                        "the injected factories carry no FollowJointTrajectory "
+                        "goal transport for the gripper"
+                    ),
+                },
+                command_messages=0,
+            )
+        snapshot = self.readiness_snapshot()
+        if not snapshot.passed:
+            return ExecutionResult(
+                status=ExecutionStatus.FAILED,
+                details={
+                    "kind": "gripper",
+                    "error": (
+                        "runtime readiness failed; no motion is allowed until "
+                        "wait_until_ready passes"
+                    ),
+                    "readiness": asdict(snapshot),
+                },
+                command_messages=0,
+            )
+        start_state = self.latest_isaac_state()
+        if (
+            start_state is None
+            or "gripper_joint1" not in start_state
+            or "gripper_joint2" not in start_state
+        ):
+            return ExecutionResult(
+                status=ExecutionStatus.FAILED,
+                details={
+                    "kind": "gripper",
+                    "error": (
+                        "no complete isaac finger state was observed; the "
+                        "trajectory start point cannot be built"
+                    ),
+                },
+                command_messages=0,
+            )
+        goal = self._build_gripper_goal(target, start_state, factories)
+        return self._execute_gripper_goal(
+            goal,
+            target=target,
+            timeout_s=float(timeout_s),
+            factories=factories,
+        )
+
+    def _duration_message(self, seconds: float, factories: RosMoveItFactories) -> Any:
+        """builtin_interfaces/Duration message for a non-negative seconds."""
+        duration = factories.duration_factory()
+        whole = int(seconds)
+        duration.sec = whole
+        duration.nanosec = int(round((float(seconds) - whole) * 1.0e9))
+        return duration
+
+    def _build_gripper_goal(
+        self,
+        target: GripperTarget,
+        start_state: Mapping[str, float],
+        factories: RosMoveItFactories,
+    ) -> Any:
+        """Two-point FollowJointTrajectory goal on the gripper joints."""
+        goal = factories.follow_joint_trajectory_goal_factory()
+        trajectory = goal.trajectory
+        trajectory.joint_names = list(self._gripper_joint_names)
+        start = factories.joint_trajectory_point_factory()
+        start.positions = [
+            float(start_state["gripper_joint1"]),
+            float(start_state["gripper_joint2"]),
+        ]
+        start.time_from_start = self._duration_message(0.0, factories)
+        commanded = logical_gripper_to_fingers(float(target.opening_m))
+        end = factories.joint_trajectory_point_factory()
+        end.positions = [float(commanded[0]), float(commanded[1])]
+        end.time_from_start = self._duration_message(
+            float(target.duration_s), factories
+        )
+        trajectory.points = [start, end]
+        goal.goal_tolerance = []
+        for name in self._gripper_joint_names:
+            tolerance = factories.joint_tolerance_factory()
+            tolerance.name = name
+            tolerance.position = float(target.goal_tolerance)
+            goal.goal_tolerance.append(tolerance)
+        return goal
+
+    def _execute_gripper_goal(
+        self,
+        goal: Any,
+        *,
+        target: GripperTarget,
+        timeout_s: float,
+        factories: RosMoveItFactories,
+    ) -> ExecutionResult:
+        """Bounded gripper send; the measured opening decides, not the status."""
+        details: dict[str, object] = {"kind": "gripper"}
+        now = self._clock_fn()
+        deadline = now + timeout_s
+        client = self._gripper_client
+        try:
+            future = client.send_goal_async(goal)
+        except Exception as exc:
+            details["error"] = f"send_goal_async failed: {type(exc).__name__}: {exc}"
+            return ExecutionResult(
+                status=ExecutionStatus.FAILED, details=details, command_messages=0
+            )
+        if not self._wait_future(future, min(now + ACCEPT_TIMEOUT_S, deadline)):
+            details["phase"] = "goal_acceptance"
+            details["error"] = (
+                "gripper goal response not received before the acceptance deadline"
+            )
+            return ExecutionResult(
+                status=ExecutionStatus.TIMED_OUT, details=details, command_messages=1
+            )
+        handle = future.result()
+        if handle is None or not getattr(handle, "accepted", False):
+            details["phase"] = "goal_acceptance"
+            details["accepted"] = False
+            details["error"] = "gripper_controller did not accept the goal"
+            return ExecutionResult(
+                status=ExecutionStatus.REJECTED, details=details, command_messages=0
+            )
+        self._active_handle = handle
+        details["accepted"] = True
+        result_future = handle.get_result_async()
+        if not self._wait_future(result_future, deadline):
+            details["cancel"] = self.cancel_active()
+            self._active_handle = None
+            details["phase"] = "execution"
+            details["error"] = (
+                f"gripper action exceeded the {timeout_s}s wall deadline "
+                "(cancel attempted)"
+            )
+            return ExecutionResult(
+                status=ExecutionStatus.TIMED_OUT, details=details, command_messages=1
+            )
+        self._active_handle = None
+        wrapper = result_future.result()
+        details["goal_status"] = int(wrapper.status)
+        details["action_status"] = _terminal_status_name(
+            wrapper.status, factories.goal_status_type()
+        )
+        commanded = float(target.opening_m)
+        final = self.latest_isaac_state()
+        measured: float | None = None
+        if (
+            final is None
+            or "gripper_joint1" not in final
+            or "gripper_joint2" not in final
+        ):
+            details["measured_opening_error"] = (
+                "no complete isaac finger state was observed after the action"
+            )
+        else:
+            try:
+                measured = fingers_to_logical_gripper(
+                    float(final["gripper_joint1"]), float(final["gripper_joint2"])
+                )
+            except ValueError as exc:
+                details["measured_opening_error"] = str(exc)
+        window_low, window_high = (
+            float(target.expected_opening_m[0]),
+            float(target.expected_opening_m[1]),
+        )
+        details["commanded_opening_m"] = commanded
+        details["measured_opening_m"] = measured
+        details["expected_opening_m"] = [window_low, window_high]
+        details["duration_s"] = float(target.duration_s)
+        final_errors: dict[str, float | None] = {
+            "gripper_opening_m": (
+                None if measured is None else abs(measured - commanded)
+            )
+        }
+        if measured is None:
+            details["error"] = (
+                "the gripper opening could not be measured; refusing to fake "
+                "success"
+            )
+            return ExecutionResult(
+                status=ExecutionStatus.FAILED,
+                planned_waypoints=2,
+                command_messages=1,
+                final_errors=final_errors,
+                details=details,
+            )
+        if not (window_low <= measured <= window_high):
+            details["error"] = (
+                "measured gripper opening is outside the expected opening window"
+            )
+            return ExecutionResult(
+                status=ExecutionStatus.FAILED,
+                planned_waypoints=2,
+                command_messages=1,
+                final_errors=final_errors,
+                details=details,
+            )
+        return ExecutionResult(
+            status=ExecutionStatus.SUCCEEDED,
+            moveit_error_code=SUCCESS_CODE,
+            planned_waypoints=2,
+            command_messages=1,
+            final_errors=final_errors,
+            details=details,
+        )
 
     def _send_goal(
         self, kind: str, target: JointTarget | Link6PoseTarget | TcpPoseTarget, timeout_s: float
@@ -959,19 +2044,25 @@ class RosMoveItRuntime:
         )
 
     def _build_joint_goal(self, target: JointTarget, factories: RosMoveItFactories) -> Any:
-        """MoveGroup joint goal: plan_only false, exact arm JointConstraints."""
+        """MoveGroup joint goal: plan_only false, exact arm JointConstraints.
+
+        The admitted target carries the canonical arm joint names; the
+        constraints are emitted with THIS robot's device joint names in the
+        same canonical order, so a piper_1 goal can never command piper_0's
+        joints.
+        """
         goal = factories.move_group_goal_factory()
         request = factories.motion_plan_request_factory()
-        request.group_name = PLANNING_GROUP
+        request.group_name = self._arm_planning_group
         request.allowed_planning_time = ALLOWED_PLANNING_TIME_S
         request.num_planning_attempts = NUM_PLANNING_ATTEMPTS
         request.max_velocity_scaling_factor = MAX_SCALING_FACTOR
         request.max_acceleration_scaling_factor = MAX_SCALING_FACTOR
         goal_constraints = factories.constraints_factory()
         tolerance = float(target.goal_tolerance)
-        for name in ARM_JOINT_NAMES:
+        for index, name in enumerate(ARM_JOINT_NAMES):
             constraint = factories.joint_constraint_factory()
-            constraint.joint_name = name
+            constraint.joint_name = self._arm_joint_names[index]
             constraint.position = float(target.positions[name])
             constraint.tolerance_above = tolerance
             constraint.tolerance_below = tolerance
@@ -983,16 +2074,45 @@ class RosMoveItRuntime:
         goal.planning_options.replan = False
         return goal
 
+    def _device_link(self, canonical_link: str) -> str:
+        """Map an admitted canonical constraint link onto this robot's link.
+
+        ``rocobrick_tcp``/``link6`` are the only links strict admission lets
+        through; with a profile they resolve to that robot's calibrated TCP /
+        raw flange names, so a piper_1 goal can never constrain piper_0's
+        flange. Without a profile the canonical names are already device
+        names and pass through unchanged.
+        """
+        if canonical_link == TCP_LINK:
+            return self._tcp_link
+        if canonical_link == TIP_LINK:
+            return self._link6_link
+        return canonical_link
+
+    def _device_frame(self, canonical_frame: str) -> str:
+        """Map an admitted canonical frame onto this robot's base frame."""
+        if canonical_frame == BASE_FRAME:
+            return self._base_frame
+        return canonical_frame
+
     def _build_pose_goal(
         self, target: Link6PoseTarget | TcpPoseTarget, factories: RosMoveItFactories
     ) -> Any:
         """MoveGroup pose goal: one SPHERE position + one orientation constraint.
 
-        The planning group follows the target: ``arm`` for link6 goals and
-        ``arm_tcp`` for project-calibrated TCP goals; the constraint link and
-        frame come from the target verbatim (never offset or rewritten).
+        The planning group follows the target: the raw link6 group for link6
+        goals and the calibrated TCP group for project-calibrated TCP goals,
+        both resolved from this robot's profile. The admitted canonical
+        constraint link/frame are mapped onto this robot's device names; the
+        pose values themselves are used verbatim (never offset or rewritten).
         """
-        group = TCP_PLANNING_GROUP if isinstance(target, TcpPoseTarget) else PLANNING_GROUP
+        group = (
+            self._tcp_planning_group
+            if isinstance(target, TcpPoseTarget)
+            else self._arm_planning_group
+        )
+        link = self._device_link(target.tip_link)
+        frame = self._device_frame(target.frame_id)
         goal = factories.move_group_goal_factory()
         request = factories.motion_plan_request_factory()
         request.group_name = group
@@ -1003,8 +2123,8 @@ class RosMoveItRuntime:
         goal_constraints = factories.constraints_factory()
 
         position = factories.position_constraint_factory()
-        position.header.frame_id = target.frame_id
-        position.link_name = target.tip_link
+        position.header.frame_id = frame
+        position.link_name = link
         sphere = factories.solid_primitive_factory()
         sphere.type = getattr(type(sphere), "SPHERE")
         sphere.dimensions = [float(target.position_tolerance_m)]
@@ -1019,8 +2139,8 @@ class RosMoveItRuntime:
         goal_constraints.position_constraints.append(position)
 
         orientation = factories.orientation_constraint_factory()
-        orientation.header.frame_id = target.frame_id
-        orientation.link_name = target.tip_link
+        orientation.header.frame_id = frame
+        orientation.link_name = link
         orientation.orientation.x = float(target.orientation_xyzw[0])
         orientation.orientation.y = float(target.orientation_xyzw[1])
         orientation.orientation.z = float(target.orientation_xyzw[2])
@@ -1142,7 +2262,15 @@ class RosMoveItRuntime:
         )
 
     def _inspect_trajectory(self, action_result: Any) -> tuple[int, AdmissionDecision]:
-        """R1 waypoint admission over the returned planned trajectory."""
+        """R1 waypoint admission over the returned planned trajectory.
+
+        A MoveGroup answer names the ARM device joints of the robot whose
+        move_group produced it. Only a trajectory naming exactly this
+        runtime's arm joints is projected onto the canonical order and
+        admitted; a trajectory naming any other robot's joints keeps its
+        names and is rejected by the R1 admission (whose evidence lists the
+        foreign names), so cross-robot plan output can never be accepted.
+        """
         trajectory = action_result.planned_trajectory.joint_trajectory
         names = [str(name) for name in trajectory.joint_names]
         try:
@@ -1156,6 +2284,14 @@ class RosMoveItRuntime:
                 reason="planned trajectory waypoints are not numeric",
                 details={},
             )
+        if len(names) == len(self._arm_joint_names) and set(names) == set(
+            self._arm_joint_names
+        ):
+            by_device = {
+                device: canonical
+                for canonical, device in zip(ARM_JOINT_NAMES, self._arm_joint_names)
+            }
+            names = [by_device[name] for name in names]
         return len(points), validate_trajectory_waypoints(names, points)
 
     def _verify_final(
@@ -1277,7 +2413,10 @@ class RosMoveItRuntime:
         common: dict[str, object],
         details: dict[str, object],
     ) -> ExecutionResult:
-        if self._fk_verifier is None:
+        verifier = self._fk_verifier
+        if isinstance(target, TcpPoseTarget) and self._tcp_fk_verifier is not None:
+            verifier = self._tcp_fk_verifier
+        if verifier is None:
             details["error"] = (
                 "no fk verification hook was supplied; the exact final pose "
                 "cannot be observed"
@@ -1286,7 +2425,7 @@ class RosMoveItRuntime:
                 status=ExecutionStatus.FAILED, details=details, **common
             )
         try:
-            verified = self._fk_verifier(dict(final))
+            verified = verifier(dict(final))
         except Exception as exc:
             details["error"] = f"fk verification hook raised: {type(exc).__name__}: {exc}"
             return ExecutionResult(
@@ -1376,6 +2515,8 @@ class RosMoveItRuntime:
             ("plan", self._plan_client),
             ("compute_fk", self._fk_client),
             ("apply_planning_scene", self._planning_scene_client),
+            ("get_planning_scene", self._get_planning_scene_client),
+            ("scene_state", self._scene_state_client),
         ):
             try:
                 if client is not None and client_destroyer is not None:
@@ -1387,6 +2528,7 @@ class RosMoveItRuntime:
         for name, client in (
             ("arm_follow", self._arm_client),
             ("move_group", self._move_group_client),
+            ("gripper_follow", self._gripper_client),
         ):
             try:
                 destroy = getattr(client, "destroy", None)
@@ -1400,6 +2542,235 @@ class RosMoveItRuntime:
         self._plan_client = None
         self._fk_client = None
         self._planning_scene_client = None
+        self._get_planning_scene_client = None
+        self._scene_state_client = None
         self._arm_client = None
         self._move_group_client = None
+        self._gripper_client = None
         self._active_handle = None
+
+
+class RosMoveItRobotSession:
+    """One ROS node hosting ONE isolated runtime per plan robot (A5).
+
+    Every robot gets its own :class:`RosMoveItRuntime` built from its
+    :class:`RobotRuntimeProfile`: robot-scoped state topics, controller/FK/
+    plan clients, MoveGroup action and planning-scene clients, arm and
+    gripper follow actions, plus its own state/controller/feedback
+    containers. Nothing is shared except the injected node, the ROS domain,
+    the single injected event pump and the shared ``/clock`` that every
+    profile pins; the profile disjointness is asserted at construction. The
+    host-bridge scene-state Trigger stays the one global A4 service, and each
+    runtime slices its own robot block out of the answer, so there is no
+    canonical fallback of any endpoint and no way to read another robot's
+    observation.
+
+    Read-only readiness is evaluated per robot through
+    :meth:`capability_readiness_by_robot` (joints, controllers, MoveGroup,
+    arm/gripper actions, FK and the robot-scoped scene query) and
+    :meth:`wait_until_ready` requires EVERY robot to pass before the
+    deadline. Nothing here ever sends motion.
+    """
+
+    def __init__(
+        self,
+        node: Any,
+        robot_ids: Sequence[str],
+        *,
+        factories: RosMoveItFactories | None = None,
+        qos_sensor: Any = None,
+        qos_state: Any = None,
+        profile_factory: Callable[[str], RobotRuntimeProfile] = (
+            RobotRuntimeProfile.from_robot_id
+        ),
+        runtime_factory: (
+            Callable[[str, RobotRuntimeProfile], RosMoveItRuntime] | None
+        ) = None,
+        executor_factory: Callable[[RosMoveItRuntime], Any] | None = None,
+        fk_timeout_s: float = SERVICE_CALL_TIMEOUT_S,
+        clock: Callable[[], float] | None = None,
+        spin: Callable[[], None] | None = None,
+        sleep: Callable[[float], None] | None = None,
+        poll_interval_s: float = POLL_INTERVAL_S,
+        wait_step_s: float = WAIT_STEP_S,
+    ) -> None:
+        ids = tuple(robot_ids)
+        if not ids:
+            raise ValueError("a robot session needs at least one robot id")
+        if len(set(ids)) != len(ids):
+            raise ValueError(f"robot ids must be unique, got {list(ids)}")
+        if (
+            not isinstance(fk_timeout_s, (int, float))
+            or not math.isfinite(float(fk_timeout_s))
+            or float(fk_timeout_s) <= 0.0
+        ):
+            raise ValueError(
+                f"fk_timeout_s must be finite and positive, got {fk_timeout_s!r}"
+            )
+        profiles = {
+            robot_id: profile_factory(robot_id) for robot_id in ids
+        }
+        for robot_id, profile in profiles.items():
+            if profile.robot_id != robot_id:
+                raise ValueError(
+                    f"profile for {robot_id!r} reports robot_id "
+                    f"{profile.robot_id!r}"
+                )
+        assert_profiles_disjoint(tuple(profiles[robot_id] for robot_id in ids))
+        self.node = node
+        self.robot_ids = ids
+        self.profiles: dict[str, RobotRuntimeProfile] = profiles
+        self._clock_fn = clock if clock is not None else time.monotonic
+        self._spin_fn = spin if spin is not None else (lambda: None)
+        self._sleep_fn = sleep if sleep is not None else time.sleep
+        self._poll_interval_s = float(poll_interval_s)
+        self._wait_step_s = float(wait_step_s)
+        self.shutdown_errors: list[str] = []
+
+        def default_runtime(
+            robot_id: str, profile: RobotRuntimeProfile
+        ) -> RosMoveItRuntime:
+            holder: dict[str, Any] = {}
+
+            def fk_hook(state: Mapping[str, float]) -> Any:
+                runtime = holder.get("runtime")
+                if runtime is None:
+                    return None
+                return runtime.compute_link6_fk(state, timeout_s=float(fk_timeout_s))
+
+            def tcp_fk_hook(state: Mapping[str, float]) -> Any:
+                runtime = holder.get("runtime")
+                if runtime is None:
+                    return None
+                return runtime.compute_tcp_fk(state, timeout_s=float(fk_timeout_s))
+
+            runtime = RosMoveItRuntime(
+                node,
+                profile=profile,
+                qos_sensor=qos_sensor,
+                qos_state=qos_state,
+                factories=factories,
+                fk_verifier=fk_hook,
+                tcp_fk_verifier=tcp_fk_hook,
+                clock=self._clock_fn,
+                spin=self._spin_fn,
+                sleep=self._sleep_fn,
+                poll_interval_s=self._poll_interval_s,
+                wait_step_s=self._wait_step_s,
+            )
+            holder["runtime"] = runtime
+            return runtime
+
+        create_runtime = runtime_factory if runtime_factory is not None else default_runtime
+        self.runtimes: dict[str, RosMoveItRuntime] = {
+            robot_id: create_runtime(robot_id, profiles[robot_id]) for robot_id in ids
+        }
+        if executor_factory is None:
+            from rocobrick.ros_moveit_executor import RosMoveItExecutor
+
+            def executor_factory(runtime: RosMoveItRuntime) -> Any:  # noqa: E301
+                return RosMoveItExecutor(runtime)
+        self.executors: dict[str, Any] = {
+            robot_id: executor_factory(self.runtimes[robot_id]) for robot_id in ids
+        }
+
+    # ------------------------------------------------------------ registration
+
+    def register(self) -> None:
+        """Register every robot's subscriptions and clients exactly once."""
+        self.register_subscriptions()
+        self.register_clients()
+
+    def register_subscriptions(self) -> None:
+        for runtime in self.runtimes.values():
+            runtime.register_subscriptions()
+
+    def register_clients(self) -> None:
+        for runtime in self.runtimes.values():
+            runtime.register_clients()
+
+    # -------------------------------------------------------------- accessors
+
+    def runtime_for(self, robot_id: str) -> RosMoveItRuntime:
+        """The isolated runtime of ``robot_id``; unknown ids raise KeyError."""
+        try:
+            return self.runtimes[robot_id]
+        except KeyError as error:
+            raise KeyError(
+                f"unknown robot {robot_id!r}; session robots: "
+                f"{list(self.robot_ids)}"
+            ) from error
+
+    def executor_for(self, robot_id: str) -> Any:
+        """The executor bound to ``robot_id``'s runtime; unknown ids raise."""
+        try:
+            return self.executors[robot_id]
+        except KeyError as error:
+            raise KeyError(
+                f"unknown robot {robot_id!r}; session robots: "
+                f"{list(self.robot_ids)}"
+            ) from error
+
+    # -------------------------------------------------------------- readiness
+
+    def capability_readiness_by_robot(
+        self, *, probe_scene: bool = False
+    ) -> dict[str, RobotCapabilityReadiness]:
+        """One read-only capability verdict per robot, keyed by robot id.
+
+        With ``probe_scene`` every robot's scene component is verified
+        against the live per-robot scene response (fail-closed), which is what
+        the session readiness gate uses.
+        """
+        return {
+            robot_id: self.runtimes[robot_id].capability_readiness(
+                probe_scene=probe_scene
+            )
+            for robot_id in self.robot_ids
+        }
+
+    def not_ready_robots(self, *, probe_scene: bool = False) -> tuple[str, ...]:
+        """Robot ids whose capability readiness does not pass right now."""
+        return tuple(
+            robot_id
+            for robot_id, report in self.capability_readiness_by_robot(
+                probe_scene=probe_scene
+            ).items()
+            if not report.passed
+        )
+
+    def wait_until_ready(self, timeout_s: float) -> bool:
+        """Bounded all-robot capability readiness wait; never sends motion.
+
+        True only when EVERY robot's capability readiness holds before the
+        deadline (scene response probed live per robot), so one not-ready
+        robot fails the whole session. The shared spin/sleep hooks are the
+        single injected event pump.
+        """
+        if not math.isfinite(float(timeout_s)) or float(timeout_s) < 0.0:
+            raise ValueError(
+                f"timeout_s must be finite and non-negative, got {timeout_s!r}"
+            )
+        deadline = self._clock_fn() + float(timeout_s)
+        while True:
+            self._spin_fn()
+            if not self.not_ready_robots(probe_scene=True):
+                return True
+            if self._clock_fn() >= deadline:
+                return False
+            self._sleep_fn(self._poll_interval_s)
+
+    # --------------------------------------------------------------- teardown
+
+    def shutdown(self) -> None:
+        """Best-effort teardown of every robot runtime; errors recorded."""
+        for robot_id in self.robot_ids:
+            runtime = self.runtimes[robot_id]
+            try:
+                runtime.shutdown()
+            except Exception as exc:
+                self.shutdown_errors.append(
+                    f"{robot_id}: {type(exc).__name__}: {exc}"
+                )
+            for message in runtime.shutdown_errors:
+                self.shutdown_errors.append(f"{robot_id}: {message}")

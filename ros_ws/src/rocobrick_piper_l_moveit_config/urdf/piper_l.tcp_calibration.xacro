@@ -1,0 +1,54 @@
+<?xml version="1.0"?>
+<!--
+  GENERATED project TCP calibration overlay for the Piper_L MoveIt model
+  (R5.A). Regenerate from the accepted artifact; never hand-edit numbers.
+
+  Provenance (single authority): artifacts/model-audit/piper_l_tcp_binding_contract.json
+    artifact sha256 : dd9a5cc3c7723b782c382bd5f3a667fefa979bbdc751e156e43d5fd8f6065215
+    tcp_contract.status : RESOLVED
+    calibration_authority : project
+    simulation_only : true
+    hardware_validated : false
+    runtime_usd_scoped : true
+    transform.source : artifacts/model-audit/piper_l_tcp_calibration.json
+    transform.sha256 : 4e342f2cdf6d34970d741a091a46e671aee2e6da67be4189136260068b19645d
+
+  The link/joint below carry the EXACT artifact transform
+  parent link6 -> child rocobrick_tcp; the identity rotation quaternion
+  [0.0, 0.0, 0.0, 1.0] is expressed as the URDF-equivalent rpy "0 0 0".
+  tests/test_r5_tcp_moveit.py asserts number-for-number parity with the
+  artifact bytes. Project/simulation-only, runtime-USD-scoped; no hardware
+  claim is made or implied.
+-->
+<robot xmlns:xacro="http://www.ros.org/wiki/xacro">
+  <xacro:macro
+    name="piper_l_tcp_calibration"
+    params="parent:=link6 child:=rocobrick_tcp name:=rocobrick_tcp_joint">
+    <xacro:property
+      name="tcp_binding_artifact"
+      value="artifacts/model-audit/piper_l_tcp_binding_contract.json"/>
+    <xacro:property
+      name="tcp_binding_artifact_sha256"
+      value="dd9a5cc3c7723b782c382bd5f3a667fefa979bbdc751e156e43d5fd8f6065215"/>
+    <xacro:property
+      name="tcp_calibration_source"
+      value="artifacts/model-audit/piper_l_tcp_calibration.json"/>
+    <xacro:property
+      name="tcp_calibration_source_sha256"
+      value="4e342f2cdf6d34970d741a091a46e671aee2e6da67be4189136260068b19645d"/>
+    <xacro:property
+      name="tcp_translation_m"
+      value="-2.189439796129733e-09 -1.8041124150158794e-16 0.06300922673030293"/>
+    <xacro:property
+      name="tcp_rotation_xyzw"
+      value="0.0 0.0 0.0 1.0"/>
+
+    <!-- Zero-geometry tool frame: no visual, no collision, no inertial. -->
+    <link name="${child}"/>
+    <joint name="${name}" type="fixed">
+      <parent link="${parent}"/>
+      <child link="${child}"/>
+      <origin xyz="${tcp_translation_m}" rpy="0 0 0"/>
+    </joint>
+  </xacro:macro>
+</robot>

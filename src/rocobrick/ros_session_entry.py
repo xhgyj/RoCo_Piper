@@ -1,4 +1,4 @@
-"""Container child entry for the runtime session (R4.2).
+"""Container child entry for the runtime session (R4.2, multi-robot A5).
 
 Runs INSIDE the already-started rootless ROS Humble container through::
 
@@ -15,10 +15,25 @@ request, writes the strict
 (always, also on failure), prints exactly one JSON summary line on stdout,
 and shuts the executor/node/rclpy down cleanly.
 
+Multi-robot mode (``--robots piper_0,piper_1``) hosts ONE
+:class:`rocobrick.ros_moveit_runtime.RosMoveItRobotSession` on the same
+single node: one isolated runtime per plan robot (robot-scoped state topics,
+controllers, FK, MoveGroup, arm/gripper actions and scene slicing), the one
+ROS domain and the shared ``/clock``. The request is then the strict
+:class:`RosSessionRequest` document (``robots`` + robot-targeted
+``operations``) and the answer the strict :class:`RosSessionResult`
+document: readiness is evaluated for EVERY robot (also for robots with no
+operation) and when any robot is not ready no operation is dispatched at
+all. Without ``--robots`` the historical single-runtime behavior is
+unchanged.
+
 READINESS is a no-motion operation: nothing is ever published or sent.
-JOINT_TARGET / LINK6_POSE targets are rebuilt through the formal dataclasses
-and re-checked with strict admission immediately before the executor send;
-no target derivation, no plan parsing, and no TCP semantics exist here. The
+JOINT_TARGET / LINK6_POSE / TCP_POSE / GRIPPER_TARGET targets are rebuilt
+through the formal dataclasses and re-checked with strict admission
+immediately before the executor send; APPLY_PLANNING_SCENE and SCENE_QUERY
+are no-motion operations executed against the runtime adapter directly (in
+multi-robot mode the scene query is sliced to the operation's own robot). No
+target derivation, no plan parsing, and no TCP semantics exist here. The
 repository ``src`` tree is consumed exactly as mounted read-only.
 """
 
@@ -26,9 +41,10 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import threading
-from collections.abc import Callable, Mapping
-from dataclasses import asdict
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import asdict, dataclass
 from pathlib import Path
 
 from rocobrick.isaac_backend import (
@@ -38,15 +54,292 @@ from rocobrick.isaac_backend import (
     OperationRejected,
     RuntimeOperation,
     RuntimeOperationResult,
+    planning_scene_update_from_payload,
+    scene_query_from_payload,
     target_for_operation,
 )
-from rocobrick.moveit_contract import JointTarget, Link6PoseTarget
+from rocobrick.moveit_contract import (
+    GripperTarget,
+    JointTarget,
+    Link6PoseTarget,
+    TcpPoseTarget,
+)
 from rocobrick.moveit_execution import ExecutionResult, is_success
 
 SUMMARY_SCHEMA = "rocobrick-runtime-operation-summary/v1"
+SESSION_SUMMARY_SCHEMA = "rocobrick-ros-session-summary/v1"
+SESSION_REQUEST_SCHEMA = "rocobrick-ros-session-request/v1"
+SESSION_RESULT_SCHEMA = "rocobrick-ros-session-result/v1"
 DEFAULT_NODE_NAME = "rocobrick_session_entry"
 FK_TIMEOUT_S = 10.0
 THREAD_JOIN_TIMEOUT_S = 2.0
+# Canonical schema of the host-bridge scene-state document (kept local so the
+# ROS adapter module stays a lazy, in-container-only import).
+SCENE_STATE_SCHEMA = "rocobrick-scene-state/v1"
+
+SESSION_REQUEST_KEYS = frozenset(
+    {"schema", "request_id", "robots", "timeout_s", "operations"}
+)
+SESSION_OPERATION_KEYS = frozenset({"robot_id", "operation"})
+SESSION_RESULT_KEYS = frozenset(
+    {
+        "schema",
+        "request_id",
+        "robots",
+        "readiness_by_robot",
+        "all_ready",
+        "operations",
+        "passed",
+        "error",
+    }
+)
+SESSION_OPERATION_RECORD_KEYS = frozenset(
+    {
+        "robot_id",
+        "operation_id",
+        "kind",
+        "dispatched",
+        "motion_sent",
+        "result",
+    }
+)
+
+
+class RosSessionContractError(ValueError):
+    """Raised when a robot-session document violates its exact schema."""
+
+
+def _require_keys(
+    document: object, expected: frozenset[str], label: str
+) -> Mapping:
+    """Require exactly the expected keys on a JSON object."""
+    if not isinstance(document, Mapping):
+        raise RosSessionContractError(f"{label} must be a JSON object")
+    actual = frozenset(str(key) for key in document)
+    missing = sorted(expected - actual)
+    extra = sorted(actual - expected)
+    if missing or extra:
+        raise RosSessionContractError(
+            f"{label} must carry exactly {sorted(expected)}; "
+            f"missing={missing} extra={extra}"
+        )
+    return document
+
+
+def _session_text(value: object, label: str) -> str:
+    if not isinstance(value, str) or not value:
+        raise RosSessionContractError(f"{label} must be a non-empty string")
+    return value
+
+
+def _session_robot_id(value: object, label: str) -> str:
+    robot_id = _session_text(value, label)
+    if "/" in robot_id:
+        raise RosSessionContractError(f"{label} must be a ROS-safe robot id")
+    return robot_id
+
+
+@dataclass(frozen=True)
+class RobotOperationRequest:
+    """One robot-targeted runtime operation inside a session request."""
+
+    robot_id: str
+    operation: RuntimeOperation
+
+    def serialize(self) -> dict[str, object]:
+        return {"robot_id": self.robot_id, "operation": self.operation.serialize()}
+
+    @classmethod
+    def parse(cls, document: object) -> "RobotOperationRequest":
+        payload = _require_keys(document, SESSION_OPERATION_KEYS, "session operation")
+        robot_id = _session_robot_id(
+            payload["robot_id"], "session operation.robot_id"
+        )
+        try:
+            operation = RuntimeOperation.parse(payload["operation"])
+        except ValueError as error:
+            raise RosSessionContractError(
+                f"session operation of {robot_id!r} is invalid: {error}"
+            ) from error
+        return cls(robot_id=robot_id, operation=operation)
+
+
+@dataclass(frozen=True)
+class RosSessionRequest:
+    """Strict robot-session request: the plan robots plus their operations.
+
+    ``operations`` may be empty: the session then answers readiness only,
+    which is the zero-motion way to collect ``readiness_by_robot`` for every
+    plan robot (including robots with no operation).
+    """
+
+    request_id: str
+    robots: tuple[str, ...]
+    timeout_s: float
+    operations: tuple[RobotOperationRequest, ...]
+
+    def serialize(self) -> dict[str, object]:
+        return {
+            "schema": SESSION_REQUEST_SCHEMA,
+            "request_id": self.request_id,
+            "robots": list(self.robots),
+            "timeout_s": float(self.timeout_s),
+            "operations": [item.serialize() for item in self.operations],
+        }
+
+    @classmethod
+    def parse(cls, document: object) -> "RosSessionRequest":
+        payload = _require_keys(document, SESSION_REQUEST_KEYS, "session request")
+        if payload["schema"] != SESSION_REQUEST_SCHEMA:
+            raise RosSessionContractError(
+                f"session request schema {payload['schema']!r} is not "
+                f"{SESSION_REQUEST_SCHEMA!r}"
+            )
+        request_id = _session_text(payload["request_id"], "session request_id")
+        raw_robots = payload["robots"]
+        if (
+            not isinstance(raw_robots, Sequence)
+            or isinstance(raw_robots, (str, bytes, bytearray))
+        ):
+            raise RosSessionContractError("session robots must be an array")
+        robots = tuple(
+            _session_robot_id(value, "session robots[]") for value in raw_robots
+        )
+        if not robots:
+            raise RosSessionContractError("session robots must not be empty")
+        if len(set(robots)) != len(robots):
+            raise RosSessionContractError("session robots must be unique")
+        timeout_s = payload["timeout_s"]
+        if (
+            isinstance(timeout_s, bool)
+            or not isinstance(timeout_s, (int, float))
+            or not math.isfinite(float(timeout_s))
+            or float(timeout_s) <= 0.0
+        ):
+            raise RosSessionContractError(
+                f"session timeout_s must be finite and positive, got {timeout_s!r}"
+            )
+        raw_operations = payload["operations"]
+        if (
+            not isinstance(raw_operations, Sequence)
+            or isinstance(raw_operations, (str, bytes, bytearray))
+        ):
+            raise RosSessionContractError("session operations must be an array")
+        operations: list[RobotOperationRequest] = []
+        seen: set[str] = set()
+        for index, raw in enumerate(raw_operations):
+            item = RobotOperationRequest.parse(raw)
+            if item.robot_id not in robots:
+                raise RosSessionContractError(
+                    f"session operation {index} targets robot "
+                    f"{item.robot_id!r}, which is not in {list(robots)}"
+                )
+            if item.operation.request_id in seen:
+                raise RosSessionContractError(
+                    f"session operation request_id "
+                    f"{item.operation.request_id!r} is duplicated"
+                )
+            seen.add(item.operation.request_id)
+            operations.append(item)
+        return cls(
+            request_id=request_id,
+            robots=robots,
+            timeout_s=float(timeout_s),
+            operations=tuple(operations),
+        )
+
+
+@dataclass(frozen=True)
+class RosSessionResult:
+    """Strict robot-session answer: per-robot readiness plus per-robot results."""
+
+    request_id: str
+    robots: tuple[str, ...]
+    readiness_by_robot: Mapping[str, Mapping[str, object]]
+    all_ready: bool
+    operations: tuple[Mapping[str, object], ...]
+    passed: bool
+    error: str | None = None
+
+    def serialize(self) -> dict[str, object]:
+        return {
+            "schema": SESSION_RESULT_SCHEMA,
+            "request_id": str(self.request_id),
+            "robots": list(self.robots),
+            "readiness_by_robot": {
+                str(robot_id): dict(report)
+                for robot_id, report in self.readiness_by_robot.items()
+            },
+            "all_ready": bool(self.all_ready),
+            "operations": [dict(record) for record in self.operations],
+            "passed": bool(self.passed),
+            "error": None if self.error is None else str(self.error),
+        }
+
+    @classmethod
+    def parse(cls, document: object) -> "RosSessionResult":
+        payload = _require_keys(document, SESSION_RESULT_KEYS, "session result")
+        if payload["schema"] != SESSION_RESULT_SCHEMA:
+            raise RosSessionContractError(
+                f"session result schema {payload['schema']!r} is not "
+                f"{SESSION_RESULT_SCHEMA!r}"
+            )
+        request_id = _session_text(payload["request_id"], "session result request_id")
+        raw_robots = payload["robots"]
+        if (
+            not isinstance(raw_robots, Sequence)
+            or isinstance(raw_robots, (str, bytes, bytearray))
+        ):
+            raise RosSessionContractError("session result robots must be an array")
+        robots = tuple(str(value) for value in raw_robots)
+        readiness = payload["readiness_by_robot"]
+        if not isinstance(readiness, Mapping):
+            raise RosSessionContractError(
+                "session result readiness_by_robot must be an object"
+            )
+        readiness_by_robot: dict[str, Mapping[str, object]] = {}
+        for robot_id, report in readiness.items():
+            if not isinstance(report, Mapping):
+                raise RosSessionContractError(
+                    f"session result readiness of {robot_id!r} must be an object"
+                )
+            readiness_by_robot[str(robot_id)] = dict(report)
+        raw_operations = payload["operations"]
+        if (
+            not isinstance(raw_operations, Sequence)
+            or isinstance(raw_operations, (str, bytes, bytearray))
+        ):
+            raise RosSessionContractError("session result operations must be an array")
+        operations: list[Mapping[str, object]] = []
+        for record in raw_operations:
+            operations.append(
+                dict(
+                    _require_keys(
+                        record,
+                        SESSION_OPERATION_RECORD_KEYS,
+                        "session operation record",
+                    )
+                )
+            )
+        for name in ("all_ready", "passed"):
+            if not isinstance(payload[name], bool):
+                raise RosSessionContractError(
+                    f"session result {name} must be a boolean"
+                )
+        error = payload["error"]
+        if error is not None and not isinstance(error, str):
+            raise RosSessionContractError(
+                "session result error must be a string or null"
+            )
+        return cls(
+            request_id=request_id,
+            robots=robots,
+            readiness_by_robot=readiness_by_robot,
+            all_ready=bool(payload["all_ready"]),
+            operations=tuple(operations),
+            passed=bool(payload["passed"]),
+            error=error,
+        )
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -79,7 +372,33 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="NAME",
         help=f"rclpy node name (default: {DEFAULT_NODE_NAME})",
     )
+    parser.add_argument(
+        "--robots",
+        default=None,
+        metavar="ID[,ID...]",
+        help=(
+            "comma-separated plan robot ids; enables the multi-robot session "
+            "request/result documents (one isolated runtime per robot on one "
+            "node). Omit for the single-runtime operation mode."
+        ),
+    )
     return parser
+
+
+def parse_robots(value: str | None) -> tuple[str, ...] | None:
+    """Parse the ``--robots`` argument into unique robot ids, or None."""
+    if value is None:
+        return None
+    parts = [item.strip() for item in value.split(",")]
+    if not parts or any(not item for item in parts):
+        raise ValueError("--robots must be a comma-separated list of robot ids")
+    robots = tuple(parts)
+    if len(set(robots)) != len(robots):
+        raise ValueError("--robots must not repeat a robot id")
+    for robot_id in robots:
+        if "/" in robot_id:
+            raise ValueError("--robots entries must be ROS-safe robot ids")
+    return robots
 
 
 def load_request(path: Path) -> RuntimeOperation:
@@ -88,7 +407,13 @@ def load_request(path: Path) -> RuntimeOperation:
     return RuntimeOperation.parse(document)
 
 
-def write_result(path: Path, result: RuntimeOperationResult) -> None:
+def load_session_request(path: Path) -> RosSessionRequest:
+    """Load and strictly parse the robot-session request document."""
+    document = json.loads(path.read_text(encoding="utf-8"))
+    return RosSessionRequest.parse(document)
+
+
+def write_result(path: Path, result: object) -> None:
     """Write the result document atomically (tmp file + rename)."""
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_suffix(path.suffix + ".tmp")
@@ -118,7 +443,10 @@ def execution_record(outcome: ExecutionResult) -> dict[str, object]:
         "planned_waypoints": outcome.planned_waypoints,
         "command_messages": outcome.command_messages,
         "final_errors": {
-            name: float(value) for name, value in outcome.final_errors.items()
+            # An unmeasurable final error (e.g. a mimic-violating gripper
+            # sample) stays an explicit null instead of crashing the record.
+            name: (None if value is None else float(value))
+            for name, value in outcome.final_errors.items()
         },
         "is_success": is_success(outcome),
         "details": _jsonable(dict(outcome.details)),
@@ -135,12 +463,67 @@ def _rejected_record(reason: str) -> dict[str, object]:
     }
 
 
+def filter_scene_state(document: Mapping, query: Mapping) -> dict[str, object]:
+    """Project a scene-state document onto one normalized scene query.
+
+    Pure helper: the document schema must match exactly, every requested
+    brick id must exist in ``document["bricks"]`` and every requested pair
+    must exist in ``document["connections"]`` after normalizing both orders
+    onto the sorted ``"a|b"`` key. The gripper block and the logical opening
+    are copied only when the query asks for them. Any missing requested
+    entry raises ``ValueError`` with the offending id/key so the caller can
+    report a failed result instead of a partial scene.
+    """
+    if (
+        not isinstance(document, Mapping)
+        or document.get("schema") != SCENE_STATE_SCHEMA
+    ):
+        raise ValueError(
+            f"scene-state schema must be exactly {SCENE_STATE_SCHEMA!r}"
+        )
+    bricks_document = document.get("bricks")
+    connections_document = document.get("connections")
+    if not isinstance(bricks_document, Mapping):
+        raise ValueError("scene-state document carries no bricks mapping")
+    if not isinstance(connections_document, Mapping):
+        raise ValueError("scene-state document carries no connections mapping")
+    bricks: dict[str, object] = {}
+    for brick_id in query["brick_physical_instance_ids"]:
+        if brick_id not in bricks_document:
+            raise ValueError(
+                f"scene-state document carries no brick {str(brick_id)!r}"
+            )
+        bricks[str(brick_id)] = bricks_document[brick_id]
+    connections: dict[str, object] = {}
+    for pair in query["connection_pairs"]:
+        key = "|".join(sorted((str(pair[0]), str(pair[1]))))
+        if key not in connections_document:
+            raise ValueError(
+                f"scene-state document carries no connection {key!r}"
+            )
+        connections[key] = connections_document[key]
+    filtered: dict[str, object] = {
+        "sim_time_s": document["sim_time_s"],
+        "bricks": bricks,
+        "connections": connections,
+    }
+    # A robot-scoped view names its robot so a per-robot answer is
+    # attributable; the canonical single-robot document carries no robot id.
+    if "robot_id" in document:
+        filtered["robot_id"] = document["robot_id"]
+    if query["include_gripper"]:
+        filtered["gripper"] = document.get("gripper")
+        filtered["opening_m"] = document.get("opening_m")
+    return filtered
+
+
 def perform_operation(
     operation: RuntimeOperation,
     *,
     runtime: object,
     executor: object,
     fk_timeout_s: float = FK_TIMEOUT_S,
+    robot_scoped: bool = False,
 ) -> RuntimeOperationResult:
     """Execute one operation against an (already spinning) runtime.
 
@@ -150,23 +533,60 @@ def perform_operation(
     in (not constructed) so offline tests can drive this function with
     fakes. READINESS never sends motion; motion operations rebuild the
     formal target and re-run strict admission before delegating exactly once
-    to the executor.
+    to the executor. APPLY_PLANNING_SCENE and SCENE_QUERY pass the same
+    readiness gate for uniformity but execute against the runtime adapter
+    directly and never send motion.
+
+    With ``robot_scoped=True`` the runtime must be a profiled per-robot
+    runtime: readiness is the FULL capability gate of that robot (joints,
+    controllers, MoveGroup, arm and gripper actions, FK and the scene
+    query) and the SCENE_QUERY operation is sliced to that robot's own
+    observation block, so a session can never answer with another robot's
+    data.
     """
     evidence: dict[str, object] = {}
     try:
         runtime.register_subscriptions()
         runtime.register_clients()
-        waited_ok = bool(runtime.wait_until_ready(timeout_s=operation.timeout_s))
-        snapshot = runtime.readiness_snapshot()
-        snapshot_map: dict[str, object] = dict(asdict(snapshot))
-        readiness_passed = bool(waited_ok and snapshot.passed)
-        evidence.update(
-            {
-                "waited_ok": waited_ok,
-                "passed": readiness_passed,
-                "snapshot": snapshot_map,
-            }
-        )
+        if robot_scoped:
+            robot_id = str(getattr(runtime, "robot_id", "") or "")
+            if not robot_id:
+                return RuntimeOperationResult(
+                    request_id=operation.request_id,
+                    kind=operation.kind,
+                    passed=False,
+                    execution={"motion_sent": False},
+                    evidence=dict(evidence),
+                    error=(
+                        "robot-scoped operation requires a profiled per-robot "
+                        "runtime; this runtime carries no robot id"
+                    ),
+                )
+            waited_ok = bool(
+                runtime.wait_until_capability_ready(timeout_s=operation.timeout_s)
+            )
+            capability = runtime.capability_readiness(probe_scene=True)
+            readiness_passed = bool(waited_ok and capability.passed)
+            evidence.update(
+                {
+                    "robot_id": robot_id,
+                    "waited_ok": waited_ok,
+                    "passed": readiness_passed,
+                    "capability": capability.serialize(),
+                    "snapshot": dict(asdict(runtime.readiness_snapshot())),
+                }
+            )
+        else:
+            waited_ok = bool(runtime.wait_until_ready(timeout_s=operation.timeout_s))
+            snapshot = runtime.readiness_snapshot()
+            readiness_passed = bool(waited_ok and snapshot.passed)
+            evidence.update(
+                {
+                    "waited_ok": waited_ok,
+                    "passed": readiness_passed,
+                    "snapshot": dict(asdict(snapshot)),
+                }
+            )
         if operation.kind is OperationKind.READINESS:
             evidence["motion_sent"] = False
             if not readiness_passed:
@@ -206,6 +626,70 @@ def perform_operation(
                 evidence=evidence,
                 error="readiness phase failed before the goal send",
             )
+        if operation.kind is OperationKind.APPLY_PLANNING_SCENE:
+            try:
+                update = planning_scene_update_from_payload(operation.payload)
+            except OperationContractError as error:
+                raise OperationRejected(
+                    "planning-scene update rejected before apply: "
+                    f"{error}"
+                ) from error
+            outcome = runtime.apply_planning_scene(
+                update, timeout_s=operation.timeout_s
+            )
+            evidence["motion_sent"] = False
+            record = {
+                "motion_sent": False,
+                "goals_sent": 0,
+                "passed": bool(outcome.passed),
+                "applied_object_ids": [str(value) for value in outcome.applied_object_ids],
+                "scene_digest": outcome.scene_digest,
+                "details": _jsonable(dict(outcome.details)),
+            }
+            return RuntimeOperationResult(
+                request_id=operation.request_id,
+                kind=operation.kind,
+                passed=bool(outcome.passed),
+                execution=record,
+                evidence=evidence,
+                error=(
+                    None
+                    if outcome.passed
+                    else "the APPLY_PLANNING_SCENE update did not pass: "
+                    f"{record['details'].get('error', 'the applier reported failure')}"
+                ),
+            )
+        if operation.kind is OperationKind.SCENE_QUERY:
+            query = scene_query_from_payload(operation.payload)
+            try:
+                if robot_scoped:
+                    document = runtime.query_robot_scene_state(
+                        timeout_s=operation.timeout_s
+                    )
+                else:
+                    document = runtime.query_scene_state(
+                        timeout_s=operation.timeout_s
+                    )
+            except RuntimeError as error:
+                evidence["motion_sent"] = False
+                return RuntimeOperationResult(
+                    request_id=operation.request_id,
+                    kind=operation.kind,
+                    passed=False,
+                    execution={"motion_sent": False, "scene_state": None},
+                    evidence=evidence,
+                    error=f"the scene-state query failed: {error}",
+                )
+            filtered = filter_scene_state(document, query)
+            evidence["motion_sent"] = False
+            return RuntimeOperationResult(
+                request_id=operation.request_id,
+                kind=operation.kind,
+                passed=True,
+                execution={"motion_sent": False, "scene_state": filtered},
+                evidence=evidence,
+                error=None,
+            )
         target = target_for_operation(operation)
         if isinstance(target, JointTarget):
             outcome = executor.execute_joint(
@@ -213,6 +697,14 @@ def perform_operation(
             )
         elif isinstance(target, Link6PoseTarget):
             outcome = executor.execute_link6_pose(
+                target, timeout_s=operation.timeout_s
+            )
+        elif isinstance(target, TcpPoseTarget):
+            outcome = executor.execute_tcp_pose(
+                target, timeout_s=operation.timeout_s
+            )
+        elif isinstance(target, GripperTarget):
+            outcome = executor.execute_gripper(
                 target, timeout_s=operation.timeout_s
             )
         else:  # pragma: no cover - target_for_operation narrows the type
@@ -254,8 +746,174 @@ def perform_operation(
         )
 
 
+def _operation_record(
+    item: RobotOperationRequest,
+    outcome: RuntimeOperationResult,
+    *,
+    dispatched: bool,
+) -> dict[str, object]:
+    """One robot-targeted session operation record (JSON-safe, strict keys)."""
+    return {
+        "robot_id": item.robot_id,
+        "operation_id": item.operation.request_id,
+        "kind": str(item.operation.kind.value),
+        "dispatched": bool(dispatched),
+        "motion_sent": bool(outcome.execution.get("motion_sent") is True),
+        "result": _jsonable(outcome.serialize()),
+    }
+
+
+def _refused_operation_result(
+    item: RobotOperationRequest,
+    error: str | None,
+    *,
+    evidence: Mapping[str, object],
+) -> RuntimeOperationResult:
+    """Zero-motion failed answer for an operation that was never dispatched."""
+    return RuntimeOperationResult(
+        request_id=item.operation.request_id,
+        kind=item.operation.kind,
+        passed=False,
+        execution={"motion_sent": False, "goals_sent": 0},
+        evidence={"robot_id": item.robot_id, **dict(evidence)},
+        error=error,
+    )
+
+
+def perform_session(
+    session: object,
+    request: RosSessionRequest,
+    *,
+    fk_timeout_s: float = FK_TIMEOUT_S,
+) -> RosSessionResult:
+    """Execute one robot-session request against an (already built) session.
+
+    ``session`` is a
+    :class:`rocobrick.ros_moveit_runtime.RosMoveItRobotSession` (or an
+    equivalent duck-typed object) and is passed in, not constructed, so
+    offline tests can drive this function with injected transports.
+
+    Read-only capability readiness is collected for EVERY configured robot
+    first. When any robot is not ready, NO operation is dispatched at all:
+    every requested operation is answered with a robot-scoped failed record
+    and ``motion_sent=False``. When all robots are ready, each operation runs
+    on its own robot's runtime/executor through :func:`perform_operation`
+    with ``robot_scoped=True`` in request order, and every record names its
+    robot id, so results are never merged across robots.
+    """
+    readiness: dict[str, Mapping[str, object]] = {}
+    records: list[dict[str, object]] = []
+
+    def answer(
+        *,
+        all_ready: bool,
+        passed: bool,
+        error: str | None,
+    ) -> RosSessionResult:
+        completed = {str(record["operation_id"]) for record in records}
+        for item in request.operations:
+            if item.operation.request_id in completed:
+                continue
+            records.append(
+                _operation_record(
+                    item,
+                    _refused_operation_result(
+                        item, error, evidence={"all_ready": all_ready}
+                    ),
+                    dispatched=False,
+                )
+            )
+        return RosSessionResult(
+            request_id=request.request_id,
+            robots=request.robots,
+            readiness_by_robot=readiness,
+            all_ready=bool(all_ready),
+            operations=tuple(records),
+            passed=bool(passed),
+            error=error,
+        )
+
+    try:
+        session_robots = tuple(getattr(session, "robot_ids", ()))
+        if session_robots != request.robots:
+            return answer(
+                all_ready=False,
+                passed=False,
+                error=(
+                    f"session robots {list(session_robots)} do not match the "
+                    f"request robots {list(request.robots)}"
+                ),
+            )
+        session.register()
+        waited_ok = bool(session.wait_until_ready(timeout_s=request.timeout_s))
+        reports = session.capability_readiness_by_robot(probe_scene=True)
+        readiness = {
+            str(robot_id): dict(report.serialize())
+            for robot_id, report in reports.items()
+        }
+        all_ready = bool(
+            waited_ok
+            and readiness
+            and set(readiness) == set(request.robots)
+            and all(bool(report.get("passed")) for report in readiness.values())
+        )
+        if not all_ready:
+            not_ready = sorted(
+                robot_id
+                for robot_id, report in readiness.items()
+                if not bool(report.get("passed"))
+            )
+            error = (
+                "robot readiness failed for "
+                f"{not_ready or list(request.robots)}; no operation was "
+                "dispatched"
+            )
+            for item in request.operations:
+                records.append(
+                    _operation_record(
+                        item,
+                        _refused_operation_result(
+                            item,
+                            error,
+                            evidence={
+                                "robot_ready": readiness.get(item.robot_id),
+                                "all_ready": False,
+                            },
+                        ),
+                        dispatched=False,
+                    )
+                )
+            return answer(all_ready=False, passed=False, error=error)
+        for item in request.operations:
+            outcome = perform_operation(
+                item.operation,
+                runtime=session.runtime_for(item.robot_id),
+                executor=session.executor_for(item.robot_id),
+                fk_timeout_s=fk_timeout_s,
+                robot_scoped=True,
+            )
+            records.append(_operation_record(item, outcome, dispatched=True))
+        failed = [
+            str(record["operation_id"])
+            for record in records
+            if not bool(record["result"].get("passed"))
+        ]
+        passed = not failed
+        return answer(
+            all_ready=True,
+            passed=passed,
+            error=None if passed else f"session operations failed: {failed}",
+        )
+    except Exception as exc:  # noqa: BLE001 - the child must always answer
+        return answer(
+            all_ready=False,
+            passed=False,
+            error=f"{type(exc).__name__}: {exc}",
+        )
+
+
 def _make_fk_hook(
-    holder: dict, fk_timeout_s: float
+    holder: dict, fk_timeout_s: float, *, tcp: bool = False
 ) -> Callable[[Mapping[str, float]], object]:
     """Runtime ``fk_verifier`` hook delegating to the live /compute_fk."""
 
@@ -263,7 +921,8 @@ def _make_fk_hook(
         runtime = holder.get("runtime")
         if runtime is None:
             return None
-        return runtime.compute_link6_fk(state, timeout_s=fk_timeout_s)
+        verifier = runtime.compute_tcp_fk if tcp else runtime.compute_link6_fk
+        return verifier(state, timeout_s=fk_timeout_s)
 
     return fk_hook
 
@@ -285,7 +944,11 @@ def _spin_up(
     thread = threading.Thread(target=background.spin, daemon=True)
     thread.start()
     holder: dict = {}
-    runtime = RosMoveItRuntime(node, fk_verifier=_make_fk_hook(holder, fk_timeout_s))
+    runtime = RosMoveItRuntime(
+        node,
+        fk_verifier=_make_fk_hook(holder, fk_timeout_s),
+        tcp_fk_verifier=_make_fk_hook(holder, fk_timeout_s, tcp=True),
+    )
     holder["runtime"] = runtime
     executor = RosMoveItExecutor(runtime)
     return runtime, executor, background, thread, node
@@ -305,6 +968,39 @@ def _spin_down(
         rclpy.shutdown()
 
 
+def _spin_up_session(
+    node_name: str, robots: tuple[str, ...], fk_timeout_s: float
+) -> tuple[object, object, threading.Thread, object]:
+    """Create ONE node hosting one isolated runtime per plan robot (A5)."""
+    import rclpy
+    from rclpy.executors import SingleThreadedExecutor
+
+    from rocobrick.ros_moveit_runtime import RosMoveItRobotSession
+
+    rclpy.init()
+    node = rclpy.create_node(node_name)
+    background = SingleThreadedExecutor()
+    background.add_node(node)
+    thread = threading.Thread(target=background.spin, daemon=True)
+    thread.start()
+    session = RosMoveItRobotSession(node, robots, fk_timeout_s=fk_timeout_s)
+    return session, background, thread, node
+
+
+def _spin_down_session(
+    session: object, background: object, thread: threading.Thread, node: object
+) -> None:
+    """Orderly session teardown: quiesce the spin before destroying the node."""
+    import rclpy
+
+    session.shutdown()
+    background.shutdown()
+    thread.join(timeout=THREAD_JOIN_TIMEOUT_S)
+    node.destroy_node()
+    if rclpy.ok():
+        rclpy.shutdown()
+
+
 def _fallback_result(error: str) -> RuntimeOperationResult:
     """Schema-conform failure answer for an unparseable request."""
     return RuntimeOperationResult(
@@ -317,9 +1013,49 @@ def _fallback_result(error: str) -> RuntimeOperationResult:
     )
 
 
+def _fallback_session_result(
+    error: str, *, robots: tuple[str, ...] = ()
+) -> RosSessionResult:
+    """Schema-conform failure answer for an unparseable session request."""
+    return RosSessionResult(
+        request_id="",
+        robots=robots,
+        readiness_by_robot={},
+        all_ready=False,
+        operations=(),
+        passed=False,
+        error=error,
+    )
+
+
 def main(argv: list[str] | None = None) -> int:
-    """Run the child entry; exactly one stdout JSON summary line is printed."""
+    """Run the child entry; exactly one stdout JSON summary line is printed.
+
+    Without ``--robots`` the historical single-runtime operation mode runs
+    unchanged. With ``--robots`` the multi-robot session mode runs one
+    isolated runtime per plan robot on one node and answers the strict
+    session result document.
+    """
     args = build_parser().parse_args(argv)
+    try:
+        robots = parse_robots(args.robots)
+    except ValueError as error:
+        result = _fallback_session_result(
+            f"request could not be loaded: {error}", robots=()
+        )
+        write_result(args.result, result)
+        print(
+            json.dumps(_session_summary(result, args.result), sort_keys=True),
+            flush=True,
+        )
+        return 2
+    if robots is None:
+        return _main_operation(args)
+    return _main_session(args, robots)
+
+
+def _main_operation(args: argparse.Namespace) -> int:
+    """Single-runtime operation mode (unchanged R4.2 behavior)."""
     try:
         operation = load_request(args.request)
     except (OSError, OperationContractError, ValueError) as error:
@@ -360,6 +1096,60 @@ def main(argv: list[str] | None = None) -> int:
     return 0 if result.passed else 1
 
 
+def _main_session(args: argparse.Namespace, robots: tuple[str, ...]) -> int:
+    """Multi-robot session mode: per-robot readiness plus robot-routed ops."""
+    try:
+        request = load_session_request(args.request)
+    except (OSError, OperationContractError, ValueError) as error:
+        result = _fallback_session_result(
+            f"request could not be loaded: {error}", robots=robots
+        )
+        write_result(args.result, result)
+        print(
+            json.dumps(_session_summary(result, args.result), sort_keys=True),
+            flush=True,
+        )
+        return 2
+    if request.robots != robots:
+        result = _fallback_session_result(
+            "session request robots "
+            f"{list(request.robots)} do not match --robots {list(robots)}",
+            robots=robots,
+        )
+        write_result(args.result, result)
+        print(
+            json.dumps(_session_summary(result, args.result), sort_keys=True),
+            flush=True,
+        )
+        return 2
+    session = background = node = None
+    thread: threading.Thread | None = None
+    try:
+        session, background, thread, node = _spin_up_session(
+            args.node_name, robots, min(FK_TIMEOUT_S, request.timeout_s)
+        )
+        result = perform_session(session, request)
+    except Exception as error:  # noqa: BLE001 - the child must always answer
+        result = RosSessionResult(
+            request_id=request.request_id,
+            robots=request.robots,
+            readiness_by_robot={},
+            all_ready=False,
+            operations=(),
+            passed=False,
+            error=f"{type(error).__name__}: {error}",
+        )
+    finally:
+        if session is not None:
+            try:
+                _spin_down_session(session, background, thread, node)
+            except Exception:  # pragma: no cover - defensive teardown
+                pass
+    write_result(args.result, result)
+    print(json.dumps(_session_summary(result, args.result), sort_keys=True), flush=True)
+    return 0 if result.passed else 1
+
+
 def _summary(result: RuntimeOperationResult, result_path: Path) -> dict[str, object]:
     """The single stdout summary line payload."""
     return {
@@ -367,6 +1157,20 @@ def _summary(result: RuntimeOperationResult, result_path: Path) -> dict[str, obj
         "result_schema": OPERATION_RESULT_SCHEMA,
         "request_id": result.request_id,
         "kind": str(result.kind.value),
+        "passed": result.passed,
+        "result_path": str(result_path),
+        "error": result.error,
+    }
+
+
+def _session_summary(result: RosSessionResult, result_path: Path) -> dict[str, object]:
+    """The single stdout summary line payload of the multi-robot session."""
+    return {
+        "schema": SESSION_SUMMARY_SCHEMA,
+        "result_schema": SESSION_RESULT_SCHEMA,
+        "request_id": result.request_id,
+        "robots": list(result.robots),
+        "all_ready": result.all_ready,
         "passed": result.passed,
         "result_path": str(result_path),
         "error": result.error,

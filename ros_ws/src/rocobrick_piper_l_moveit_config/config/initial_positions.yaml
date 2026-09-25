@@ -1,0 +1,14 @@
+# Adapted from the pinned vendor reference
+# isaac/vendor/agx_arm_sim/Moveit2/piper_l_gripper_moveit_config/config/initial_positions.yaml
+# (unchanged). Used as the ros2_control initial_value source.
+# Default initial positions for piper_l's ros2_control fake system
+
+initial_positions:
+  gripper_joint1: 0
+  gripper_joint2: 0
+  joint1: 0
+  joint2: 0
+  joint3: 0
+  joint4: 0
+  joint5: 0
+  joint6: 0
