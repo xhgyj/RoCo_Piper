@@ -1,0 +1,17 @@
+{
+  "contact_window_slop_m": 0.006,
+  "free_window_slop_m": 0.01,
+  "gripper_duration_s": 2.5,
+  "gripper_goal_tolerance": 0.01,
+  "hold_follow_tolerance_m": 0.02,
+  "lift_height_m": 0.12,
+  "open_extra_m": 0.02,
+  "orientation_tolerance_rad": 0.03,
+  "position_tolerance_m": 0.01,
+  "pregrasp_standoff_m": 0.08,
+  "scene_query_poll_s": 0.2,
+  "squeeze_m": 0.004,
+  "still_tolerance_m": 0.01,
+  "transit_extra_height_m": 0.1,
+  "wait_duration_s": 2.0
+}

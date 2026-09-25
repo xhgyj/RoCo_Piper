@@ -3,12 +3,20 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Awaitable, Callable, Protocol
+from typing import Awaitable, Callable, Protocol, runtime_checkable
 from uuid import uuid4
 
 from rocobrick.models import FailureReason, TaskDefinition
-from rocobrick.skills import PhaseResult, PhaseStatus, SkillPhase, program_for
+from rocobrick.skills import PhaseResult, PhaseStatus, SkillPhase, SkillType, program_for
 from rocobrick.task_facts import EventType, ExecutionEvent
+
+
+@runtime_checkable
+class TaskRef(Protocol):
+    """Minimal task identity: execute_skill needs only these two attributes."""
+
+    task_id: str
+    skill: SkillType
 
 
 class PhysicalPhaseBackend(Protocol):
@@ -37,7 +45,7 @@ EventSink = Callable[[ExecutionEvent], None]
 
 
 async def execute_skill(
-    task: TaskDefinition,
+    task: TaskRef,
     run_id: str,
     backend: PhysicalPhaseBackend,
     publish: EventSink,

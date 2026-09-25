@@ -1,4 +1,9 @@
-"""Explicit Skill phase protocols; failures never imply a different action."""
+"""Explicit Skill phase protocols; failures never imply a different action.
+
+The registry pins one immutable phase program per executable skill type:
+PICK (grasp one brick), TRANSIT (one measured transport pose above the
+grasp workspace) and WAIT (one bounded clock-elapsed hold).
+"""
 
 from __future__ import annotations
 
@@ -41,6 +46,14 @@ PICK_PROGRAM = SkillProgram(
     ),
 )
 
+TRANSIT_PROGRAM = SkillProgram(
+    SkillType.TRANSIT,
+    (SkillPhase("reach_transit", ActionType.TRANSPORT, "measured_pose"),),
+)
+WAIT_PROGRAM = SkillProgram(
+    SkillType.WAIT,
+    (SkillPhase("hold", ActionType.YIELD, "clock_elapsed"),),
+)
 PLACE_DOWN_PROGRAM = SkillProgram(
     SkillType.PLACE_DOWN,
     (
@@ -55,7 +68,12 @@ PLACE_DOWN_PROGRAM = SkillProgram(
     ),
 )
 
-PROGRAMS = {SkillType.PICK: PICK_PROGRAM, SkillType.PLACE_DOWN: PLACE_DOWN_PROGRAM}
+PROGRAMS = {
+    SkillType.PICK: PICK_PROGRAM,
+    SkillType.TRANSIT: TRANSIT_PROGRAM,
+    SkillType.WAIT: WAIT_PROGRAM,
+    SkillType.PLACE_DOWN: PLACE_DOWN_PROGRAM,
+}
 
 
 @dataclass(frozen=True)

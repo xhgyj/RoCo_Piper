@@ -1,0 +1,25 @@
+{
+  "frame_id": "world",
+  "objects": [
+    {
+      "asset_revision_sha256": "02b5f86513f1daaf6763b787c5a791b1acd0a7656e8cf0fb1e5420e623f9cae3",
+      "brick_id": 2,
+      "physical_instance_id": "brick-4bbba49bec24496bb21e",
+      "prim_path": "/World/managed/Parts/Part_1",
+      "provenance": {
+        "source": "example1-declared-manifest"
+      }
+    },
+    {
+      "asset_revision_sha256": "02b5f86513f1daaf6763b787c5a791b1acd0a7656e8cf0fb1e5420e623f9cae3",
+      "brick_id": 2,
+      "physical_instance_id": "brick-768de5a17827920c48d4",
+      "prim_path": "/World/managed/Parts/Part_2",
+      "provenance": {
+        "source": "example1-declared-manifest"
+      }
+    }
+  ],
+  "scene_id": "example1-compound-pick-20260915T130000Z",
+  "schema": "rocobrick-scene-snapshot-manifest/v1"
+}
