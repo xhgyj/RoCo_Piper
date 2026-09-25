@@ -14,6 +14,7 @@ import no tools/smoke/STAP modules and keep ROS/Isaac imports lazy.
 from __future__ import annotations
 
 import ast
+import dataclasses
 import json
 from pathlib import Path
 
@@ -21,24 +22,42 @@ import pytest
 
 from rocobrick import ros_session_entry, runtime_session
 from rocobrick.isaac_backend import (
+    GRIPPER_PAYLOAD_KEYS,
     OPERATION_KEYS,
     OPERATION_RESULT_KEYS,
     OPERATION_RESULT_SCHEMA,
     OPERATION_SCHEMA,
+    PLANNING_SCENE_PAYLOAD_KEYS,
+    SCENE_QUERY_PAYLOAD_KEYS,
+    TCP_PAYLOAD_KEYS,
     OperationContractError,
     OperationKind,
     OperationRejected,
     RuntimeOperation,
     RuntimeOperationResult,
+    gripper_operation,
+    gripper_target_from_payload,
     joint_operation,
     joint_target_from_payload,
     link6_pose_operation,
     link6_pose_target_from_payload,
+    planning_scene_operation,
+    planning_scene_update_from_payload,
     readiness_operation,
+    scene_query_from_payload,
+    scene_query_operation,
     target_for_operation,
+    tcp_pose_operation,
+    tcp_pose_target_from_payload,
 )
-from rocobrick.moveit_contract import JointTarget, Link6PoseTarget
+from rocobrick.moveit_contract import GripperTarget, JointTarget, Link6PoseTarget, TcpPoseTarget
 from rocobrick.moveit_execution import ExecutionResult, ExecutionStatus
+from rocobrick.planning_scene import (
+    PlanningSceneResult,
+    PlanningSceneUpdate,
+    box_from_aabb,
+    scene_digest,
+)
 from rocobrick.ros_moveit_runtime import ReadinessSnapshot
 from rocobrick.runtime_session import (
     CONTAINER_MESH_PROFILE,
@@ -51,6 +70,7 @@ from rocobrick.runtime_session import (
     RuntimeSessionStatus,
     SubprocessRunner,
 )
+from rocobrick.tcp_contract import EXPECTED_RUNTIME_MODEL_SHA256
 
 ROOT = Path(__file__).parents[1]
 SRC = ROOT / "src" / "rocobrick"
@@ -420,6 +440,33 @@ def test_config_defaults_and_validation(tmp_path):
         RuntimeSessionConfig(repo_root=tmp_path, shutdown_timeout_s=0.0)
 
 
+def test_config_scene_group_requires_all_five_fields(tmp_path):
+    scene = {
+        "scene_manifest": tmp_path / "scene-manifest.json",
+        "scene_snapshot_out": tmp_path / "scene-snapshot.json",
+        "host_instance_id": "host-example1",
+        "plan_path": tmp_path / "plan.json",
+        "config_path": tmp_path / "user-config.json",
+    }
+    complete = RuntimeSessionConfig(repo_root=tmp_path, **scene)
+    assert complete.plan_path is scene["plan_path"]
+    assert complete.config_path is scene["config_path"]
+    for name in scene:
+        partial = {key: value for key, value in scene.items() if key != name}
+        with pytest.raises(ValueError):
+            RuntimeSessionConfig(repo_root=tmp_path, **partial)
+    with pytest.raises(ValueError):
+        RuntimeSessionConfig(
+            repo_root=tmp_path,
+            plan_path=scene["plan_path"],
+            config_path=scene["config_path"],
+        )
+    with pytest.raises(ValueError):
+        RuntimeSessionConfig(repo_root=tmp_path, plan_path="plan.json")
+    with pytest.raises(ValueError):
+        RuntimeSessionConfig(repo_root=tmp_path, config_path="user-config.json")
+
+
 def test_readiness_evidence_passed_requires_every_gate():
     full = RuntimeReadinessEvidence(
         host_marker=True,
@@ -607,6 +654,215 @@ def test_target_for_operation_rechecks_admission_and_refuses_readiness():
 
 
 # ---------------------------------------------------------------------------
+# isaac_backend: TCP pose, gripper, planning-scene and scene-query contracts
+# ---------------------------------------------------------------------------
+
+
+def accepted_tcp_target() -> TcpPoseTarget:
+    return TcpPoseTarget(
+        frame_id="base_link",
+        position=(0.2, -0.1, 0.35),
+        orientation_xyzw=(0.0, 0.0, 0.0, 1.0),
+        position_tolerance_m=0.005,
+        orientation_tolerance_rad=0.015,
+        runtime_model_sha256=EXPECTED_RUNTIME_MODEL_SHA256,
+        source_sha256="a" * 64,
+    )
+
+
+def planning_scene_document() -> dict:
+    """The exact asdict shape of an accepted PlanningSceneUpdate."""
+    box = box_from_aabb(
+        object_id="brick-44",
+        frame_id="base_link",
+        minimum_m=(0.1, -0.05, 0.01),
+        maximum_m=(0.2, 0.05, 0.05),
+    )
+    placeholder = PlanningSceneUpdate(
+        scene_id="scene-1", boxes=(box,), expected_scene_digest="0" * 64
+    )
+    update = PlanningSceneUpdate(
+        scene_id="scene-1",
+        boxes=(box,),
+        expected_scene_digest=scene_digest(placeholder),
+    )
+    return dataclasses.asdict(update)
+
+
+def test_tcp_pose_builder_roundtrips_and_rejects_bad_provenance():
+    target = accepted_tcp_target()
+    operation = tcp_pose_operation(target, 60.0, "t1")
+    assert operation.kind is OperationKind.TCP_POSE
+    assert set(operation.payload) == set(TCP_PAYLOAD_KEYS)
+    assert tcp_pose_target_from_payload(operation.payload) == target
+    parsed = RuntimeOperation.parse(operation.serialize())
+    assert parsed == operation
+    bad_sha = dataclasses.replace(target, runtime_model_sha256="not-a-digest")
+    with pytest.raises(OperationRejected):
+        tcp_pose_operation(bad_sha, 60.0, "t2")
+    document = operation.serialize()
+    document["payload"]["extra"] = 1
+    with pytest.raises(OperationContractError):
+        tcp_pose_target_from_payload(document["payload"])
+
+
+def test_gripper_builder_roundtrips_and_rejects_inadmissible_targets():
+    target = GripperTarget(
+        opening_m=0.02,
+        duration_s=1.0,
+        goal_tolerance=0.005,
+        expected_opening_m=(0.0, 0.03),
+    )
+    operation = gripper_operation(target, 30.0, "g1")
+    assert operation.kind is OperationKind.GRIPPER_TARGET
+    assert set(operation.payload) == set(GRIPPER_PAYLOAD_KEYS)
+    assert operation.payload["expected_opening_m"] == [0.0, 0.03]
+    assert gripper_target_from_payload(operation.payload) == target
+    parsed = RuntimeOperation.parse(operation.serialize())
+    assert parsed == operation
+    for bad in (
+        GripperTarget(
+            opening_m=0.11,
+            duration_s=1.0,
+            goal_tolerance=0.005,
+            expected_opening_m=(0.0, 0.03),
+        ),
+        GripperTarget(
+            opening_m=0.02,
+            duration_s=0.0,
+            goal_tolerance=0.005,
+            expected_opening_m=(0.0, 0.03),
+        ),
+        GripperTarget(
+            opening_m=0.02,
+            duration_s=1.0,
+            goal_tolerance=0.005,
+            expected_opening_m=(0.05, 0.02),
+        ),
+    ):
+        with pytest.raises(OperationRejected):
+            gripper_operation(bad, 30.0, "g-bad")
+    broken = dict(operation.payload)
+    broken["opening_m"] = float("nan")
+    with pytest.raises(OperationContractError):
+        gripper_target_from_payload(broken)
+    window_swapped = dict(operation.payload)
+    window_swapped["expected_opening_m"] = [0.04, 0.01]
+    with pytest.raises(OperationContractError):
+        gripper_target_from_payload(window_swapped)
+
+
+def test_scene_query_builder_roundtrips_and_rejects_bad_pair_shapes():
+    operation = scene_query_operation(
+        ["brick-a", "brick-b"],
+        [["brick-a", "brick-b"]],
+        include_gripper=True,
+        timeout_s=15.0,
+        request_id="q1",
+    )
+    assert operation.kind is OperationKind.SCENE_QUERY
+    assert set(operation.payload) == set(SCENE_QUERY_PAYLOAD_KEYS)
+    assert scene_query_from_payload(operation.payload) == {
+        "brick_physical_instance_ids": ["brick-a", "brick-b"],
+        "connection_pairs": [["brick-a", "brick-b"]],
+        "include_gripper": True,
+    }
+    for ids, pairs, flag in (
+        ([], [], True),
+        ([""], [], True),
+        (["brick-a"], [], "yes"),
+        (["brick-a"], [["brick-a"]], True),
+        (["brick-a"], [["brick-a", "brick-b", "brick-c"]], True),
+        (["brick-a"], [["brick-a", ""]], False),
+        (["brick-a"], "brick-a|brick-b", True),
+    ):
+        with pytest.raises(OperationContractError):
+            scene_query_operation(
+                ids, pairs, include_gripper=flag, timeout_s=5.0, request_id="q-bad"
+            )
+
+
+def test_planning_scene_builder_roundtrips_and_rejects_wrong_keys():
+    document = planning_scene_document()
+    operation = planning_scene_operation(document, 20.0, "s1")
+    assert operation.kind is OperationKind.APPLY_PLANNING_SCENE
+    assert set(operation.payload) == set(PLANNING_SCENE_PAYLOAD_KEYS)
+    assert operation.payload == document
+    update = planning_scene_update_from_payload(operation.payload)
+    assert update.scene_id == "scene-1"
+    assert update.boxes[0].object_id == "brick-44"
+    assert update.expected_scene_digest == document["expected_scene_digest"]
+    parsed = RuntimeOperation.parse(operation.serialize())
+    assert parsed == operation
+    for mutated in (
+        {**document, "unexpected": True},
+        {key: value for key, value in document.items() if key != "schema"},
+        {**document, "schema": "wrong/v1"},
+        {**document, "expected_scene_digest": "zz"},
+        {**document, "boxes": [{"object_id": "only"}]},
+    ):
+        with pytest.raises(OperationContractError):
+            planning_scene_update_from_payload(mutated)
+
+
+def test_planning_scene_parser_rejects_tampered_geometry():
+    document = planning_scene_document()
+    tampered = json.loads(json.dumps(document))
+    tampered["boxes"][0]["minimum_m"][0] = 0.4
+    with pytest.raises(OperationContractError):
+        planning_scene_update_from_payload(tampered)
+    digest = json.loads(json.dumps(document))
+    digest["expected_scene_digest"] = "b" * 64
+    with pytest.raises(OperationContractError):
+        planning_scene_update_from_payload(digest)
+
+
+def test_target_for_operation_covers_the_new_kinds():
+    tcp = target_for_operation(tcp_pose_operation(accepted_tcp_target(), 10.0, "t"))
+    assert isinstance(tcp, TcpPoseTarget)
+    gripper = target_for_operation(
+        gripper_operation(
+            GripperTarget(
+                opening_m=0.02,
+                duration_s=1.0,
+                goal_tolerance=0.005,
+                expected_opening_m=(0.0, 0.03),
+            ),
+            10.0,
+            "g",
+        )
+    )
+    assert isinstance(gripper, GripperTarget)
+    for kind in (OperationKind.READINESS,):
+        with pytest.raises(OperationContractError):
+            target_for_operation(
+                RuntimeOperation(
+                    kind=kind, payload={}, timeout_s=5.0, request_id="x"
+                )
+            )
+    for kind, payload in (
+        (
+            OperationKind.APPLY_PLANNING_SCENE,
+            planning_scene_document(),
+        ),
+        (
+            OperationKind.SCENE_QUERY,
+            {
+                "brick_physical_instance_ids": ["brick-a"],
+                "connection_pairs": [],
+                "include_gripper": False,
+            },
+        ),
+    ):
+        with pytest.raises(OperationContractError, match="no motion target"):
+            target_for_operation(
+                RuntimeOperation(
+                    kind=kind, payload=payload, timeout_s=5.0, request_id="x"
+                )
+            )
+
+
+# ---------------------------------------------------------------------------
 # Fake runner: exact start sequence, bounds, marker, readiness, no motion
 # ---------------------------------------------------------------------------
 
@@ -693,6 +949,39 @@ def test_start_runs_exact_command_sequence_and_reaches_ready(tmp_path):
     assert document["status"] == "READY"
     assert all(document["readiness"].values())
     assert document["host_pid"] is not None
+
+
+def test_host_argv_scene_mode_forwards_all_five_options(tmp_path):
+    runner = FakeRunner(session_dir=tmp_path / "session")
+    manifest = tmp_path / "scene-manifest.json"
+    snapshot = tmp_path / "scene-snapshot.json"
+    plan = tmp_path / "plan.json"
+    user_config = tmp_path / "user-config.json"
+    session = make_session(
+        tmp_path,
+        runner,
+        scene_manifest=manifest,
+        scene_snapshot_out=snapshot,
+        host_instance_id="host-example1",
+        plan_path=plan,
+        config_path=user_config,
+    )
+    argv = session._host_argv()
+    assert argv[argv.index("--scene-manifest") + 1] == str(manifest)
+    assert argv[argv.index("--scene-snapshot-out") + 1] == str(snapshot)
+    assert argv[argv.index("--host-instance-id") + 1] == "host-example1"
+    assert argv[argv.index("--plan") + 1] == str(plan)
+    assert argv[argv.index("--config") + 1] == str(user_config)
+    # Without the scene group none of the five options is ever forwarded.
+    plain_argv = make_session(tmp_path, FakeRunner(session_dir=tmp_path / "s2"))._host_argv()
+    for option in (
+        "--scene-manifest",
+        "--scene-snapshot-out",
+        "--host-instance-id",
+        "--plan",
+        "--config",
+    ):
+        assert option not in plain_argv
 
 
 def test_start_requires_the_p1a_artifact(tmp_path, monkeypatch):
@@ -1186,6 +1475,25 @@ class FakeChildRuntime:
         self.registered = 0
         self.shutdown_called = False
         self.ready_timeout: float | None = None
+        self.apply_calls: list[tuple[object, float]] = []
+        self.apply_result = PlanningSceneResult(
+            passed=True,
+            applied_object_ids=("brick-44",),
+            scene_digest="d" * 64,
+            details={"service_success": True},
+        )
+        self.query_calls: list[float] = []
+        self.scene_document: dict = {
+            "schema": ros_session_entry.SCENE_STATE_SCHEMA,
+            "sim_time_s": 3.25,
+            "bricks": {
+                "brick-44": {"aabb_min": [0.1, 0.0, 0.0], "aabb_max": [0.2, 0.1, 0.06]},
+                "brick-45": {"aabb_min": [0.2, 0.0, 0.0], "aabb_max": [0.3, 0.1, 0.06]},
+            },
+            "connections": {"brick-44|brick-45": True},
+            "gripper": {"gripper_joint1": 0.01, "gripper_joint2": -0.01},
+            "opening_m": 0.02,
+        }
 
     def register_subscriptions(self) -> None:
         self.registered += 1
@@ -1201,6 +1509,16 @@ class FakeChildRuntime:
         if self.ready:
             return ReadinessSnapshot(**READY_SNAPSHOT)
         return ReadinessSnapshot()
+
+    def apply_planning_scene(self, update, timeout_s):
+        self.apply_calls.append((update, timeout_s))
+        return self.apply_result
+
+    def query_scene_state(self, *, timeout_s: float):
+        self.query_calls.append(timeout_s)
+        if isinstance(self.scene_document, Exception):
+            raise self.scene_document
+        return dict(self.scene_document)
 
     def shutdown(self) -> None:
         self.shutdown_called = True
@@ -1226,6 +1544,26 @@ class FakeChildExecutor:
             moveit_error_code=1,
             planned_waypoints=7,
             command_messages=6,
+        )
+
+    def execute_tcp_pose(self, target, *, timeout_s):
+        self.calls.append(("tcp_pose", target, timeout_s))
+        return ExecutionResult(
+            status=ExecutionStatus.SUCCEEDED,
+            moveit_error_code=1,
+            planned_waypoints=6,
+            command_messages=5,
+        )
+
+    def execute_gripper(self, target, *, timeout_s):
+        self.calls.append(("gripper", target, timeout_s))
+        return ExecutionResult(
+            status=ExecutionStatus.SUCCEEDED,
+            moveit_error_code=1,
+            planned_waypoints=2,
+            command_messages=1,
+            final_errors={"gripper_opening_m": 0.001},
+            details={"measured_opening_m": 0.021},
         )
 
 
@@ -1305,6 +1643,207 @@ def test_child_pose_operation_delegates_once():
     assert result.passed is True
     assert executor.calls[0][0] == "pose"
     assert executor.calls[0][2] == 21.0
+
+
+def test_child_tcp_pose_operation_delegates_once():
+    runtime = FakeChildRuntime()
+    executor = FakeChildExecutor()
+    target = accepted_tcp_target()
+    operation = tcp_pose_operation(target, 44.0, "tcp-child-1")
+    result = ros_session_entry.perform_operation(
+        operation, runtime=runtime, executor=executor
+    )
+    assert result.passed is True
+    assert executor.calls[0][0] == "tcp_pose"
+    assert executor.calls[0][1] == target
+    assert executor.calls[0][2] == 44.0
+    assert result.execution["is_success"] is True
+
+
+def test_child_gripper_operation_delegates_once_with_parsed_target():
+    runtime = FakeChildRuntime()
+    executor = FakeChildExecutor()
+    target = GripperTarget(
+        opening_m=0.02,
+        duration_s=1.0,
+        goal_tolerance=0.005,
+        expected_opening_m=(0.0, 0.03),
+    )
+    operation = gripper_operation(target, 12.0, "gripper-child-1")
+    result = ros_session_entry.perform_operation(
+        operation, runtime=runtime, executor=executor
+    )
+    assert result.passed is True
+    assert len(executor.calls) == 1
+    kind, received, timeout_s = executor.calls[0]
+    assert kind == "gripper"
+    assert received == target
+    assert timeout_s == 12.0
+    assert result.execution["status"] == "SUCCEEDED"
+    assert result.execution["is_success"] is True
+    assert result.execution["final_errors"] == {"gripper_opening_m": 0.001}
+    assert result.evidence["motion_sent"] is True
+
+
+def test_child_apply_planning_scene_calls_the_runtime_with_the_validated_update():
+    runtime = FakeChildRuntime()
+    executor = FakeChildExecutor()
+    document = planning_scene_document()
+    operation = planning_scene_operation(document, 9.0, "scene-child-1")
+    result = ros_session_entry.perform_operation(
+        operation, runtime=runtime, executor=executor
+    )
+    assert result.passed is True
+    assert result.error is None
+    update, timeout_s = runtime.apply_calls[0]
+    assert timeout_s == 9.0
+    assert update.scene_id == "scene-1"
+    assert update.boxes[0].object_id == "brick-44"
+    assert update.expected_scene_digest == document["expected_scene_digest"]
+    assert result.execution == {
+        "motion_sent": False,
+        "goals_sent": 0,
+        "passed": True,
+        "applied_object_ids": ["brick-44"],
+        "scene_digest": "d" * 64,
+        "details": {"service_success": True},
+    }
+    assert result.evidence["motion_sent"] is False
+    assert executor.calls == []
+
+
+def test_child_apply_planning_scene_maps_a_failed_applier_result():
+    runtime = FakeChildRuntime()
+    runtime.apply_result = PlanningSceneResult(
+        passed=False, details={"error": "service reported failure"}
+    )
+    executor = FakeChildExecutor()
+    result = ros_session_entry.perform_operation(
+        planning_scene_operation(planning_scene_document(), 9.0, "scene-bad"),
+        runtime=runtime,
+        executor=executor,
+    )
+    assert result.passed is False
+    assert "service reported failure" in result.error
+    assert result.execution["passed"] is False
+    assert result.execution["motion_sent"] is False
+
+
+def test_child_apply_planning_scene_rejects_a_forged_document():
+    runtime = FakeChildRuntime()
+    executor = FakeChildExecutor()
+    document = planning_scene_document()
+    document["expected_scene_digest"] = "c" * 64
+    result = ros_session_entry.perform_operation(
+        RuntimeOperation(
+            kind=OperationKind.APPLY_PLANNING_SCENE,
+            payload=document,
+            timeout_s=9.0,
+            request_id="scene-forged",
+        ),
+        runtime=runtime,
+        executor=executor,
+    )
+    assert result.passed is False
+    assert result.execution["status"] == "REJECTED"
+    assert runtime.apply_calls == []
+
+
+def test_child_scene_query_returns_the_filtered_document():
+    runtime = FakeChildRuntime()
+    executor = FakeChildExecutor()
+    operation = scene_query_operation(
+        ["brick-45"],
+        [["brick-45", "brick-44"]],
+        include_gripper=False,
+        timeout_s=7.5,
+        request_id="query-child-1",
+    )
+    result = ros_session_entry.perform_operation(
+        operation, runtime=runtime, executor=executor
+    )
+    assert result.passed is True
+    assert result.error is None
+    assert runtime.query_calls == [7.5]
+    assert result.execution == {
+        "motion_sent": False,
+        "scene_state": {
+            "sim_time_s": 3.25,
+            "bricks": {"brick-45": runtime.scene_document["bricks"]["brick-45"]},
+            "connections": {"brick-44|brick-45": True},
+        },
+    }
+    assert result.evidence["motion_sent"] is False
+    assert executor.calls == []
+
+
+def test_child_scene_query_reports_a_runtime_failure():
+    runtime = FakeChildRuntime()
+    runtime.scene_document = RuntimeError("scene-state schema is wrong")
+    executor = FakeChildExecutor()
+    result = ros_session_entry.perform_operation(
+        scene_query_operation(
+            ["brick-45"], [], include_gripper=True, timeout_s=5.0, request_id="q-fail"
+        ),
+        runtime=runtime,
+        executor=executor,
+    )
+    assert result.passed is False
+    assert "scene-state query failed" in result.error
+    assert result.execution["scene_state"] is None
+
+
+def test_filter_scene_state_filters_omits_and_normalizes():
+    document = FakeChildRuntime().scene_document
+    query = {
+        "brick_physical_instance_ids": ["brick-45", "brick-44"],
+        "connection_pairs": [["brick-45", "brick-44"]],
+        "include_gripper": True,
+    }
+    filtered = ros_session_entry.filter_scene_state(document, query)
+    assert filtered["sim_time_s"] == 3.25
+    assert set(filtered["bricks"]) == {"brick-44", "brick-45"}
+    # Both orders of a pair normalize onto the sorted "a|b" key.
+    assert filtered["connections"] == {"brick-44|brick-45": True}
+    assert filtered["gripper"] == document["gripper"]
+    assert filtered["opening_m"] == 0.02
+
+
+def test_filter_scene_state_omits_the_gripper_when_not_requested():
+    document = FakeChildRuntime().scene_document
+    filtered = ros_session_entry.filter_scene_state(
+        document,
+        {
+            "brick_physical_instance_ids": ["brick-44"],
+            "connection_pairs": [],
+            "include_gripper": False,
+        },
+    )
+    assert set(filtered) == {"sim_time_s", "bricks", "connections"}
+    assert "gripper" not in filtered and "opening_m" not in filtered
+
+
+def test_filter_scene_state_rejects_wrong_schema_and_missing_entries():
+    document = FakeChildRuntime().scene_document
+    good_query = {
+        "brick_physical_instance_ids": ["brick-44"],
+        "connection_pairs": [],
+        "include_gripper": False,
+    }
+    with pytest.raises(ValueError, match="schema"):
+        ros_session_entry.filter_scene_state(
+            {**document, "schema": "other/v1"}, good_query
+        )
+    with pytest.raises(ValueError, match="no brick 'missing'"):
+        ros_session_entry.filter_scene_state(
+            document,
+            {**good_query, "brick_physical_instance_ids": ["missing"]},
+        )
+    with pytest.raises(ValueError, match="no connection"):
+        ros_session_entry.filter_scene_state(
+            document,
+            {**good_query, "connection_pairs": [["brick-44", "ghost"]]},
+        )
 
 
 def test_child_operation_refuses_inadmissible_target_without_motion():

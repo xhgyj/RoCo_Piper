@@ -69,10 +69,14 @@ ALLOWED_ROCOBRICK = {
     "rocobrick.structural_binding",
     "rocobrick.tcp_capability",
     "rocobrick.tcp_contract",
-    # The INTERNAL --operation bridge (R4.2): imported lazily, only after
-    # every immutable gate has passed, and only for explicit dispatch.
-    "rocobrick.isaac_backend",
-    "rocobrick.runtime_session",
+    "rocobrick.robot_operation_plan",
+    # The ONLY production dispatch entry (--robot-operation-plan): the
+    # multi-robot session, the strict plan runner and the zero-motion skill
+    # executor are imported lazily, only after every immutable gate and the
+    # TCP authorization have passed, and only for explicit dispatch.
+    "rocobrick.multi_robot_runtime",
+    "rocobrick.robot_operation_executor",
+    "rocobrick.robot_operation_runner",
 }
 BANNED_RUNTIME_PREFIXES = (
     "rclpy",
@@ -697,6 +701,39 @@ def test_invalid_usage_reports_invalid_input(argv):
     assert line["result_path"] is None
 
 
+def test_scene_options_without_config_are_invalid_usage(tmp_path):
+    code, line, _, stderr = invoke([
+        "--task", str(TASK_DIR),
+        "--plan", str(PLAN),
+        "--backend", "isaac",
+        "--run-dir", str(tmp_path / "run"),
+        "--scene-manifest", "scene-manifest.json",
+        "--scene-snapshot-out", "scene-snapshot.json",
+        "--host-instance-id", "host-example1",
+    ])
+    assert code == 2
+    assert line["status"] == "INVALID_INPUT"
+    assert line["run_dir"] is None
+    assert line["result_path"] is None
+    assert "--config must be provided together" in stderr
+    assert not (tmp_path / "run").exists()
+
+
+def test_scene_options_with_config_parse_into_the_arguments(tmp_path):
+    namespace = piper_run.build_parser().parse_args([
+        "--task", str(TASK_DIR),
+        "--plan", str(PLAN),
+        "--backend", "isaac",
+        "--run-dir", str(tmp_path / "run"),
+        "--scene-manifest", "scene-manifest.json",
+        "--scene-snapshot-out", "scene-snapshot.json",
+        "--host-instance-id", "host-example1",
+        "--config", "user-config.json",
+    ])
+    assert namespace.scene_manifest == Path("scene-manifest.json")
+    assert namespace.config == Path("user-config.json")
+
+
 def test_missing_structure_files_or_plan_are_invalid_input(tmp_path):
     incomplete = copy_task_dir(tmp_path / "incomplete")
     (incomplete / "structure_start.json").unlink()
@@ -950,163 +987,324 @@ def test_piper_run_writes_only_through_the_evidence_recorder():
 
 
 # ---------------------------------------------------------------------------
-# --operation: the internal R4.2 runtime session bridge
+# --robot-operation-plan: the single production dispatch entry
 # ---------------------------------------------------------------------------
 
 
-from rocobrick.isaac_backend import (  # noqa: E402
-    OPERATION_SCHEMA as OPERATION_SCHEMA_CONST,
-)
-from rocobrick.isaac_backend import RuntimeOperation  # noqa: E402
-from rocobrick.runtime_session import (  # noqa: E402
-    RuntimeReadinessEvidence,
-    RuntimeSessionError,
-    RuntimeSessionEvidence,
-    RuntimeSessionStatus,
+from dataclasses import dataclass  # noqa: E402
+
+import rocobrick.robot_operation_executor as executor_module  # noqa: E402
+from rocobrick.multi_robot_scheduler import (  # noqa: E402
+    CancelEvidence,
+    OperationExecution,
+    OperationStatus,
 )
 
-ADMITTED_JOINT_POSITIONS = {
-    "joint1": 0.0,
-    "joint2": 0.5,
-    "joint3": -0.5,
-    "joint4": 0.3,
-    "joint5": 0.0,
-    "joint6": 0.0,
-}
+OPERATION_PLAN = (
+    ROOT / "artifacts" / "scene" / "example1-robot-operation-plan.json"
+)
+PLAN_ROBOTS = ("piper_0", "piper_1")
+SCENE_STATE_SCHEMA = "rocobrick-scene-state/v1"
+PIPER0_PART = "brick-768de5a17827920c48d4"
+SUPPORT_BRICK = "brick-4bbba49bec24496bb21e"
+TASK_SOURCE_ID = "assemble-768de5a17827920c48d4"
+PART_BRICK_MIN = (0.30, -0.26, 0.0)
+PART_BRICK_MAX = (0.332, -0.244, 0.016)
+SUPPORT_BRICK_MIN = (0.34, -0.26, 0.0)
+SUPPORT_BRICK_MAX = (0.372, -0.244, 0.016)
 
 
-def joint_operation_document(**overrides) -> dict:
-    """A strictly admissible JOINT_TARGET RuntimeOperation document."""
-    document = {
-        "schema": OPERATION_SCHEMA_CONST,
-        "kind": "JOINT_TARGET",
-        "payload": {
-            "positions": dict(ADMITTED_JOINT_POSITIONS),
-            "goal_tolerance": 0.01,
-        },
-        "timeout_s": 60.0,
-        "request_id": "op-joint-1",
-    }
-    document.update(overrides)
-    return document
+def example1_operation_plan() -> dict:
+    """Load the external example1 ``robot-operation-plan/v1`` document.
+
+    Returns:
+        A fresh mutable copy of the frozen example1 operation plan.
+    """
+    return json.loads(OPERATION_PLAN.read_text(encoding="utf-8"))
 
 
-def link6_pose_operation_document(**overrides) -> dict:
-    """A strictly admissible LINK6_POSE RuntimeOperation document."""
-    document = {
-        "schema": OPERATION_SCHEMA_CONST,
-        "kind": "LINK6_POSE",
-        "payload": {
-            "frame_id": "base_link",
-            "position": [0.2, 0.0, 0.3],
-            "orientation_xyzw": [0.0, 0.0, 0.0, 1.0],
-            "position_tolerance_m": 0.005,
-            "orientation_tolerance_rad": 0.015,
-            "tip_link": "link6",
-            "tcp_status": "unresolved",
-        },
-        "timeout_s": 60.0,
-        "request_id": "op-pose-1",
-    }
-    document.update(overrides)
-    return document
+def wait_only_plan_document(*, duration_s: float = 0.2) -> dict:
+    """Build a strict single-WAIT plan bound to the example1 STAP plan.
 
+    Args:
+        duration_s: Requested observed sim-time advance of the WAIT.
 
-def passing_result(document: dict) -> dict:
-    """A passing RuntimeOperationResult document answering ``document``."""
+    Returns:
+        A ``robot-operation-plan/v1`` document whose only operation is one
+        piper_1 WAIT over the example1 task part.
+    """
     return {
-        "schema": "rocobrick-runtime-operation-result/v1",
-        "request_id": document["request_id"],
-        "kind": document["kind"],
-        "passed": True,
-        "execution": {
-            "status": "SUCCEEDED",
-            "is_success": True,
-            "command_messages": 3,
-            "moveit_error_code": 1,
-            "planned_waypoints": 4,
-            "final_errors": {},
-        },
-        "evidence": {"waited_ok": True, "passed": True, "snapshot": {}},
-        "error": None,
+        "schema": "robot-operation-plan/v1",
+        "plan_id": "robot-operation-plan-wait-test-v1",
+        "source_plan_id": PLAN_ID,
+        "robots": ["piper_0", "piper_1"],
+        "operations": [
+            {
+                "operation_id": "wait-test",
+                "source_task_id": TASK_SOURCE_ID,
+                "skill": "WAIT",
+                "executor_robot_id": "piper_1",
+                "participants": ["piper_1"],
+                "role_bindings": {"executor": "piper_1"},
+                "target": None,
+                "parameters": {
+                    "observation": {
+                        "kind": "structural_fact",
+                        "fact": "stable",
+                        "physical_instance_id": PIPER0_PART,
+                    },
+                    "duration_s": duration_s,
+                },
+                "preconditions": [],
+                "effects": [],
+                "resources": ["robot:piper_1"],
+                "evidence_requirements": [
+                    "real_scene_observation",
+                    "wait_duration_confirmed",
+                ],
+            }
+        ],
+        "dependencies": [],
+        "execution_layers": [["wait-test"]],
+        "planned_schedule": [
+            [{"operation_id": "wait-test", "robot_id": "piper_1"}]
+        ],
+        "evidence_requirements": [
+            {
+                "operation_id": "wait-test",
+                "evidence": "wait_duration_confirmed",
+            }
+        ],
     }
 
 
-class FakeSession:
-    """Minimal IsaacMoveItSession stand-in recording every lifecycle call."""
+def write_operation_plan(tmp_path: Path, document: dict) -> Path:
+    """Write one external operation plan document into the temp root.
+
+    Args:
+        tmp_path: Temporary directory root.
+        document: Plan document to serialize.
+
+    Returns:
+        The written plan path.
+    """
+    plan_path = tmp_path / "external-operation-plan.json"
+    plan_path.write_text(json.dumps(document), encoding="utf-8")
+    return plan_path
+
+
+def scene_state_document(robot_id: str, sim_time_s: float) -> dict:
+    """Build one whole-scene ``rocobrick-scene-state/v1`` observation.
+
+    Both example1 physical instances are reported, so the WAIT of the frozen
+    example1 plan (which observes the support brick) stays observable too.
+
+    Args:
+        robot_id: Robot whose block the observation carries.
+        sim_time_s: Observed robot and shared simulation time.
+
+    Returns:
+        The scene-state document returned by the fake session transport.
+    """
+    return {
+        "schema": SCENE_STATE_SCHEMA,
+        "sim_time_s": sim_time_s,
+        "robots": {
+            robot_id: {
+                "robot_id": robot_id,
+                "sim_time_s": sim_time_s,
+                "gripper": {
+                    "gripper_joint1": 0.0,
+                    "gripper_joint2": 0.0,
+                },
+                "opening_m": 0.02,
+            }
+        },
+        "bricks": {
+            PIPER0_PART: {
+                "aabb_min": list(PART_BRICK_MIN),
+                "aabb_max": list(PART_BRICK_MAX),
+            },
+            SUPPORT_BRICK: {
+                "aabb_min": list(SUPPORT_BRICK_MIN),
+                "aabb_max": list(SUPPORT_BRICK_MAX),
+            },
+        },
+        "connections": {},
+    }
+
+
+def static_scene_reader(robot_id: str) -> dict:
+    """Return one non-advancing whole-scene observation (never confirms)."""
+    return scene_state_document(robot_id, 0.0)
+
+
+def advancing_scene_reader():
+    """Return a reader whose observed sim time advances on each call."""
+    state = {"calls": 0}
+
+    def reader(robot_id: str) -> dict:
+        index = state["calls"]
+        state["calls"] += 1
+        return scene_state_document(
+            robot_id, 0.0 if index == 0 else 0.5
+        )
+
+    return reader
+
+
+@dataclass(frozen=True)
+class FakeReadinessEvidence:
+    """Fake ``MultiRobotReadinessEvidence`` with the frozen field names."""
+
+    robots: tuple
+    readiness_by_robot: dict
+    all_ready: bool
+    passed: bool
+    request_path: str = "runtime-session/readiness-request.json"
+    result_path: str = "runtime-session/readiness-result.json"
+
+
+@dataclass(frozen=True)
+class FakeSessionEvidence:
+    """Fake ``MultiRobotSessionEvidence`` with the frozen field names."""
+
+    status: str
+    robots: tuple
+    cleanup: dict
+    errors: tuple = ()
+
+
+def ready_readiness_evidence(robots: tuple = PLAN_ROBOTS) -> FakeReadinessEvidence:
+    """Return readiness evidence proving every given robot ready.
+
+    Args:
+        robots: Robot ids to report, one ready entry each.
+
+    Returns:
+        The ready evidence object.
+    """
+    return FakeReadinessEvidence(
+        robots=robots,
+        readiness_by_robot={
+            robot: {"robot_id": robot, "passed": True}
+            for robot in robots
+        },
+        all_ready=True,
+        passed=True,
+    )
+
+
+def session_cleanup_document(passed: bool) -> dict:
+    """Build an A6-shaped session cleanup evidence document.
+
+    Args:
+        passed: Whether every termination flag is proven passing.
+
+    Returns:
+        The cleanup mapping of one stopped session envelope.
+    """
+    return {
+        "scope": {"container": "rocobrick-runtime-session-fake"},
+        "passed": passed,
+        "container_removed": passed,
+        "host_stopped": passed,
+        "host_evidence_orderly": passed,
+        "leftovers": {"session_containers": [], "session_processes": []},
+    }
+
+
+class FakeMultiRobotSession:
+    """Offline stand-in for the real A6 multi-robot session.
+
+    It records every lifecycle/observation call, can fail or mutate inputs at
+    chosen points, and never starts a process.
+    """
 
     def __init__(
         self,
         session_dir,
         *,
         calls,
-        result=None,
+        readiness=None,
         start_error=None,
-        run_error=None,
+        stop_error=None,
         cleanup_passed=True,
+        cleanup_document=None,
+        scene_reader=None,
+        observe_error=None,
         mutate_path=None,
     ):
+        """Store the fake session's scripted behavior and call log."""
         self.session_dir = Path(session_dir)
         self._calls = calls
-        self._result = result
+        self._readiness = readiness or ready_readiness_evidence()
         self._start_error = start_error
-        self._run_error = run_error
+        self._stop_error = stop_error
         self._cleanup_passed = cleanup_passed
+        self._cleanup_document = cleanup_document
+        self._scene_reader = scene_reader or static_scene_reader
+        self._observe_error = observe_error
         self._mutate_path = mutate_path
 
     def start(self):
+        """Record the call, optionally mutate inputs, then answer readiness."""
         self._calls.append(("start",))
-        if self._start_error is not None:
-            raise RuntimeSessionError(self._start_error)
         self.session_dir.mkdir(parents=True, exist_ok=True)
-        return RuntimeReadinessEvidence(
-            host_marker=True,
-            container_started=True,
-            moveit_ready=True,
-            controllers_active=True,
-            adapter_ready=True,
-        )
-
-    def run_operation(self, request_path, result_path):
-        self._calls.append(
-            ("run_operation", Path(request_path).name, Path(result_path).name)
-        )
-        operation = RuntimeOperation.parse(
-            json.loads(Path(request_path).read_text(encoding="utf-8"))
-        )
-        assert operation.request_id == self._result["request_id"]
         if self._mutate_path is not None:
             self._mutate_path.write_text(
                 json.dumps({"mutated": True}), encoding="utf-8"
             )
-        if self._run_error is not None:
-            raise RuntimeSessionError(self._run_error)
-        (Path(result_path)).write_text(json.dumps(self._result), encoding="utf-8")
-        return self._result
+        if self._start_error is not None:
+            raise self._start_error
+        return self._readiness
+
+    async def observe(self, robot_id):
+        """Record and answer one read-only whole-scene observation."""
+        self._calls.append(("observe", robot_id))
+        if self._observe_error is not None:
+            raise self._observe_error
+        return self._scene_reader(robot_id)
 
     def stop(self):
+        """Record the stop and answer the scripted session evidence."""
         self._calls.append(("stop",))
-        failed = self._start_error is not None or self._run_error is not None
-        return RuntimeSessionEvidence(
-            status=(
-                RuntimeSessionStatus.FAILED
-                if failed
-                else RuntimeSessionStatus.STOPPED
+        if self._stop_error is not None:
+            raise self._stop_error
+        return FakeSessionEvidence(
+            status="STOPPED",
+            robots=tuple(self._readiness.robots),
+            cleanup=(
+                self._cleanup_document
+                if self._cleanup_document is not None
+                else session_cleanup_document(self._cleanup_passed)
             ),
-            readiness=None,
-            host_pid=4242,
-            container_name="rocobrick-runtime-session-fake",
-            cleanup={"passed": self._cleanup_passed},
-            errors=(),
         )
 
 
-def install_fake_session(monkeypatch, calls, **kwargs) -> list:
-    """Patch ``piper_run._create_session`` with a FakeSession factory."""
+def install_fake_multi_robot_session(monkeypatch, calls, **kwargs) -> list:
+    """Patch ``piper_run._create_session`` with the fake session factory.
+
+    The factory keeps the production signature (session dir, arguments,
+    validated plan robots) and records every created session plus the exact
+    scene group it was handed.
+
+    Args:
+        monkeypatch: Pytest monkeypatch fixture.
+        calls: Mutable list recording lifecycle calls.
+        **kwargs: Fake-session constructor overrides.
+
+    Returns:
+        The list of created fake sessions.
+    """
     created = []
 
-    def factory(session_dir):
-        session = FakeSession(session_dir, calls=calls, **kwargs)
+    def factory(session_dir, args, robot_ids):
+        session = FakeMultiRobotSession(
+            session_dir, calls=calls, **kwargs
+        )
+        session.robot_ids = tuple(robot_ids)
+        session.args = args
         created.append(session)
         return session
 
@@ -1114,570 +1312,1358 @@ def install_fake_session(monkeypatch, calls, **kwargs) -> list:
     return created
 
 
-def run_with_operation(tmp_path, document, *extra) -> tuple[int, dict]:
-    """Write the operation document and run the CLI with ``--operation``."""
-    operation_path = tmp_path / "operation.json"
-    operation_path.write_text(json.dumps(document), encoding="utf-8")
-    code, line, _, _ = invoke([
+def plan_argv(
+    tmp_path: Path,
+    plan_path: Path,
+    *extra: str,
+    stap_plan_path: Path = PLAN,
+) -> list[str]:
+    """Build a ``--robot-operation-plan`` invocation with its scene group.
+
+    Args:
+        tmp_path: Temporary directory root for the scene group files.
+        plan_path: External operation plan path.
+        *extra: Additional command-line flags.
+        stap_plan_path: STAP plan file the operation plan binds to.
+
+    Returns:
+        The argv list for ``piper_run.main``.
+    """
+    return [
+        "--task", str(TASK_DIR),
+        "--plan", str(stap_plan_path),
+        "--backend", "isaac",
+        "--run-dir", str(tmp_path / "run"),
+        "--robot-operation-plan", str(plan_path),
+        "--scene-manifest", str(tmp_path / "scene-manifest.json"),
+        "--scene-snapshot-out", str(tmp_path / "scene-snapshot.json"),
+        "--host-instance-id", "host-example1",
+        "--config", str(tmp_path / "user-config.json"),
+        *extra,
+    ]
+
+
+def run_with_operation_plan(
+    tmp_path: Path,
+    *extra: str,
+    plan_path: Path = OPERATION_PLAN,
+    stap_plan_path: Path = PLAN,
+) -> tuple[int, dict]:
+    """Invoke the CLI with ``--robot-operation-plan`` and the scene group.
+
+    Args:
+        tmp_path: Temporary directory root.
+        *extra: Additional command-line flags.
+        plan_path: External operation plan path.
+        stap_plan_path: STAP plan file the operation plan binds to.
+
+    Returns:
+        The exit code and the parsed stdout JSON line.
+    """
+    code, line, _, _ = invoke(
+        plan_argv(tmp_path, plan_path, *extra, stap_plan_path=stap_plan_path)
+    )
+    return code, line
+
+
+def read_plan_run(line: dict) -> tuple[Path, dict, list[dict]]:
+    """Load the run directory, its plan-run document and its events.
+
+    Args:
+        line: The parsed stdout JSON line of the run.
+
+    Returns:
+        The evidence directory, the decoded ``robot-operation-plan-run.json``
+        document, and the decoded phase events in order.
+    """
+    evidence_dir, _preflight_path, events = read_evidence(line)
+    document = json.loads(
+        (evidence_dir / "robot-operation-plan-run.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    return evidence_dir, document, events
+
+
+def test_robot_operation_plan_requires_the_scene_option_group(tmp_path):
+    code, line, _, stderr = invoke([
         "--task", str(TASK_DIR),
         "--plan", str(PLAN),
         "--backend", "isaac",
         "--run-dir", str(tmp_path / "run"),
-        "--operation", str(operation_path),
-        *extra,
-    ])
-    return code, line
-
-
-def test_preflight_only_cannot_combine_with_operation(tmp_path):
-    operation_path = tmp_path / "operation.json"
-    operation_path.write_text(json.dumps(joint_operation_document()))
-    code, line, _, _ = invoke([
-        "--task", str(TASK_DIR),
-        "--plan", str(PLAN),
-        "--backend", "isaac",
-        "--preflight-only",
-        "--operation", str(operation_path),
+        "--robot-operation-plan", str(OPERATION_PLAN),
     ])
     assert code == 2
     assert line["status"] == "INVALID_INPUT"
     assert line["run_dir"] is None
     assert line["result_path"] is None
+    assert "--robot-operation-plan requires" in stderr
+    assert not (tmp_path / "run").exists()
 
 
-@pytest.mark.parametrize(
-    "argv_extra",
-    [["--preflight-only"], []],
-    ids=["preflight-only", "default"],
-)
-def test_gates_run_before_the_session_starts(
-    tmp_path, monkeypatch, argv_extra
-):
-    """An invalid plan or TCP failure means the runner is never created."""
-    calls: list = []
-    install_fake_session(monkeypatch, calls)
-    tampered = tmp_path / "plan.json"
-    plan = json.loads(PLAN.read_text(encoding="utf-8"))
-    plan["plan_id"] = "tampered-plan"
-    tampered.write_text(json.dumps(plan), encoding="utf-8")
-    operation_path = tmp_path / "operation.json"
-    operation_path.write_text(json.dumps(joint_operation_document()))
-    code, line, _, _ = invoke([
-        "--task", str(TASK_DIR),
-        "--plan", str(tampered),
-        "--backend", "isaac",
-        "--run-dir", str(tmp_path / "run"),
-        "--operation", str(operation_path),
-        *argv_extra,
-    ])
+def test_robot_operation_plan_conflicts_with_preflight_only(tmp_path):
+    code, line, _, stderr = invoke(
+        plan_argv(tmp_path, OPERATION_PLAN, "--preflight-only")
+    )
     assert code == 2
     assert line["status"] == "INVALID_INPUT"
-    assert calls == []
+    assert line["run_dir"] is None
+    assert "--robot-operation-plan cannot be combined" in stderr
+    assert not (tmp_path / "run").exists()
 
 
-def test_tcp_failure_with_operation_starts_zero_sessions(
-    tmp_path, monkeypatch
-):
-    calls: list = []
-    install_fake_session(monkeypatch, calls)
-    patch_artifact(monkeypatch, None, tmp_path)
-    code, line = run_with_operation(tmp_path, joint_operation_document())
-    assert code == 5
-    assert line["status"] == "TCP_CONTRACT_INVALID"
-    assert calls == []
-
-
-def _runtime_binding_hashes() -> tuple[str, str]:
-    """Return the exact runtime and calibration hashes from the artifact."""
-    artifact = json.loads(
-        piper_run.TCP_ARTIFACT.read_text(encoding="utf-8")
-    )
-    runtime_sha = next(
-        entry["sha256"]
-        for entry in artifact["inputs"]["pinned_files"]
-        if entry["path"] == piper_run.RUNTIME_USD_PINNED_PATH
-    )
-    calibration_sha = artifact["tcp_contract"]["transform"]["sha256"]
-    return runtime_sha, calibration_sha
-
-
-def test_tcp_authorization_precedes_session_and_records_verified_provenance(
-    tmp_path, monkeypatch
-):
-    document = joint_operation_document()
-    calls: list = []
-    order: list[str] = []
-    observed: list[tuple[object, dict]] = []
-    real_authorize = piper_run.authorize_tcp
-
-    def authorize(contract, **kwargs):
-        order.append("authorize")
-        observed.append((contract, kwargs))
-        return real_authorize(contract, **kwargs)
-
-    monkeypatch.setattr(piper_run, "authorize_tcp", authorize)
-    created: list[FakeSession] = []
-
-    def factory(session_dir):
-        order.append("create_session")
-        session = FakeSession(
-            session_dir,
-            calls=calls,
-            result=passing_result(document),
-        )
-        created.append(session)
-        return session
-
-    monkeypatch.setattr(piper_run, "_create_session", factory)
-    before = input_hashes()
-    code, line = run_with_operation(tmp_path, document)
-
-    assert code == 0
-    assert line["status"] == "EXECUTED"
-    assert order == ["authorize", "create_session"]
-    assert len(created) == 1
-    assert calls == [
-        ("start",),
-        ("run_operation", "operation-request.json", "operation-result.json"),
-        ("stop",),
-    ]
-    assert input_hashes() == before
-
-    runtime_sha, calibration_sha = _runtime_binding_hashes()
-    assert len(observed) == 1
-    contract, kwargs = observed[0]
-    assert contract.status.value == "RESOLVED"
-    assert contract.transform.sha256 == calibration_sha
-    assert kwargs == {
-        "backend": "isaac",
-        "runtime_asset_sha256": runtime_sha,
-        "calibration_artifact_sha256": calibration_sha,
-    }
-
-    _, preflight_path, events = read_evidence(line)
-    preflight = json.loads(preflight_path.read_text(encoding="utf-8"))
-    authorization = preflight["tcp"]["authorization"]
-    assert preflight["operation"]["tcp_authorization"] == authorization
-    assert authorization["decision"] == "ALLOW"
-    assert authorization["allowed"] is True
-    assert authorization["status"] == "TCP_AUTHORIZED"
-    assert authorization["checks"]
-    assert authorization["backend"] == "isaac"
-    assert authorization["provenance"] == "verified_binding_artifact"
-    assert authorization["runtime_rehash_performed"] is False
-    assert authorization["runtime_asset_sha256"] == runtime_sha
-    assert authorization["calibration_artifact_sha256"] == calibration_sha
-    phases = [event["event"]["phase"] for event in events]
-    assert phases.index("operation_admission") < phases.index(
-        "tcp_authorization"
-    ) < phases.index("runtime_start")
-
-
-@pytest.mark.parametrize("mode", ["deny", "exception", "malformed"])
-def test_tcp_authorization_failures_create_zero_sessions(
-    tmp_path, monkeypatch, mode
-):
-    if mode == "deny":
-        def fake_authorize(*_args, **_kwargs):
-            return SimpleNamespace(
-                allowed=False,
-                status="UNRESOLVED_TCP",
-                reason="synthetic deny",
-                checks={"synthetic_check": False},
-            )
-    elif mode == "exception":
-        def fake_authorize(*_args, **_kwargs):
-            raise RuntimeError("synthetic authorize failure")
-    else:
-        def fake_authorize(*_args, **_kwargs):
-            return SimpleNamespace(allowed=True)
-
-    monkeypatch.setattr(piper_run, "authorize_tcp", fake_authorize)
-    calls: list = []
-    created = install_fake_session(
-        monkeypatch,
-        calls,
-        result=passing_result(joint_operation_document()),
-    )
-    code, line = run_with_operation(tmp_path, joint_operation_document())
-
-    assert code == 4
-    assert line["status"] == "UNRESOLVED_TCP"
-    assert calls == []
-    assert created == []
-    _, preflight_path, events = read_evidence(line)
-    preflight = json.loads(preflight_path.read_text(encoding="utf-8"))
-    authorization = preflight["tcp"]["authorization"]
-    assert authorization["decision"] == "DENY"
-    assert authorization["allowed"] is False
-    assert authorization["backend"] == "isaac"
-    assert authorization["provenance"] == "verified_binding_artifact"
-    assert authorization["runtime_rehash_performed"] is False
-    assert authorization["runtime_asset_sha256"] is not None
-    assert authorization["calibration_artifact_sha256"] is not None
-    if mode == "deny":
-        assert authorization["status"] == "UNRESOLVED_TCP"
-        assert authorization["reason"] == "synthetic deny"
-        assert authorization["checks"] == {"synthetic_check": False}
-    else:
-        assert "failed closed" in authorization["reason"]
-        assert authorization["checks"] == {}
-    phases = [event["event"]["phase"] for event in events]
-    assert "operation_admission" in phases
-    assert "tcp_authorization" in phases
-    assert "runtime_start" not in phases
-
-
-@pytest.mark.parametrize(
-    ("case", "value"),
-    [
-        ("zero-candidates", None),
-        ("multiple-candidates", None),
-        ("missing-hash", None),
-        ("none-hash", None),
-        ("integer-hash", 123),
-        ("empty-hash", ""),
-        ("short-hash", "0" * 63),
-        ("long-hash", "0" * 65),
-        ("uppercase-hash", "A" * 64),
-        ("nonhex-hash", "g" * 64),
-    ],
-)
-def test_verified_runtime_hash_extraction_fails_closed(
-    tmp_path, monkeypatch, case, value
-):
-    real_rederive = piper_run._rederive_tcp
-
-    def rederive(record):
-        contract = real_rederive(record)
-        pinned_files = record["verified_binding_record"]["inputs"]["pinned_files"]
-        runtime_entries = [
-            entry
-            for entry in pinned_files
-            if entry["path"] == piper_run.RUNTIME_USD_PINNED_PATH
-        ]
-        assert len(runtime_entries) == 1
-        if case == "zero-candidates":
-            pinned_files[:] = [
-                entry
-                for entry in pinned_files
-                if entry["path"] != piper_run.RUNTIME_USD_PINNED_PATH
-            ]
-        elif case == "multiple-candidates":
-            pinned_files.append(dict(runtime_entries[0]))
-        elif case == "missing-hash":
-            runtime_entries[0].pop("sha256")
-        else:
-            runtime_entries[0]["sha256"] = value
-        return contract
-
-    monkeypatch.setattr(piper_run, "_rederive_tcp", rederive)
-
-    def forbidden_authorize(*_args, **_kwargs):
-        pytest.fail("authorize_tcp must not run after failed hash extraction")
-
-    monkeypatch.setattr(piper_run, "authorize_tcp", forbidden_authorize)
-    calls: list = []
-    created = install_fake_session(monkeypatch, calls)
-    before = input_hashes()
-    code, line = run_with_operation(tmp_path, joint_operation_document())
-
-    assert code == 4
-    assert line["status"] == "UNRESOLVED_TCP"
-    assert calls == []
-    assert created == []
-    assert input_hashes() == before
-    _, preflight_path, events = read_evidence(line)
-    preflight = json.loads(preflight_path.read_text(encoding="utf-8"))
-    authorization = preflight["tcp"]["authorization"]
-    assert authorization["decision"] == "DENY"
-    assert authorization["allowed"] is False
-    assert authorization["status"] == "UNRESOLVED_TCP"
-    assert authorization["provenance"] == "verified_binding_artifact"
-    assert authorization["runtime_rehash_performed"] is False
-    assert authorization["runtime_asset_sha256"] is None
-    assert authorization["calibration_artifact_sha256"] is None
-    assert any(
-        event["event"]["phase"] == "tcp_authorization"
-        for event in events
-    )
-
-
-def test_runtime_operation_cli_accepts_only_exact_isaac_backend():
-    assert piper_run.BACKENDS == ("isaac",)
-
-
-def test_valid_joint_operation_executes_and_reports_executed(
-    tmp_path, monkeypatch
-):
-    document = joint_operation_document()
-    calls: list = []
-    install_fake_session(
-        monkeypatch, calls, result=passing_result(document)
-    )
-    before = input_hashes()
-    code, line = run_with_operation(tmp_path, document)
-    assert code == 0
-    assert line["status"] == "EXECUTED"
-    assert line["passed"] is True
-    assert calls == [
-        ("start",),
-        ("run_operation", "operation-request.json", "operation-result.json"),
-        ("stop",),
-    ]
-    assert input_hashes() == before
-    evidence_dir, preflight_path, events = read_evidence(line)
-    assert (evidence_dir / "operation-request.json").is_file()
-    request = json.loads(
-        (evidence_dir / "operation-request.json").read_text(encoding="utf-8")
-    )
-    assert request == document
-    preflight = json.loads(preflight_path.read_text(encoding="utf-8"))
-    assert preflight["status"] == "EXECUTED"
-    assert preflight["passed"] is True
-    assert preflight["exit_code"] == 0
-    assert preflight["dispatch"]["implemented"] is True
-    assert preflight["dispatch"]["blocked"] is False
-    assert preflight["operation"]["kind"] == "JOINT_TARGET"
-    assert preflight["operation"]["passed"] is True
-    assert preflight["operation"]["cleanup_passed"] is True
-    assert preflight["runtime"]["cleanup"]["passed"] is True
-    assert preflight["runtime"]["container_name"] == (
-        "rocobrick-runtime-session-fake"
-    )
-    assert preflight["checks"]["no_motion_dispatched"] is False
-    assert preflight["checks"]["operation_dispatched"] is True
-    assert preflight["checks"]["inputs_immutable_after_runtime"] is True
-    phases = [event["event"]["phase"] for event in events]
-    assert "operation_admission" in phases
-    assert "runtime_start" in phases
-    assert "operation" in phases
-    assert "runtime_stop" in phases
-    result = json.loads(Path(line["result_path"]).read_text(encoding="utf-8"))
-    assert result["passed"] is True
-    assert result["execution_safe"] is True
-    assert result["operation"]["request_id"] == "op-joint-1"
-    assert result["runtime_session"]["evidence_path"].endswith(
-        "runtime-session.json"
-    )
-
-
-def test_valid_link6_operation_delegates_to_the_session(tmp_path, monkeypatch):
-    document = link6_pose_operation_document()
-    calls: list = []
-    install_fake_session(monkeypatch, calls, result=passing_result(document))
-    code, line = run_with_operation(tmp_path, document)
-    assert code == 0
-    assert line["status"] == "EXECUTED"
-    _, preflight_path, _ = read_evidence(line)
-    preflight = json.loads(preflight_path.read_text(encoding="utf-8"))
-    assert preflight["operation"]["kind"] == "LINK6_POSE"
-    assert preflight["operation"]["passed"] is True
-
-
-def test_admission_rejected_operation_starts_zero_sessions(
-    tmp_path, monkeypatch
-):
-    document = joint_operation_document(
-        payload={
-            "positions": {**ADMITTED_JOINT_POSITIONS, "joint2": 4.0},
-            "goal_tolerance": 0.01,
-        }
-    )
-    calls: list = []
-    install_fake_session(monkeypatch, calls)
-    code, line = run_with_operation(tmp_path, document)
-    assert code == 9
-    assert line["status"] == "OPERATION_REJECTED"
-    assert line["passed"] is False
-    assert calls == []
-    _, preflight_path, events = read_evidence(line)
-    preflight = json.loads(preflight_path.read_text(encoding="utf-8"))
-    assert preflight["operation"]["kind"] == "JOINT_TARGET"
-    assert preflight["operation"]["passed"] is False
-    assert preflight["runtime"] is None
-    assert preflight["checks"]["no_motion_dispatched"] is False
-    phases = [event["event"]["phase"] for event in events]
-    assert "runtime_start" not in phases
-
-
-def test_readiness_kind_is_not_dispatchable(tmp_path, monkeypatch):
-    document = {
-        "schema": OPERATION_SCHEMA_CONST,
-        "kind": "READINESS",
-        "payload": {},
-        "timeout_s": 30.0,
-        "request_id": "op-readiness-1",
-    }
-    calls: list = []
-    install_fake_session(monkeypatch, calls)
-    code, line = run_with_operation(tmp_path, document)
-    assert code == 9
-    assert line["status"] == "OPERATION_REJECTED"
-    assert calls == []
-
-
-def test_malformed_operation_document_is_invalid_input(tmp_path, monkeypatch):
-    operation_path = tmp_path / "operation.json"
-    operation_path.write_text("{ not json", encoding="utf-8")
-    calls: list = []
-    install_fake_session(monkeypatch, calls)
-    code, line, _, _ = invoke([
+@pytest.mark.parametrize("flag", ["--operation", "--skill-request"])
+def test_removed_bridge_flags_are_rejected(tmp_path, flag):
+    """The old internal bridge flags are gone from the only production CLI."""
+    code, line, _, _stderr = invoke([
         "--task", str(TASK_DIR),
         "--plan", str(PLAN),
         "--backend", "isaac",
         "--run-dir", str(tmp_path / "run"),
-        "--operation", str(operation_path),
+        flag, str(tmp_path / "request.json"),
     ])
     assert code == 2
     assert line["status"] == "INVALID_INPUT"
+    assert line["run_dir"] is None
+    assert not (tmp_path / "run").exists()
+
+
+@pytest.mark.parametrize(
+    ("case", "expected_code", "expected_status"),
+    [
+        ("tampered-stap", 2, "INVALID_INPUT"),
+        ("unbindable-external-plan", 2, "INVALID_INPUT"),
+        ("source-mismatch", 2, "INVALID_INPUT"),
+        ("unknown-robot", 2, "INVALID_INPUT"),
+        ("missing-tcp-artifact", 5, "TCP_CONTRACT_INVALID"),
+    ],
+)
+def test_plan_gates_fail_before_any_session_is_created(
+    tmp_path, monkeypatch, case, expected_code, expected_status
+):
+    """Every immutable gate rejects before the runtime session factory runs."""
+    calls: list = []
+    created = install_fake_multi_robot_session(monkeypatch, calls)
+    plan_path = OPERATION_PLAN
+    stap_plan_path = PLAN
+    if case == "tampered-stap":
+        stap_plan_path = tmp_path / "stap-plan.json"
+        tampered = json.loads(PLAN.read_text(encoding="utf-8"))
+        tampered["plan_id"] = "tampered-plan"
+        stap_plan_path.write_text(json.dumps(tampered), encoding="utf-8")
+    elif case in ("unbindable-external-plan", "unknown-robot"):
+        document = example1_operation_plan()
+        if case == "unbindable-external-plan":
+            document["robots"] = ["piper_0"]
+        else:
+            document["operations"][0]["executor_robot_id"] = "piper_9"
+        plan_path = write_operation_plan(tmp_path, document)
+    elif case == "source-mismatch":
+        document = example1_operation_plan()
+        document["source_plan_id"] = "some-other-plan"
+        plan_path = write_operation_plan(tmp_path, document)
+    else:
+        patch_artifact(monkeypatch, None, tmp_path)
+
+    code, line = run_with_operation_plan(
+        tmp_path, plan_path=plan_path, stap_plan_path=stap_plan_path
+    )
+
+    assert code == expected_code
+    assert line["status"] == expected_status
+    assert line["passed"] is False
+    assert created == []
     assert calls == []
+    _, preflight_path, events = read_evidence(line)
+    preflight = json.loads(preflight_path.read_text(encoding="utf-8"))
+    phases = [event["event"]["phase"] for event in events]
+    assert "runtime_start" not in phases
+    assert preflight["runtime"] is None
+    assert preflight["checks"]["no_motion_dispatched"] is True
 
 
-def test_runtime_start_failure_reports_runtime_start_failed(
+def test_tcp_authorization_denial_creates_zero_sessions(tmp_path, monkeypatch):
+    def denied_authorize(*_args, **_kwargs):
+        return SimpleNamespace(
+            allowed=False,
+            status="UNRESOLVED_TCP",
+            reason="synthetic deny",
+            checks={"synthetic_check": False},
+        )
+
+    monkeypatch.setattr(piper_run, "authorize_tcp", denied_authorize)
+    calls: list = []
+    created = install_fake_multi_robot_session(monkeypatch, calls)
+    code, line = run_with_operation_plan(tmp_path)
+    assert code == 4
+    assert line["status"] == "UNRESOLVED_TCP"
+    assert line["passed"] is False
+    assert created == []
+    assert calls == []
+    _, preflight_path, events = read_evidence(line)
+    preflight = json.loads(preflight_path.read_text(encoding="utf-8"))
+    authorization = preflight["tcp"]["authorization"]
+    assert authorization["decision"] == "DENY"
+    assert authorization["allowed"] is False
+    assert authorization["reason"] == "synthetic deny"
+    assert preflight["robot_operation_plan"]["validated"] is True
+    assert preflight["robot_operation_plan_run"] is None
+    phases = [event["event"]["phase"] for event in events]
+    assert "runtime_start" not in phases
+    assert "tcp_authorization" in phases
+
+
+def test_tcp_authorization_precedes_real_session_creation(
+    tmp_path, monkeypatch
+):
+    order: list[str] = []
+    real_authorize = piper_run.authorize_tcp
+
+    def authorize(contract, **kwargs):
+        order.append("authorize")
+        return real_authorize(contract, **kwargs)
+
+    monkeypatch.setattr(piper_run, "authorize_tcp", authorize)
+    created = []
+
+    def factory(session_dir, args, robot_ids):
+        order.append("create_session")
+        session = FakeMultiRobotSession(session_dir, calls=[])
+        session.robot_ids = tuple(robot_ids)
+        created.append(session)
+        return session
+
+    monkeypatch.setattr(piper_run, "_create_session", factory)
+    code, line = run_with_operation_plan(tmp_path)
+
+    assert code == 10
+    assert line["status"] == "EXECUTION_FAILED"
+    assert order == ["authorize", "create_session"]
+    assert len(created) == 1
+    assert created[0].robot_ids == PLAN_ROBOTS
+    _, preflight_path, events = read_evidence(line)
+    preflight = json.loads(preflight_path.read_text(encoding="utf-8"))
+    assert preflight["tcp"]["authorization"]["decision"] == "ALLOW"
+    phases = [event["event"]["phase"] for event in events]
+    assert phases.index("tcp_authorization") < phases.index("runtime_start")
+
+
+def test_operation_plan_bytes_are_captured_verbatim(tmp_path, monkeypatch):
+    source = tmp_path / "external-plan.json"
+    source.write_bytes(OPERATION_PLAN.read_bytes())
+    calls: list = []
+    install_fake_multi_robot_session(monkeypatch, calls)
+    code, line = run_with_operation_plan(tmp_path, plan_path=source)
+    assert code == 10
+    evidence_dir, run_document, _events = read_plan_run(line)
+    captured = evidence_dir / "robot-operation-plan.json"
+    assert captured.read_bytes() == source.read_bytes()
+    metadata = json.loads(
+        (evidence_dir / "robot-operation-plan.json.metadata.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    digest = sha256(source.read_bytes()).hexdigest()
+    assert metadata == {"sha256": digest, "bytes": len(source.read_bytes())}
+    preflight = json.loads(
+        (evidence_dir / "preflight.json").read_text(encoding="utf-8")
+    )
+    assert preflight["robot_operation_plan"]["sha256"] == digest
+    assert preflight["robot_operation_plan"]["validated"] is True
+    assert preflight["robot_operation_plan"]["plan_id"] == (
+        "robot-operation-plan-example1-v1"
+    )
+    assert preflight["robot_operation_plan"]["robots"] == list(PLAN_ROBOTS)
+    inputs = run_document["inputs"]
+    assert inputs["sha256_before"]["robot_operation_plan"] == digest
+    assert inputs["immutable_after_all_phases"] is True
+
+
+def test_operation_plan_mutation_after_dispatch_is_input_mutated(
+    tmp_path, monkeypatch
+):
+    source = tmp_path / "external-plan.json"
+    source.write_bytes(OPERATION_PLAN.read_bytes())
+    calls: list = []
+    install_fake_multi_robot_session(
+        monkeypatch, calls, mutate_path=source
+    )
+    code, line = run_with_operation_plan(tmp_path, plan_path=source)
+    assert code == 6
+    assert line["status"] == "INPUT_MUTATED"
+    assert line["passed"] is False
+    _evidence_dir, run_document, _events = read_plan_run(line)
+    assert run_document["inputs"]["immutable_after_all_phases"] is False
+    assert run_document["scheduler_passed"] is False
+    assert run_document["passed"] is False
+    assert run_document["cleanup_passed"] is True
+    assert calls[0] == ("start",)
+    assert calls[-1] == ("stop",)
+
+
+def test_stap_plan_mutation_after_a_confirmed_wait_is_input_mutated(
+    tmp_path, monkeypatch
+):
+    stap_copy = tmp_path / "stap-plan-copy.json"
+    stap_copy.write_bytes(PLAN.read_bytes())
+    plan_path = write_operation_plan(tmp_path, wait_only_plan_document())
+    calls: list = []
+    install_fake_multi_robot_session(
+        monkeypatch,
+        calls,
+        scene_reader=advancing_scene_reader(),
+        mutate_path=stap_copy,
+    )
+    code, line = run_with_operation_plan(
+        tmp_path, plan_path=plan_path, stap_plan_path=stap_copy
+    )
+    assert code == 6
+    assert line["status"] == "INPUT_MUTATED"
+    assert line["passed"] is False
+    _evidence_dir, run_document, _events = read_plan_run(line)
+    assert run_document["scheduler_passed"] is True
+    assert run_document["inputs"]["immutable_after_all_phases"] is False
+    assert run_document["passed"] is False
+
+
+def test_missing_external_plan_is_invalid_input_with_zero_sessions(
     tmp_path, monkeypatch
 ):
     calls: list = []
-    install_fake_session(
-        monkeypatch, calls, start_error="host_marker failed: marker not seen"
+    created = install_fake_multi_robot_session(monkeypatch, calls)
+    missing = tmp_path / "missing-plan.json"
+    code, line = run_with_operation_plan(tmp_path, plan_path=missing)
+    assert code == 2
+    assert line["status"] == "INVALID_INPUT"
+    assert line["passed"] is False
+    assert created == []
+    assert calls == []
+    evidence_dir, preflight_path, events = read_evidence(line)
+    assert not (evidence_dir / "robot-operation-plan.json").exists()
+    assert not (evidence_dir / "robot-operation-plan-run.json").exists()
+    preflight = json.loads(preflight_path.read_text(encoding="utf-8"))
+    assert "unreadable" in preflight["robot_operation_plan"]["error"]
+    phases = [event["event"]["phase"] for event in events]
+    assert "runtime_start" not in phases
+    assert preflight["checks"]["no_motion_dispatched"] is True
+
+
+def test_readiness_failure_schedules_zero_operations(tmp_path, monkeypatch):
+    readiness = FakeReadinessEvidence(
+        robots=PLAN_ROBOTS,
+        readiness_by_robot={
+            "piper_0": {"robot_id": "piper_0", "passed": True},
+            "piper_1": {"robot_id": "piper_1", "passed": False},
+        },
+        all_ready=False,
+        passed=False,
     )
-    code, line = run_with_operation(
-        tmp_path, joint_operation_document()
+    calls: list = []
+    install_fake_multi_robot_session(
+        monkeypatch, calls, readiness=readiness
     )
+    code, line = run_with_operation_plan(tmp_path)
     assert code == 8
     assert line["status"] == "RUNTIME_START_FAILED"
     assert line["passed"] is False
     assert calls == [("start",), ("stop",)]
-    _, preflight_path, events = read_evidence(line)
-    preflight = json.loads(preflight_path.read_text(encoding="utf-8"))
+    evidence_dir, run_document, events = read_plan_run(line)
+    assert run_document["scheduler_ran"] is False
+    assert run_document["operations"] == {}
+    assert run_document["passed"] is False
+    assert run_document["cleanup_passed"] is True
+    assert run_document["readiness"]["all_ready"] is False
+    assert "piper_1" in run_document["readiness"]["readiness_by_robot"]
+    preflight = json.loads(
+        (evidence_dir / "preflight.json").read_text(encoding="utf-8")
+    )
+    assert preflight["checks"]["robot_operation_plan_dispatched"] is True
+    assert preflight["checks"]["runtime_dispatched"] is True
     assert preflight["runtime"]["cleanup"]["passed"] is True
-    assert preflight["operation"]["passed"] is False
-    assert preflight["passed"] is False
     by_phase = {
-        event["event"]["phase"]: event["event"]["status"] for event in events
+        event["event"]["phase"]: event["event"].get("status")
+        for event in events
     }
     assert by_phase["runtime_start"] == "FAILED"
-    assert by_phase["runtime_stop"] == "FAILED"
+    assert by_phase["runtime_stop"] == "STOPPED"
 
 
-def test_runtime_operation_failure_reports_execution_failed(
+def test_readiness_missing_a_plan_robot_schedules_zero_operations(
     tmp_path, monkeypatch
 ):
-    document = joint_operation_document()
-    failed = {
-        **passing_result(document),
-        "passed": False,
-        "execution": {
-            "status": "FAILED",
-            "is_success": False,
-            "command_messages": 0,
+    partial = FakeReadinessEvidence(
+        robots=("piper_0",),
+        readiness_by_robot={
+            "piper_0": {"robot_id": "piper_0", "passed": True}
         },
-        "error": "the joint goal did not pass the execution gates",
-    }
+        all_ready=True,
+        passed=True,
+    )
     calls: list = []
-    install_fake_session(monkeypatch, calls, result=failed)
-    code, line = run_with_operation(tmp_path, document)
+    install_fake_multi_robot_session(monkeypatch, calls, readiness=partial)
+    code, line = run_with_operation_plan(tmp_path)
+    assert code == 8
+    assert line["status"] == "RUNTIME_START_FAILED"
+    _evidence_dir, run_document, _events = read_plan_run(line)
+    assert run_document["scheduler_ran"] is False
+    assert run_document["operations"] == {}
+    assert "are not exactly the plan robots" in (
+        run_document["readiness_rejection"]
+    )
+
+
+def test_duplicate_readiness_robot_entry_schedules_zero_operations(
+    tmp_path, monkeypatch
+):
+    duplicated = FakeReadinessEvidence(
+        robots=("piper_0", "piper_0", "piper_1"),
+        readiness_by_robot={
+            "piper_0": {"robot_id": "piper_0", "passed": True},
+            "piper_1": {"robot_id": "piper_1", "passed": True},
+        },
+        all_ready=True,
+        passed=True,
+    )
+    calls: list = []
+    install_fake_multi_robot_session(
+        monkeypatch, calls, readiness=duplicated
+    )
+    code, line = run_with_operation_plan(tmp_path)
+    assert code == 8
+    assert line["status"] == "RUNTIME_START_FAILED"
+    _evidence_dir, run_document, _events = read_plan_run(line)
+    assert run_document["scheduler_ran"] is False
+    assert run_document["operations"] == {}
+    assert "are not exactly the plan robots" in (
+        run_document["readiness_rejection"]
+    )
+
+
+def test_extra_readiness_robot_key_schedules_zero_operations(
+    tmp_path, monkeypatch
+):
+    extra = FakeReadinessEvidence(
+        robots=PLAN_ROBOTS,
+        readiness_by_robot={
+            "piper_0": {"robot_id": "piper_0", "passed": True},
+            "piper_1": {"robot_id": "piper_1", "passed": True},
+            "piper_2": {"robot_id": "piper_2", "passed": True},
+        },
+        all_ready=True,
+        passed=True,
+    )
+    calls: list = []
+    install_fake_multi_robot_session(monkeypatch, calls, readiness=extra)
+    code, line = run_with_operation_plan(tmp_path)
+    assert code == 8
+    assert line["status"] == "RUNTIME_START_FAILED"
+    _evidence_dir, run_document, _events = read_plan_run(line)
+    assert run_document["scheduler_ran"] is False
+    assert run_document["operations"] == {}
+    assert "keys are not exactly the plan robots" in (
+        run_document["readiness_rejection"]
+    )
+    assert "extra=['piper_2']" in run_document["readiness_rejection"]
+
+
+def test_session_start_error_schedules_zero_operations(tmp_path, monkeypatch):
+    calls: list = []
+    install_fake_multi_robot_session(
+        monkeypatch, calls, start_error=RuntimeError("synthetic start failure")
+    )
+    code, line = run_with_operation_plan(tmp_path)
+    assert code == 8
+    assert line["status"] == "RUNTIME_START_FAILED"
+    assert calls == [("start",), ("stop",)]
+    evidence_dir, run_document, events = read_plan_run(line)
+    assert run_document["scheduler_ran"] is False
+    assert run_document["operations"] == {}
+    assert run_document["cleanup_passed"] is True
+    preflight = json.loads(
+        (evidence_dir / "preflight.json").read_text(encoding="utf-8")
+    )
+    assert "synthetic start failure" in preflight["reason"]
+    by_phase = {
+        event["event"]["phase"]: event["event"].get("status")
+        for event in events
+    }
+    assert by_phase["runtime_start"] == "FAILED"
+    assert by_phase["runtime_stop"] == "STOPPED"
+
+
+def test_session_creation_error_is_runtime_start_failed(tmp_path, monkeypatch):
+    def factory(_session_dir, _args, _robot_ids):
+        raise RuntimeError("synthetic creation failure")
+
+    monkeypatch.setattr(piper_run, "_create_session", factory)
+    code, line = run_with_operation_plan(tmp_path)
+    assert code == 8
+    assert line["status"] == "RUNTIME_START_FAILED"
+    assert line["passed"] is False
+    evidence_dir, preflight_path, events = read_evidence(line)
+    preflight = json.loads(preflight_path.read_text(encoding="utf-8"))
+    assert preflight["runtime"] is None
+    assert "synthetic creation failure" in preflight["reason"]
+    phases = [event["event"]["phase"] for event in events]
+    assert "runtime_start" in phases
+    assert "runtime_stop" not in phases
+    run_document = json.loads(
+        (evidence_dir / "robot-operation-plan-run.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert run_document["scheduler_ran"] is False
+    assert run_document["operations"] == {}
+    assert run_document["passed"] is False
+    assert preflight["checks"]["no_motion_dispatched"] is True
+
+
+def test_full_example1_plan_fails_capability_unavailable_without_motion(
+    tmp_path, monkeypatch
+):
+    calls: list = []
+    created = install_fake_multi_robot_session(monkeypatch, calls)
+    code, line, stdout, _stderr = invoke(plan_argv(tmp_path, OPERATION_PLAN))
+
+    assert code == 10
+    assert set(line) == {
+        "schema",
+        "status",
+        "passed",
+        "run_dir",
+        "result_path",
+    }
+    assert line["schema"] == RESULT_SCHEMA
+    assert line["status"] == "EXECUTION_FAILED"
+    assert line["status"] != "EXECUTED"
+    assert line["passed"] is False
+    assert stdout.count("\n") == 1
+    assert len(created) == 1
+    assert created[0].robot_ids == PLAN_ROBOTS
+    assert calls[0] == ("start",)
+    assert calls[-1] == ("stop",)
+    observed_robots = {
+        call[1] for call in calls if call[0] == "observe"
+    }
+    assert observed_robots <= {"piper_1"}
+
+    evidence_dir, preflight_path, events = read_evidence(line)
+    run_document = json.loads(
+        (evidence_dir / "robot-operation-plan-run.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    operations = run_document["operations"]
+    assert operations["example1-piper0-transit-to-pick"]["status"] == "FAILED"
+    assert "CAPABILITY_UNAVAILABLE" in (
+        operations["example1-piper0-transit-to-pick"]["reason"]
+    )
+    assert operations["example1-piper0-transit-to-pick"]["motion_sent"] is False
+    assert operations["example1-piper1-wait-stable"]["status"] == "CANCELLED"
+    for operation_id in (
+        "example1-piper0-pick",
+        "example1-piper0-transit-to-place",
+        "example1-piper0-place-down",
+    ):
+        assert operations[operation_id]["status"] == "BLOCKED"
+    assert all(
+        item["motion_sent"] is not True for item in operations.values()
+    )
+    assert run_document["passed"] is False
+    assert run_document["scheduler_passed"] is False
+    assert run_document["unsafe_terminals"] == []
+    assert run_document["motion_sent"] is False
+    assert run_document["cleanup_passed"] is True
+    assert run_document["cleanup"]["cleanup"]["passed"] is True
+    assert run_document["inputs"]["immutable_after_all_phases"] is True
+    assert [
+        item["operation_id"] for item in run_document["cancellations"]
+    ] == ["example1-piper1-wait-stable"]
+    assert run_document["cancellations"][0]["safe"] is True
+    assert run_document["cancellations"][0]["terminal"] is True
+    assert run_document["resources"]
+
+    # The final semantic check fails closed: the pending STAP task's assembly
+    # effect is not evidenced by a CONFIRMED PLACE_DOWN.
+    assembly = run_document["stap_assembly_effects"]
+    assert assembly["passed"] is False
+    assert assembly["pending_task_ids"] == [TASK_SOURCE_ID]
+    assert assembly["evidenced_task_ids"] == []
+    assert assembly["missing_task_ids"] == [TASK_SOURCE_ID]
+    assert assembly["required_evidence_labels"] == [
+        "connection_confirmed",
+        "release_confirmed",
+        "retreat_confirmed",
+    ]
+
+    preflight = json.loads(preflight_path.read_text(encoding="utf-8"))
+    assert preflight["status"] == "EXECUTION_FAILED"
+    assert preflight["passed"] is False
+    assert preflight["exit_code"] == 10
+    assert preflight["dispatch"] == {
+        "implemented": True,
+        "dispatch_requested": True,
+        "blocked": True,
+        "status": "EXECUTION_FAILED",
+        "reason": preflight["reason"],
+    }
+    assert "CAPABILITY_UNAVAILABLE" in preflight["reason"]
+    checks = preflight["checks"]
+    assert checks["robot_operation_plan_validated"] is True
+    assert checks["robot_operation_plan_cross_bound"] is True
+    assert checks["robot_operation_plan_readiness_passed"] is True
+    assert checks["robot_operation_plan_scheduler_ran"] is True
+    assert checks["robot_operation_plan_scheduler_passed"] is False
+    assert checks["robot_operation_plan_cleanup_passed"] is True
+    assert checks["robot_operation_plan_pending_tasks_confirmed"] is False
+    assert checks["robot_operation_plan_dispatched"] is True
+    assert checks["runtime_dispatched"] is True
+    assert checks["motion_sent"] is False
+    assert checks["no_motion_dispatched"] is True
+
+    result = json.loads(Path(line["result_path"]).read_text(encoding="utf-8"))
+    assert result["schema"] == RESULT_SCHEMA
+    assert result["passed"] is False
+    assert result["execution_safe"] is False
+    assert result["robot_operation_plan_run"]["passed"] is False
+    assert result["runtime_session"]["cleanup"]["passed"] is True
+
+    phases = list(
+        dict.fromkeys(event["event"]["phase"] for event in events)
+    )
+    assert phases == [
+        "immutable_input",
+        "stap_validated",
+        "structural_binding",
+        "tcp_gate",
+        "dispatch",
+        "robot_operation_plan",
+        "tcp_authorization",
+        "runtime_start",
+        "runtime_stop",
+        "stap_assembly_effects",
+        "robot_operation_plan_run",
+        "result",
+    ]
+    ready_event = [
+        event["event"]
+        for event in events
+        if event["event"]["phase"] == "runtime_start"
+        and event["event"]["status"] == "READY"
+    ][0]
+    assert ready_event["readiness"]["robots"] == list(PLAN_ROBOTS)
+    assert ready_event["readiness"]["readiness_by_robot"]["piper_1"][
+        "passed"
+    ] is True
+
+
+def test_confirmed_wait_alone_never_reports_executed_without_assembly_evidence(
+    tmp_path, monkeypatch
+):
+    """A CONFIRMED WAIT never substitutes for the pending PLACE_DOWN effect."""
+    plan_path = write_operation_plan(tmp_path, wait_only_plan_document())
+    calls: list = []
+    install_fake_multi_robot_session(
+        monkeypatch, calls, scene_reader=advancing_scene_reader()
+    )
+    code, line = run_with_operation_plan(tmp_path, plan_path=plan_path)
+    assert code == 10
+    assert line["status"] == "EXECUTION_FAILED"
+    assert line["status"] != "EXECUTED"
+    assert line["passed"] is False
+    assert ("observe", "piper_1") in calls
+    assert all(call[0] != "observe" or call[1] == "piper_1" for call in calls)
+    evidence_dir, preflight_path, events = read_evidence(line)
+    run_document = json.loads(
+        (evidence_dir / "robot-operation-plan-run.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    # The running WAIT evidence is preserved exactly as observed.
+    wait = run_document["operations"]["wait-test"]
+    assert wait["status"] == "CONFIRMED"
+    assert wait["passed"] is True
+    assert wait["motion_sent"] is False
+    assert wait["terminal"] is True
+    assert set(wait["evidence"]) == {
+        "real_scene_observation",
+        "wait_duration_confirmed",
+    }
+    assert wait["evidence"]["real_scene_observation"]["polls"] >= 2
+
+    # The plan itself scheduled and cleaned up, but the final assembly-effect
+    # check refuses EXECUTED while the pending STAP task is unassembled.
+    assert run_document["scheduler_passed"] is True
+    assert run_document["readiness"]["passed"] is True
+    assert run_document["cleanup_passed"] is True
+    assert run_document["inputs"]["immutable_after_all_phases"] is True
+    assert run_document["motion_sent"] is False
+    assembly = run_document["stap_assembly_effects"]
+    assert assembly["passed"] is False
+    assert assembly["pending_task_ids"] == [TASK_SOURCE_ID]
+    assert assembly["evidenced_task_ids"] == []
+    assert assembly["missing_task_ids"] == [TASK_SOURCE_ID]
+    task_entry = assembly["tasks"][0]
+    assert task_entry["task_id"] == TASK_SOURCE_ID
+    assert task_entry["physical_instance_id"] == PIPER0_PART
+    assert task_entry["primary_robot"] == "piper_0"
+    assert task_entry["skill"] == "PLACE_DOWN"
+    assert task_entry["operation_id"] is None
+    assert task_entry["confirmed"] is False
+    assert task_entry["missing_evidence_labels"] == [
+        "connection_confirmed",
+        "release_confirmed",
+        "retreat_confirmed",
+    ]
+    assert "PLACE_DOWN" in task_entry["reason"]
+    assert run_document["passed"] is False
+
+    preflight = json.loads(preflight_path.read_text(encoding="utf-8"))
+    assert preflight["passed"] is False
+    assert preflight["exit_code"] == 10
+    assert preflight["checks"]["no_motion_dispatched"] is True
+    assert preflight["checks"]["robot_operation_plan_pending_tasks_confirmed"] is (
+        False
+    )
+    assert "pending STAP assembly effect" in preflight["reason"]
+    assert TASK_SOURCE_ID in preflight["reason"]
+    assembly_events = [
+        event["event"]
+        for event in events
+        if event["event"]["phase"] == "stap_assembly_effects"
+    ]
+    assert len(assembly_events) == 1
+    assert assembly_events[0]["status"] == "FAILED"
+    assert assembly_events[0]["passed"] is False
+    assert assembly_events[0]["missing_task_ids"] == [TASK_SOURCE_ID]
+    final_event = [
+        event["event"]
+        for event in events
+        if event["event"]["phase"] == "robot_operation_plan_run"
+    ][0]
+    assert final_event["pending_stap_tasks_confirmed"] is False
+    assert final_event["missing_assembly_task_ids"] == [TASK_SOURCE_ID]
+    result = json.loads(Path(line["result_path"]).read_text(encoding="utf-8"))
+    assert result["passed"] is False
+    assert result["execution_safe"] is False
+    assert result["retreat_clear"] is False
+    assert result["status"] == "EXECUTION_FAILED"
+
+
+class ConfirmedPlaceDownExecutor:
+    """Executor stand-in that confirms PLACE_DOWN with assembly evidence.
+
+    The stub never sends motion: it answers a synthetic CONFIRMED result for
+    every ``PLACE_DOWN`` operation carrying the assembly evidence labels, so
+    the piper-run final semantic check can be exercised end to end.
+    """
+
+    def __init__(self, robot_ids, observation_transport):
+        """Store the validated robots and the injected transport."""
+        self.robot_ids = tuple(robot_ids)
+        self.transport = observation_transport
+
+    async def execute(self, operation):
+        """Confirm one PLACE_DOWN operation with its evidence labels.
+
+        Args:
+            operation: PLACE_DOWN operation dispatched by the scheduler.
+
+        Returns:
+            A synthetic CONFIRMED execution carrying the assembly labels.
+        """
+        assert operation.skill == "PLACE_DOWN", operation.skill
+        values = operation.target.values
+        evidence = {
+            "connection_confirmed": {
+                "connection_id": values["connection_id"],
+                "upper_physical_instance_id": values[
+                    "upper_physical_instance_id"
+                ],
+                "lower_physical_instance_id": values[
+                    "lower_physical_instance_id"
+                ],
+            },
+            "release_confirmed": {"opening_m": 0.04},
+            "retreat_confirmed": {"retreat_clear": True},
+        }
+        return OperationExecution(
+            operation_id=operation.operation_id,
+            robot_id=operation.executor_robot_id,
+            status=OperationStatus.CONFIRMED,
+            passed=True,
+            terminal=True,
+            motion_sent=False,
+            evidence={
+                label: evidence[label]
+                for label in operation.evidence_requirements
+            },
+            reason="synthetic confirmed assembly",
+        )
+
+    async def cancel(self, operation_id):
+        """Acknowledge a cancel as terminal and safe (no motion exists).
+
+        Args:
+            operation_id: Operation the scheduler asked to cancel.
+
+        Returns:
+            A safe terminal cancel acknowledgement.
+        """
+        return CancelEvidence(
+            operation_id=operation_id,
+            acknowledged=True,
+            terminal=True,
+            safe=True,
+            evidence={"mode": "no_motion"},
+        )
+
+
+def place_down_only_plan_document(
+    *,
+    evidence_labels: tuple[str, ...] = (
+        "connection_confirmed",
+        "release_confirmed",
+        "retreat_confirmed",
+    ),
+    plan_evidence: str = "retreat_confirmed",
+) -> dict:
+    """Build a strict single-PLACE_DOWN plan bound to the example1 STAP plan.
+
+    Args:
+        evidence_labels: Evidence labels the isolated PLACE_DOWN operation
+            declares.
+        plan_evidence: One declared label repeated in the plan-level
+            ``evidence_requirements`` section.
+
+    Returns:
+        A ``robot-operation-plan/v1`` document whose only operation is the
+        frozen example1 piper_0 PLACE_DOWN.
+    """
+    document = example1_operation_plan()
+    operation = next(
+        item
+        for item in document["operations"]
+        if item["operation_id"] == "example1-piper0-place-down"
+    )
+    operation = dict(operation)
+    operation["evidence_requirements"] = list(evidence_labels)
+    return {
+        "schema": "robot-operation-plan/v1",
+        "plan_id": "robot-operation-plan-place-down-test-v1",
+        "source_plan_id": PLAN_ID,
+        "robots": list(document["robots"]),
+        "operations": [operation],
+        "dependencies": [],
+        "execution_layers": [[operation["operation_id"]]],
+        "planned_schedule": [
+            [
+                {
+                    "operation_id": operation["operation_id"],
+                    "robot_id": operation["executor_robot_id"],
+                }
+            ]
+        ],
+        "evidence_requirements": [
+            {
+                "operation_id": operation["operation_id"],
+                "evidence": plan_evidence,
+            }
+        ],
+    }
+
+
+def test_confirmed_place_down_with_assembly_evidence_reports_executed(
+    tmp_path, monkeypatch
+):
+    """A fully evidenced CONFIRMED PLACE_DOWN is required and sufficient."""
+    plan_path = write_operation_plan(tmp_path, place_down_only_plan_document())
+    calls: list = []
+    install_fake_multi_robot_session(monkeypatch, calls)
+    monkeypatch.setattr(
+        executor_module, "SkillOperationExecutor", ConfirmedPlaceDownExecutor
+    )
+    code, line = run_with_operation_plan(tmp_path, plan_path=plan_path)
+    assert code == 0
+    assert line["status"] == "EXECUTED"
+    assert line["passed"] is True
+    evidence_dir, preflight_path, events = read_evidence(line)
+    run_document = json.loads(
+        (evidence_dir / "robot-operation-plan-run.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    operation_id = "example1-piper0-place-down"
+    place_down = run_document["operations"][operation_id]
+    assert place_down["status"] == "CONFIRMED"
+    assert place_down["passed"] is True
+    assert place_down["terminal"] is True
+    assert place_down["motion_sent"] is False
+    assert set(place_down["evidence"]) == {
+        "connection_confirmed",
+        "release_confirmed",
+        "retreat_confirmed",
+    }
+    assembly = run_document["stap_assembly_effects"]
+    assert assembly["passed"] is True
+    assert assembly["pending_task_ids"] == [TASK_SOURCE_ID]
+    assert assembly["evidenced_task_ids"] == [TASK_SOURCE_ID]
+    assert assembly["missing_task_ids"] == []
+    task_entry = assembly["tasks"][0]
+    assert task_entry["confirmed"] is True
+    assert task_entry["operation_id"] == operation_id
+    assert task_entry["operation_status"] == "CONFIRMED"
+    assert task_entry["operation_passed"] is True
+    assert task_entry["missing_evidence_labels"] == []
+    assert run_document["passed"] is True
+    assert run_document["scheduler_passed"] is True
+    assert run_document["cleanup_passed"] is True
+    assert run_document["motion_sent"] is False
+    preflight = json.loads(preflight_path.read_text(encoding="utf-8"))
+    assert preflight["passed"] is True
+    assert preflight["exit_code"] == 0
+    assert preflight["checks"]["robot_operation_plan_pending_tasks_confirmed"] is (
+        True
+    )
+    assert preflight["checks"]["no_motion_dispatched"] is True
+    assembly_events = [
+        event["event"]
+        for event in events
+        if event["event"]["phase"] == "stap_assembly_effects"
+    ]
+    assert len(assembly_events) == 1
+    assert assembly_events[0]["status"] == "CONFIRMED"
+    assert assembly_events[0]["passed"] is True
+    assert assembly_events[0]["missing_task_ids"] == []
+    result = json.loads(Path(line["result_path"]).read_text(encoding="utf-8"))
+    assert result["passed"] is True
+    assert result["execution_safe"] is True
+    assert result["retreat_clear"] is True
+
+
+def test_confirmed_place_down_without_every_assembly_label_fails_the_run(
+    tmp_path, monkeypatch
+):
+    """A CONFIRMED PLACE_DOWN missing a required label is not executed."""
+    plan_path = write_operation_plan(
+        tmp_path,
+        place_down_only_plan_document(
+            evidence_labels=("connection_confirmed", "release_confirmed"),
+            plan_evidence="connection_confirmed",
+        ),
+    )
+    calls: list = []
+    install_fake_multi_robot_session(monkeypatch, calls)
+    monkeypatch.setattr(
+        executor_module, "SkillOperationExecutor", ConfirmedPlaceDownExecutor
+    )
+    code, line = run_with_operation_plan(tmp_path, plan_path=plan_path)
     assert code == 10
     assert line["status"] == "EXECUTION_FAILED"
     assert line["passed"] is False
-    assert calls == [
-        ("start",),
-        ("run_operation", "operation-request.json", "operation-result.json"),
-        ("stop",),
-    ]
-    _, preflight_path, _ = read_evidence(line)
+    evidence_dir, preflight_path, _events = read_evidence(line)
+    run_document = json.loads(
+        (evidence_dir / "robot-operation-plan-run.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    place_down = run_document["operations"]["example1-piper0-place-down"]
+    assert place_down["status"] == "CONFIRMED"
+    assembly = run_document["stap_assembly_effects"]
+    assert assembly["passed"] is False
+    assert assembly["evidenced_task_ids"] == []
+    assert assembly["missing_task_ids"] == [TASK_SOURCE_ID]
+    task_entry = assembly["tasks"][0]
+    assert task_entry["confirmed"] is False
+    assert task_entry["operation_status"] == "CONFIRMED"
+    assert task_entry["operation_passed"] is True
+    assert task_entry["missing_evidence_labels"] == ["retreat_confirmed"]
+    assert "retreat_confirmed" in task_entry["reason"]
+    assert run_document["passed"] is False
     preflight = json.loads(preflight_path.read_text(encoding="utf-8"))
-    assert preflight["operation"]["passed"] is False
-    assert preflight["passed"] is False
+    assert preflight["checks"]["robot_operation_plan_pending_tasks_confirmed"] is (
+        False
+    )
+    assert "retreat_confirmed" in preflight["reason"]
 
 
-def test_runtime_rejected_operation_reports_operation_rejected(
+def test_assembly_effect_check_requires_one_exact_task_part_robot_place_down():
+    """Foreign, duplicated or malformed assembly inputs never evidence a task."""
+    from rocobrick.models import SkillType
+    from rocobrick.robot_operation_plan import OperationTarget, RobotOperation
+
+    def place_down(operation_id, *, part=PIPER0_PART, robot="piper_0"):
+        return RobotOperation(
+            operation_id=operation_id,
+            source_task_id=TASK_SOURCE_ID,
+            skill="PLACE_DOWN",
+            executor_robot_id=robot,
+            participants=(robot,),
+            role_bindings={"executor": robot},
+            target=OperationTarget({
+                "connection_id": "conn-example1-upper-lower",
+                "upper_physical_instance_id": part,
+                "lower_physical_instance_id": SUPPORT_BRICK,
+            }),
+            parameters={},
+            preconditions=(),
+            effects=(),
+            resources=(),
+            evidence_requirements=(
+                "connection_confirmed",
+                "release_confirmed",
+                "retreat_confirmed",
+            ),
+        )
+
+    task = SimpleNamespace(
+        task_id=TASK_SOURCE_ID,
+        physical_instance_id=PIPER0_PART,
+        primary_robot="piper_0",
+        skill=SkillType.PLACE_DOWN,
+    )
+    stap_plan = SimpleNamespace(tasks={TASK_SOURCE_ID: task})
+    run_document = {"operations": {}}
+
+    foreign = SimpleNamespace(operations={
+        "place-down-other": place_down("place-down-other", robot="piper_1"),
+        "place-down-wrong-part": place_down(
+            "place-down-wrong-part", part=SUPPORT_BRICK
+        ),
+    })
+    result = piper_run._pending_assembly_effect_check(
+        stap_plan, foreign, run_document
+    )
+    assert result["passed"] is False
+    assert result["missing_task_ids"] == [TASK_SOURCE_ID]
+    assert result["tasks"][0]["operation_id"] is None
+    assert "0 PLACE_DOWN" in result["tasks"][0]["reason"]
+
+    duplicated = SimpleNamespace(operations={
+        "place-down-a": place_down("place-down-a"),
+        "place-down-b": place_down("place-down-b"),
+    })
+    result = piper_run._pending_assembly_effect_check(
+        stap_plan, duplicated, run_document
+    )
+    assert result["passed"] is False
+    assert result["missing_task_ids"] == [TASK_SOURCE_ID]
+    assert result["tasks"][0]["operation_id"] is None
+    assert "2 PLACE_DOWN" in result["tasks"][0]["reason"]
+    assert "exactly one is required" in result["tasks"][0]["reason"]
+
+    malformed = piper_run._pending_assembly_effect_check(
+        object(), object(), run_document
+    )
+    assert malformed["passed"] is False
+    assert malformed["pending_task_ids"] == []
+    assert malformed["reason"]
+
+
+def test_cleanup_failure_blocks_an_otherwise_confirmed_run(
     tmp_path, monkeypatch
 ):
-    document = joint_operation_document()
-    rejected = {
-        **passing_result(document),
-        "passed": False,
-        "execution": {
-            "status": "REJECTED",
-            "is_success": False,
-            "reason": "runtime readiness failed; no motion is allowed",
-            "command_messages": 0,
-        },
-        "error": "the JOINT_TARGET goal did not pass the execution gates",
-    }
+    plan_path = write_operation_plan(tmp_path, wait_only_plan_document())
     calls: list = []
-    install_fake_session(monkeypatch, calls, result=rejected)
-    code, line = run_with_operation(tmp_path, document)
-    assert code == 9
-    assert line["status"] == "OPERATION_REJECTED"
-
-
-def test_failed_cleanup_blocks_executed(tmp_path, monkeypatch):
-    document = joint_operation_document()
-    calls: list = []
-    install_fake_session(
+    install_fake_multi_robot_session(
         monkeypatch,
         calls,
-        result=passing_result(document),
+        scene_reader=advancing_scene_reader(),
         cleanup_passed=False,
     )
-    code, line = run_with_operation(tmp_path, document)
+    code, line = run_with_operation_plan(tmp_path, plan_path=plan_path)
     assert code == 10
     assert line["status"] == "EXECUTION_FAILED"
     assert line["passed"] is False
-    _, preflight_path, _ = read_evidence(line)
-    preflight = json.loads(preflight_path.read_text(encoding="utf-8"))
-    assert preflight["operation"]["passed"] is True
-    assert preflight["operation"]["cleanup_passed"] is False
-    assert preflight["passed"] is False
-
-
-def test_input_mutation_after_runtime_is_input_mutated(tmp_path, monkeypatch):
-    plan_copy = tmp_path / "plan-copy.json"
-    plan_copy.write_bytes(PLAN.read_bytes())
-    operation_path = tmp_path / "operation.json"
-    operation_path.write_text(json.dumps(joint_operation_document()))
-    calls: list = []
-    install_fake_session(
-        monkeypatch,
-        calls,
-        result=passing_result(joint_operation_document()),
-        mutate_path=plan_copy,
+    assert calls[-1] == ("stop",)
+    evidence_dir, preflight_path, _events = read_evidence(line)
+    run_document = json.loads(
+        (evidence_dir / "robot-operation-plan-run.json").read_text(
+            encoding="utf-8"
+        )
     )
-    code, line, _, _ = invoke([
-        "--task", str(TASK_DIR),
-        "--plan", str(plan_copy),
-        "--backend", "isaac",
-        "--run-dir", str(tmp_path / "run"),
-        "--operation", str(operation_path),
-    ])
-    assert code == 6
-    assert line["status"] == "INPUT_MUTATED"
-    assert calls == [
-        ("start",),
-        ("run_operation", "operation-request.json", "operation-result.json"),
-        ("stop",),
-    ]
-    _, preflight_path, _ = read_evidence(line)
+    assert run_document["scheduler_passed"] is True
+    assert run_document["cleanup_passed"] is False
+    assert run_document["passed"] is False
     preflight = json.loads(preflight_path.read_text(encoding="utf-8"))
-    assert preflight["checks"]["inputs_immutable_after_runtime"] is False
-    assert preflight["operation"]["passed"] is True
-    assert preflight["passed"] is False
+    assert "cleanup did not pass" in preflight["reason"]
+    assert preflight["runtime"]["cleanup"]["passed"] is False
 
 
-def test_operation_without_operation_file_leaves_exit7_unchanged(
+def test_cleanup_without_termination_evidence_blocks_the_run(
     tmp_path, monkeypatch
 ):
+    """A bare cleanup bool is not session-owned termination evidence."""
+    plan_path = write_operation_plan(tmp_path, wait_only_plan_document())
     calls: list = []
-    install_fake_session(monkeypatch, calls)
-    code, line = run_example1(tmp_path / "run")
-    assert code == 7
-    assert line["status"] == "EXECUTION_NOT_IMPLEMENTED"
-    assert calls == []
-    _, preflight_path, _ = read_evidence(line)
+    install_fake_multi_robot_session(
+        monkeypatch,
+        calls,
+        scene_reader=advancing_scene_reader(),
+        cleanup_document={"passed": True},
+    )
+    code, line = run_with_operation_plan(tmp_path, plan_path=plan_path)
+    assert code == 10
+    assert line["status"] == "EXECUTION_FAILED"
+    assert line["passed"] is False
+    _evidence_dir, run_document, _events = read_plan_run(line)
+    assert run_document["scheduler_passed"] is True
+    assert run_document["cleanup_passed"] is False
+    assert run_document["passed"] is False
+
+
+def test_cleanup_leftovers_block_the_run(tmp_path, monkeypatch):
+    """Session-scoped leftovers invalidate the cleanup verdict."""
+    plan_path = write_operation_plan(tmp_path, wait_only_plan_document())
+    leftovers = session_cleanup_document(True)
+    leftovers["leftovers"] = {
+        "session_containers": ["rocobrick-runtime-session-fake"],
+        "session_processes": [],
+    }
+    calls: list = []
+    install_fake_multi_robot_session(
+        monkeypatch,
+        calls,
+        scene_reader=advancing_scene_reader(),
+        cleanup_document=leftovers,
+    )
+    code, line = run_with_operation_plan(tmp_path, plan_path=plan_path)
+    assert code == 10
+    assert line["status"] == "EXECUTION_FAILED"
+    _evidence_dir, run_document, _events = read_plan_run(line)
+    assert run_document["scheduler_passed"] is True
+    assert run_document["cleanup_passed"] is False
+
+
+def test_session_stop_error_is_audited_and_fails_the_run(tmp_path, monkeypatch):
+    plan_path = write_operation_plan(tmp_path, wait_only_plan_document())
+    calls: list = []
+    install_fake_multi_robot_session(
+        monkeypatch,
+        calls,
+        scene_reader=advancing_scene_reader(),
+        stop_error=RuntimeError("synthetic stop failure"),
+    )
+    code, line = run_with_operation_plan(tmp_path, plan_path=plan_path)
+    assert code == 10
+    assert line["status"] == "EXECUTION_FAILED"
+    assert line["passed"] is False
+    evidence_dir, preflight_path, _events = read_evidence(line)
+    run_document = json.loads(
+        (evidence_dir / "robot-operation-plan-run.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert run_document["scheduler_passed"] is True
+    assert run_document["cleanup_passed"] is False
+    assert run_document["cleanup"]["cleanup_passed"] is False
+    assert "synthetic stop failure" in run_document["cleanup"]["cleanup_error"]
     preflight = json.loads(preflight_path.read_text(encoding="utf-8"))
-    assert preflight["operation"] is None
-    assert preflight["runtime"] is None
+    assert "cleanup did not pass" in preflight["reason"]
+
+
+class RaisingExecutor:
+    """Executor stand-in whose every dispatch raises (strict-mode check)."""
+
+    def __init__(self, robot_ids, observation_transport):
+        """Store the validated robots and the injected transport."""
+        self.robot_ids = tuple(robot_ids)
+        self.transport = observation_transport
+
+    async def execute(self, operation):
+        """Fail every dispatched operation with an exception."""
+        raise RuntimeError("synthetic executor failure")
+
+    async def cancel(self, operation_id):
+        """Acknowledge a cancel as terminal and safe (no motion exists)."""
+        return CancelEvidence(
+            operation_id=operation_id,
+            acknowledged=True,
+            terminal=True,
+            safe=True,
+            evidence={"mode": "no_motion"},
+        )
+
+
+def test_executor_error_reports_execution_failed_with_cleanup(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(
+        executor_module, "SkillOperationExecutor", RaisingExecutor
+    )
+    calls: list = []
+    install_fake_multi_robot_session(monkeypatch, calls)
+    code, line = run_with_operation_plan(tmp_path)
+    assert code == 10
+    assert line["status"] == "EXECUTION_FAILED"
+    assert line["passed"] is False
+    assert calls[0] == ("start",)
+    assert calls[-1] == ("stop",)
+    evidence_dir, preflight_path, _events = read_evidence(line)
+    preflight = json.loads(preflight_path.read_text(encoding="utf-8"))
+    assert "synthetic executor failure" in preflight["reason"]
+    assert preflight["runtime"]["cleanup"]["passed"] is True
     assert preflight["checks"]["no_motion_dispatched"] is True
-    assert preflight["checks"]["operation_dispatched"] is False
+    run_document = json.loads(
+        (evidence_dir / "robot-operation-plan-run.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert run_document["scheduler_ran"] is True
+    assert run_document["scheduler_passed"] is False
+    assert run_document["passed"] is False
+    assert run_document["motion_sent"] is False
+    assert run_document["operations"][
+        "example1-piper0-transit-to-pick"
+    ]["reason"].startswith("executor raised RuntimeError")
+
+
+def test_strict_results_reject_a_legacy_executor(tmp_path, monkeypatch):
+    """The runner must run with allow_legacy_results=False."""
+
+    class LegacyExecutor:
+        def __init__(self, robot_ids, observation_transport):
+            """Store the validated robots (transport is unused)."""
+            self.robot_ids = tuple(robot_ids)
+
+        async def execute(self, operation):
+            """Return a non-contract (legacy) result that strict mode rejects."""
+            return {"passed": True, "operation_id": operation.operation_id}
+
+        async def cancel(self, operation_id):
+            """Return a non-contract (legacy) cancel acknowledgement."""
+            return {"passed": True}
+
+    monkeypatch.setattr(
+        executor_module, "SkillOperationExecutor", LegacyExecutor
+    )
+    calls: list = []
+    install_fake_multi_robot_session(monkeypatch, calls)
+    code, line = run_with_operation_plan(tmp_path)
+    assert code == 10
+    assert line["status"] == "EXECUTION_FAILED"
+    evidence_dir, _preflight_path, _events = read_evidence(line)
+    run_document = json.loads(
+        (evidence_dir / "robot-operation-plan-run.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert any(
+        item.get("legacy") for item in run_document["operations"].values()
+    ) is False
+    assert run_document["passed"] is False
+    transit = run_document["operations"]["example1-piper0-transit-to-pick"]
+    assert "non-contract executor result rejected" in transit["reason"]
+    assert transit["motion_sent"] is not True
+
+
+def test_production_factory_builds_the_real_a6_session(tmp_path):
+    """The production injection seam constructs the final A6 session.
+
+    Only construction is exercised: no process, container, DDS profile or
+    motion is ever started here.
+    """
+    from rocobrick.multi_robot_runtime import (  # noqa: PLC0415
+        MultiRobotIsaacMoveItSession,
+    )
+
+    args = piper_run._Arguments(
+        task_dir=TASK_DIR,
+        plan_path=PLAN,
+        backend="isaac",
+        robot_id=ROBOT,
+        run_dir=None,
+        preflight_only=False,
+        robot_operation_plan_path=OPERATION_PLAN,
+        scene_manifest=tmp_path / "scene-manifest.json",
+        scene_snapshot_out=tmp_path / "scene-snapshot.json",
+        host_instance_id="host-example1",
+        config_path=tmp_path / "user-config.json",
+    )
+    session = piper_run._create_session(
+        tmp_path / "session", args, PLAN_ROBOTS
+    )
+    assert isinstance(session, MultiRobotIsaacMoveItSession)
+    assert session.config.repo_root == piper_run.REPO_ROOT
+    assert session.config.robot_ids == PLAN_ROBOTS
+    assert session.config.scene_manifest == args.scene_manifest
+    assert session.config.scene_snapshot_out == args.scene_snapshot_out
+    assert session.config.host_instance_id == "host-example1"
+    assert session.config.plan_path == PLAN
+    assert session.config.config_path == args.config_path
+    assert session.session_dir == tmp_path / "session"
+    assert session.status.value == "NOT_STARTED"
+
+
+def test_a6_evidence_serialization_satisfies_the_exact_checks():
+    """The finalized A6 evidence classes pass the exact A8 checks."""
+    from rocobrick.multi_robot_runtime import (  # noqa: PLC0415
+        MultiRobotReadinessEvidence,
+        MultiRobotSessionEvidence,
+        RuntimeSessionStatus,
+    )
+
+    ready = MultiRobotReadinessEvidence(
+        robots=PLAN_ROBOTS,
+        readiness_by_robot={
+            "piper_0": {"robot_id": "piper_0", "passed": True},
+            "piper_1": {"robot_id": "piper_1", "passed": True},
+        },
+        all_ready=True,
+    )
+    document = piper_run._evidence_document(ready, "readiness")
+    assert document["passed"] is True
+    assert "not_ready_robots" in document
+    assert piper_run._readiness_rejection(document, PLAN_ROBOTS) is None
+
+    unready = MultiRobotReadinessEvidence(
+        robots=PLAN_ROBOTS,
+        readiness_by_robot={
+            "piper_0": {"robot_id": "piper_0", "passed": True},
+            "piper_1": {"robot_id": "piper_1", "passed": False},
+        },
+        all_ready=False,
+    )
+    document = piper_run._evidence_document(unready, "readiness")
+    assert document["passed"] is False
+    assert piper_run._readiness_rejection(document, PLAN_ROBOTS) is not None
+
+    duplicate = MultiRobotReadinessEvidence(
+        robots=("piper_0", "piper_0", "piper_1"),
+        readiness_by_robot={
+            "piper_0": {"robot_id": "piper_0", "passed": True},
+            "piper_1": {"robot_id": "piper_1", "passed": True},
+        },
+        all_ready=True,
+    )
+    document = piper_run._evidence_document(duplicate, "readiness")
+    assert piper_run._readiness_rejection(document, PLAN_ROBOTS) is not None
+
+    evidence = MultiRobotSessionEvidence(
+        status=RuntimeSessionStatus.STOPPED,
+        robots=PLAN_ROBOTS,
+        readiness=ready,
+        host_pid=4242,
+        container_name="rocobrick-runtime-session-fake",
+        cleanup={
+            "scope": {"container": "rocobrick-runtime-session-fake"},
+            "passed": True,
+            "container_removed": True,
+            "host_stopped": True,
+            "host_evidence_orderly": True,
+            "leftovers": {"session_containers": [], "session_processes": []},
+        },
+    )
+    document = piper_run._evidence_document(evidence, "cleanup")
+    assert document["status"] == "STOPPED"
+    assert document["cleanup"]["passed"] is True
+    assert piper_run._cleanup_passed(document) is True
+
+    assert piper_run._cleanup_passed({"cleanup": {"passed": True}}) is False
+    partial_cleanup = {
+        "cleanup": {"passed": True, "container_removed": True}
+    }
+    assert piper_run._cleanup_passed(partial_cleanup) is False
+    leftover = piper_run._evidence_document(evidence, "cleanup")
+    leftover["cleanup"]["leftovers"]["session_processes"] = [1234]
+    assert piper_run._cleanup_passed(leftover) is False

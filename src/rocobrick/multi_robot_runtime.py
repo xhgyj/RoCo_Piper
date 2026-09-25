@@ -1,14 +1,65 @@
+"""Multi-robot runtime entry point (A6).
+
+This module is the import seam the plan entry point (``piper_run``) and the
+skill/observation seam (``robot_operation_executor``) use to reach the ONE
+real multi-robot live session: :class:`MultiRobotIsaacMoveItSession` in
+:mod:`rocobrick.runtime_session` (ONE Isaac host bridge plus ONE ROS/MoveIt
+container running the A3 dual launch for every plan robot, with the A5
+multi-robot session envelope for readiness and robot-scoped read-only
+observations). They are re-exported here so no caller needs to know where the
+session lives.
+
+:class:`DryRunMultiRobotSession` is HISTORICAL: it is a no-motion in-memory
+helper kept only for its own legacy unit test. No production module may
+import it (``tests/test_multi_robot_live_session.py`` pins that) and it must
+never be used as the real session or as acceptance evidence.
+"""
+
 from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
-from typing import Any
 
 from rocobrick.robot_operation_plan import RobotOperation
+from rocobrick.runtime_session import (
+    MultiRobotIsaacMoveItSession,
+    MultiRobotObservationEvidence,
+    MultiRobotReadinessEvidence,
+    MultiRobotSessionConfig,
+    MultiRobotSessionError,
+    MultiRobotSessionEvidence,
+    ProcessHandle,
+    ProcessRunner,
+    RunOutcome,
+    RuntimeSessionError,
+    RuntimeSessionStatus,
+    SubprocessRunner,
+    build_global_scene_document,
+)
+
+__all__ = [
+    "DryRunMultiRobotSession",
+    "DryRunReadinessEvidence",
+    "MultiRobotIsaacMoveItSession",
+    "MultiRobotObservationEvidence",
+    "MultiRobotReadinessEvidence",
+    "MultiRobotSessionConfig",
+    "MultiRobotSessionError",
+    "MultiRobotSessionEvidence",
+    "ProcessHandle",
+    "ProcessRunner",
+    "RunOutcome",
+    "RuntimeSessionError",
+    "RuntimeSessionStatus",
+    "SubprocessRunner",
+    "build_global_scene_document",
+]
 
 
 @dataclass(frozen=True)
 class DryRunReadinessEvidence:
+    """HISTORICAL (test-only) readiness evidence of the dry-run helper."""
+
     robot_ids: tuple[str, ...]
     passed: bool
     mode: str = "dry_run"
@@ -22,7 +73,12 @@ class DryRunReadinessEvidence:
 
 
 class DryRunMultiRobotSession:
-    """No-motion session used to exercise the production scheduler seam."""
+    """HISTORICAL no-motion helper used only to exercise the scheduler seam.
+
+    It is not the real session, it starts nothing, observes nothing and is not
+    allowed anywhere in the production path (see the module docstring); the
+    real session is :class:`MultiRobotIsaacMoveItSession`.
+    """
 
     def __init__(self, robot_ids: tuple[str, ...]) -> None:
         if not robot_ids or len(robot_ids) != len(set(robot_ids)):

@@ -16,48 +16,63 @@ contract libraries and a future execution backend. Every invocation:
    serialized status and ``tcp_execution_allowed`` to be consistent, and —
    because every PLACE_DOWN binding requires a tool point —
    ``require_resolved_tcp`` (TCP_GATE).
-5. Without ``--operation``, never dispatches: the default path is still the
-   preflight bridge. A run whose gates all pass reports
+5. Without ``--robot-operation-plan``, never dispatches: the default path is
+   still the preflight bridge. A run whose gates all pass reports
    ``EXECUTION_NOT_IMPLEMENTED`` and exits nonzero; only ``--preflight-only``
    on a plan whose gates all pass reports ``PREFLIGHT_ONLY`` with exit code
    0. No ROS, Isaac, Docker, GPU, MoveIt action, or motion is ever started
    or sent.
-6. With the INTERNAL/advanced ``--operation REQUEST_JSON`` bridge, the same
-   immutable gates run FIRST; only then is the formal R4.2 runtime
-   session (:class:`rocobrick.runtime_session.IsaacMoveItSession`) started,
-   the operation (JOINT_TARGET, LINK6_POSE, TCP_POSE, GRIPPER_TARGET,
-   APPLY_PLANNING_SCENE or SCENE_QUERY, strictly admitted) is
-   executed against the live stack, and the session is stopped with cleanup
-   evidence. Terminal statuses: ``RUNTIME_START_FAILED`` (8),
-   ``OPERATION_REJECTED`` (9), ``EXECUTION_FAILED`` (10), ``EXECUTED`` (0,
-   only when the operation passed AND the cleanup passed). This path never
-   infers an example1 STAP metric target, and the runtime lifecycle evidence
-   plus the operation result are linked from the run result document.
-7. With the INTERNAL/advanced ``--skill-request REQUEST_JSON`` bridge the
-   same gates and the same TCP authorization run FIRST; only then is one
-   READY runtime session driven through the generic skill programs
-   (TRANSIT / WAIT / PICK steps) by
-   :class:`rocobrick.session_phase_backend.SessionPhaseBackend` over
-   :func:`rocobrick.skill_execution.execute_skill`. The scene snapshot
-   artifact written by the session at start is turned into the frozen
-   planning-scene update, every skill step's phase operations land as
-   request/result documents in the run directory, and the session is
-   stopped with cleanup evidence. Terminal statuses mirror the operation
-   bridge: ``INVALID_INPUT`` (2) for a malformed request, ``UNRESOLVED_TCP``
-   (4), ``RUNTIME_START_FAILED`` (8), ``OPERATION_REJECTED`` (9) when a
-   phase operation was rejected before motion, ``EXECUTION_FAILED`` (10),
-   and ``EXECUTED`` (0, only when every step ended without a FAILED phase
-   AND the cleanup passed).
+6. ``--robot-operation-plan PLAN_JSON`` is the only production dispatch
+   entry: the external ``robot-operation-plan/v1`` bytes are copied
+   verbatim into ``robot-operation-plan.json`` inside the run directory and
+   validated against the authoritative STAP plan (cross-binding: plan id,
+   robot set, task allocation, parts, connections, layers, schedule and
+   resources). Every gate — including the strict
+   :func:`rocobrick.tcp_capability.authorize_tcp` decision — runs BEFORE any
+   runtime is created. Only then is the real multi-robot session
+   (:class:`rocobrick.multi_robot_runtime.MultiRobotIsaacMoveItSession`,
+   one host and one container for all validated plan robots) created and
+   started; it needs the explicit scene group (``--scene-manifest``,
+   ``--scene-snapshot-out``, ``--host-instance-id`` and ``--config``) and
+   never falls back to a fake transport. ``start()`` must prove readiness
+   for every plan robot; otherwise no operation is ever scheduled.
+7. With a READY session the plan runs through
+   :class:`rocobrick.robot_operation_runner.OperationPlanRunner` in strict
+   mode (``allow_legacy_results=False``) over
+   :class:`rocobrick.robot_operation_executor.SkillOperationExecutor`, which
+   observes the real scene through the session's read-only ``observe``
+   transport. In this phase only a genuinely observed WAIT can be
+   confirmed; PICK, TRANSIT and PLACE_DOWN fail closed with
+   ``CAPABILITY_UNAVAILABLE`` and ``motion_sent=False``. The session is
+   stopped with cleanup evidence in a ``finally`` block on every path, and
+   ``robot-operation-plan-run.json`` (schema
+   ``rocobrick-operation-plan-run/v1``) records readiness, per-robot
+   isolated operations, layers, cancellations, resources, cleanup, the
+   immutable input digests and the aggregate ``passed`` verdict. A final
+   semantic check additionally requires every pending STAP task's assembly
+   effect to be evidenced by one CONFIRMED ``PLACE_DOWN`` operation for that
+   exact task/part/robot carrying the required connection, release and
+   retreat labels; binding the external plan to the STAP plan is never
+   assembly evidence, so a run that only confirms an observation (for
+   example a WAIT) stays ``EXECUTION_FAILED`` while any task is unassembled.
+   Terminal statuses: ``INVALID_INPUT`` (2) for a malformed or unbindable
+   external plan, ``UNRESOLVED_TCP`` (4) when the TCP authorization denies,
+   ``RUNTIME_START_FAILED`` (8) when the session or any robot readiness
+   fails (zero operations scheduled), ``EXECUTION_FAILED`` (10) when the
+   scheduler, the assembly-effect check or cleanup does not pass, and
+   ``EXECUTED`` (0) only when every gate, every robot readiness, every
+   operation, every pending assembly effect and the cleanup passed and the
+   input digests are unchanged.
 8. Re-hashes the original input files from disk after all phases — including
-   after the runtime — and fails with ``INPUT_MUTATED`` if any digest changed
-   (IMMUTABILITY).
+   the external operation plan and after the runtime — and fails with
+   ``INPUT_MUTATED`` if any digest changed (IMMUTABILITY).
 
 The program is offline and pure apart from its evidence directory and the
-explicit ``--operation`` / ``--skill-request`` runtime bridges: without one
-of them it imports no runtime adapter module, and it writes evidence (input
-copies, phase events, ``preflight.json``, and ``result.json``) only inside
-its own run directory. Exactly one final JSON line is printed to stdout;
-diagnostics go to stderr.
+explicit ``--robot-operation-plan`` runtime bridge: without it, it imports
+no runtime adapter module, and it writes evidence (input copies, phase
+events, ``preflight.json``, and ``result.json``) only inside its own run
+directory. Exactly one final JSON line is printed to stdout; diagnostics go
+to stderr.
 """
 
 from __future__ import annotations
@@ -65,20 +80,24 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import math
 import re
 import sys
 from collections.abc import Mapping
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, is_dataclass
 from datetime import UTC, datetime
+from enum import Enum
 from hashlib import sha256
 from pathlib import Path
 from traceback import format_exc
-from typing import TYPE_CHECKING
 from uuid import uuid4
 
 from rocobrick.compat import StrEnum
 from rocobrick.evidence import EvidenceRecorder, FinalResult
-from rocobrick.tcp_capability import authorize_tcp
+from rocobrick.robot_operation_plan import (
+    RobotOperationPlanError,
+    parse_robot_operation_plan,
+)
 from rocobrick.stap_contract import (
     STAP_PLAN_SCHEMA,
     StapContractError,
@@ -89,6 +108,7 @@ from rocobrick.structural_binding import (
     bind_single_stap_task,
     binding_requires_tcp,
 )
+from rocobrick.tcp_capability import authorize_tcp
 from rocobrick.tcp_contract import (
     TcpContract,
     TcpStatus,
@@ -96,21 +116,21 @@ from rocobrick.tcp_contract import (
     assess_piper_l_tcp,
     require_resolved_tcp,
 )
-from rocobrick.models import SkillType
-from rocobrick.robot_operation_plan import (
-    RobotOperationPlanError,
-    parse_robot_operation_plan,
-)
 
 RESULT_SCHEMA = "rocobrick-piper-run-result/v1"
 PREFLIGHT_SCHEMA = "rocobrick-piper-run-preflight/v1"
 TCP_ARTIFACT_SCHEMA = "rocobrick-piper-l-tcp-binding-contract/v1"
-SKILL_REQUEST_SCHEMA = "rocobrick-skill-request/v1"
-SKILL_REQUEST_TOP_KEYS = frozenset({"schema", "robot_id", "skill_params_path", "steps"})
-SKILL_STEP_KEYS = frozenset({"skill", "physical_instance_id"})
-SKILL_STEP_NAMES = frozenset({"TRANSIT", "WAIT", "PICK"})
-SKILL_OPERATION_TIMEOUT_S = 180.0
-MANIFEST_SCHEMA = "rocobrick-scene-snapshot-manifest/v1"
+PLAN_CAPTURE_NAME = "robot-operation-plan.json"
+PLAN_RUN_NAME = "robot-operation-plan-run.json"
+OPERATION_TIMEOUT_S = 60.0
+CANCEL_TIMEOUT_S = 5.0
+ASSEMBLY_EFFECT_SCHEMA = "rocobrick-piper-run-stap-assembly-effects/v1"
+PENDING_TASK_SKILL = "PLACE_DOWN"
+ASSEMBLY_EVIDENCE_LABELS = (
+    "connection_confirmed",
+    "release_confirmed",
+    "retreat_confirmed",
+)
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -215,8 +235,6 @@ class _Arguments:
     robot_id: str
     run_dir: Path | None
     preflight_only: bool
-    operation_path: Path | None = None
-    skill_request_path: Path | None = None
     robot_operation_plan_path: Path | None = None
     scene_manifest: Path | None = None
     scene_snapshot_out: Path | None = None
@@ -319,41 +337,17 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--host-instance-id", default=None)
     parser.add_argument("--config", type=Path, default=None, metavar="USER_CONFIG_JSON")
     parser.add_argument(
-        "--operation",
-        default=None,
-        type=Path,
-        metavar="REQUEST_JSON",
-        help=(
-            "INTERNAL/advanced bridge: a strict RuntimeOperation request "
-            "(JOINT_TARGET, LINK6_POSE, TCP_POSE, GRIPPER_TARGET, "
-            "APPLY_PLANNING_SCENE or SCENE_QUERY) executed against the live "
-            "Isaac/MoveIt runtime session after every gate passes; cannot be "
-            "combined with --preflight-only"
-        ),
-    )
-    parser.add_argument(
-        "--skill-request",
-        default=None,
-        type=Path,
-        dest="skill_request",
-        metavar="REQUEST_JSON",
-        help=(
-            "INTERNAL/advanced bridge: a strict rocobrick-skill-request/v1 "
-            "document (TRANSIT / WAIT / PICK steps) executed against the "
-            "live Isaac/MoveIt runtime session after every gate and the TCP "
-            "authorization pass; requires the full scene option group; "
-            "cannot be combined with --operation or --preflight-only"
-        ),
-    )
-    parser.add_argument(
         "--robot-operation-plan",
         default=None,
         type=Path,
         dest="robot_operation_plan",
         metavar="PLAN_JSON",
         help=(
-            "external robot-operation-plan/v1 document; it is validated "
-            "against the read-only assembly-plan/v2 binding"
+            "the ONLY production dispatch entry: an external "
+            "robot-operation-plan/v1 document, validated against the "
+            "read-only assembly-plan/v2 binding and then executed through "
+            "the real multi-robot session; requires the full scene option "
+            "group and cannot be combined with --preflight-only"
         ),
     )
     return parser
@@ -614,42 +608,46 @@ def _rederive_tcp(tcp_record: dict[str, object]) -> TcpContract:
 
 def _create_session(
     session_dir: Path,
-    args: "_Arguments" | None = None,
-    *,
-    collision_filter_robot_id: str | None = None,
-    collision_filter_instance_ids: tuple[str, ...] = (),
+    args: "_Arguments",
+    robot_ids: tuple[str, ...],
 ):
-    """Create the R4.2 runtime session (injection seam for offline tests).
+    """Create the real multi-robot session (injection seam for offline tests).
 
-    The production construction is deliberately trivial: the real Isaac/
-    MoveIt session with the subprocess runner. Tests monkeypatch this hook
-    with a fake session so the full preflight-before-session ordering stays
-    verifiable offline.
+    The production construction is deliberately trivial and lazy: the real
+    :class:`rocobrick.multi_robot_runtime.MultiRobotIsaacMoveItSession` is
+    imported only here, after every gate and the TCP authorization have
+    passed, with the validated plan robots and the explicit scene option
+    group of the invocation. There is no fake fallback: a missing scene group
+    is rejected as a usage error before any run directory exists, and a
+    construction failure is reported as a runtime start failure.
 
     Args:
         session_dir: Directory (inside the run evidence directory) that the
-            session owns for its lifecycle evidence and operation documents.
+            session owns for its lifecycle evidence.
+        args: Parsed command-line arguments carrying the scene group.
+        robot_ids: Validated ``robots`` of the parsed operation plan; every
+            one of them is started and must become ready.
 
     Returns:
-        A session exposing ``start()``, ``run_operation()`` and ``stop()``.
+        A session exposing ``start()``, ``async observe(robot_id)`` and
+        ``stop()``.
     """
-    from rocobrick.runtime_session import (
-        IsaacMoveItSession,
-        RuntimeSessionConfig,
+    from rocobrick.multi_robot_runtime import (
+        MultiRobotIsaacMoveItSession,
+        MultiRobotSessionConfig,
         SubprocessRunner,
     )
 
-    config = RuntimeSessionConfig(
+    config = MultiRobotSessionConfig(
         repo_root=REPO_ROOT,
-        scene_manifest=args.scene_manifest if args is not None else None,
-        scene_snapshot_out=args.scene_snapshot_out if args is not None else None,
-        host_instance_id=args.host_instance_id if args is not None else None,
-        plan_path=args.plan_path if args is not None else None,
-        config_path=args.config_path if args is not None else None,
-        collision_filter_robot_id=collision_filter_robot_id,
-        collision_filter_instance_ids=collision_filter_instance_ids,
+        robot_ids=robot_ids,
+        scene_manifest=args.scene_manifest,
+        scene_snapshot_out=args.scene_snapshot_out,
+        host_instance_id=args.host_instance_id,
+        plan_path=args.plan_path,
+        config_path=args.config_path,
     )
-    return IsaacMoveItSession(
+    return MultiRobotIsaacMoveItSession(
         config, runner=SubprocessRunner(), session_dir=session_dir
     )
 
@@ -662,12 +660,12 @@ def _authorize_tcp_dispatch(
 ) -> tuple[str | None, str | None] | tuple[RunStatus, str]:
     """Authorize calibrated-TCP dispatch from the verified binding record.
 
-    Shared by the ``--operation`` and ``--skill-request`` bridges: extracts
-    the runtime USD and calibration SHA-256 provenance from the verified
-    binding artifact record, runs ``authorize_tcp`` fail-closed, and records
-    the full decision into ``record["tcp"]["authorization"]`` plus one
-    ``tcp_authorization`` evidence event. Nothing is sent here and no session
-    is created; a denial happens strictly before any runtime exists.
+    Used by the ``--robot-operation-plan`` dispatch: extracts the runtime USD
+    and calibration SHA-256 provenance from the verified binding artifact
+    record, runs ``authorize_tcp`` fail-closed, and records the full decision
+    into ``record["tcp"]["authorization"]`` plus one ``tcp_authorization``
+    evidence event. Nothing is sent here and no session is created; a denial
+    happens strictly before any runtime exists.
 
     Args:
         args: Parsed command-line arguments.
@@ -836,853 +834,822 @@ def _authorize_tcp_dispatch(
     return runtime_sha, calibration_sha
 
 
-def _runtime_operation_phase(
-    args: "_Arguments",
-    record: dict[str, object],
-    recorder: EvidenceRecorder,
-    contract: TcpContract | None = None,
-) -> tuple[RunStatus, str] | None:
-    """Start the runtime session, execute the operation, and stop cleanly.
+def _json_value(value: object) -> object:
+    """Copy one evidence value into strict-JSON-compatible structures.
 
-    Every immutable gate has already passed when this runs. The operation
-    document is validated strictly and strictly admitted BEFORE any session
-    exists (a rejection therefore starts zero processes). Runtime lifecycle
-    and operation evidence are appended as ``runtime_start`` / ``operation`` /
-    ``runtime_stop`` events and linked from the record.
+    Dataclasses (readiness and session evidence), enums, paths, mappings and
+    sequences are converted; nothing is judged or repaired here.
 
     Args:
-        args: Parsed command-line arguments with the operation path.
-        record: The mutable preflight record, updated in place.
-        recorder: The run evidence recorder.
+        value: Any value carried by readiness, cleanup or scheduler evidence.
 
     Returns:
-        ``None`` when the operation passed and the cleanup passed (the caller
-        reports ``EXECUTED``), otherwise the terminal status and reason.
-    """
-    from rocobrick.isaac_backend import (
-        OPERATION_SCHEMA,
-        OperationContractError,
-        OperationKind,
-        RuntimeOperation,
-        planning_scene_update_from_payload,
-        scene_query_from_payload,
-        target_for_operation,
-    )
-    from rocobrick.runtime_session import RuntimeSessionError
+        A ``dict``/``list``/scalar copy accepted by ``json.dumps``.
 
-    operation_record: dict[str, object] = {
-        "source": str(args.operation_path),
-        "schema": None,
-        "kind": None,
-        "request_id": None,
-        "sha256": None,
-        "timeout_s": None,
-        "passed": False,
-        "result": None,
-        "result_path": None,
-    }
-    record["operation"] = operation_record
-    try:
-        raw = args.operation_path.read_bytes()
-        document = json.loads(raw.decode("utf-8"))
-        operation = RuntimeOperation.parse(document)
-    except (OSError, ValueError) as error:
-        return (
-            RunStatus.INVALID_INPUT,
-            f"the operation document is not a valid RuntimeOperation: {error}",
-        )
-    operation_record.update(
-        {
-            "schema": OPERATION_SCHEMA,
-            "kind": str(operation.kind.value),
-            "request_id": operation.request_id,
-            "sha256": sha256(raw).hexdigest(),
-            "timeout_s": operation.timeout_s,
+    Raises:
+        TypeError: If the value cannot be represented as strict JSON.
+    """
+    if isinstance(value, StrEnum):
+        return str(value)
+    if isinstance(value, Enum):
+        return value.value
+    if is_dataclass(value) and not isinstance(value, type):
+        return {
+            str(key): _json_value(item)
+            for key, item in asdict(value).items()
         }
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, Mapping):
+        return {str(key): _json_value(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple, set, frozenset)):
+        return [_json_value(item) for item in value]
+    if value is None or isinstance(value, (bool, int, str)):
+        return value
+    if isinstance(value, float) and math.isfinite(value):
+        return value
+    raise TypeError(
+        f"evidence value of type {type(value).__name__} is not JSON-safe"
     )
-    dispatchable = {
-        OperationKind.JOINT_TARGET,
-        OperationKind.LINK6_POSE,
-        OperationKind.TCP_POSE,
-        OperationKind.GRIPPER_TARGET,
-        OperationKind.APPLY_PLANNING_SCENE,
-        OperationKind.SCENE_QUERY,
-    }
-    if operation.kind not in dispatchable:
-        return (
-            RunStatus.OPERATION_REJECTED,
-            f"operation kind {operation.kind} is not dispatchable; only "
-            "JOINT_TARGET, LINK6_POSE, TCP_POSE, GRIPPER_TARGET, "
-            "APPLY_PLANNING_SCENE and SCENE_QUERY are allowed",
-        )
-    try:
-        if operation.kind is OperationKind.APPLY_PLANNING_SCENE:
-            planning_scene_update_from_payload(operation.payload)
-        elif operation.kind is OperationKind.SCENE_QUERY:
-            scene_query_from_payload(operation.payload)
-        else:
-            target_for_operation(operation)
-    except OperationContractError as error:
-        return (
-            RunStatus.OPERATION_REJECTED,
-            f"operation target rejected before dispatch: {error}",
-        )
-    operation_record["target_admitted"] = True
-    recorder.write_json("operation-request.json", operation.serialize())
-    recorder.append_event({
-        "phase": "operation_admission",
-        "status": "ACCEPTED",
-        "kind": str(operation.kind.value),
-        "request_id": operation.request_id,
-        "timeout_s": operation.timeout_s,
-    })
-
-    authorized = _authorize_tcp_dispatch(args, record, recorder, contract)
-    tcp_record_for_link = record.get("tcp")
-    operation_record["tcp_authorization"] = (
-        tcp_record_for_link.get("authorization")
-        if isinstance(tcp_record_for_link, dict)
-        else None
-    )
-    if isinstance(authorized[0], RunStatus):
-        return authorized
-    runtime_sha, calibration_sha = authorized
-
-    session = None
-    readiness = None
-    result_map: Mapping[str, object] | None = None
-    runtime_terminal: tuple[RunStatus, str] | None = None
-    try:
-        try:
-            # Preserve the historical one-argument seam for callers/tests that
-            # provide a session factory, while forwarding scene options to the
-            # real factory when the CLI actually requested them.
-            if args.scene_manifest is None:
-                session = _create_session(recorder.directory / "runtime-session")
-            else:
-                session = _create_session(
-                    recorder.directory / "runtime-session",
-                    args,
-                )
-            recorder.append_event({
-                "phase": "runtime_start",
-                "status": "STARTING",
-                "session_dir": str(session.session_dir),
-            })
-            readiness = session.start()
-            recorder.append_event({
-                "phase": "runtime_start",
-                "status": "READY",
-                "passed": readiness.passed,
-                "readiness": asdict(readiness),
-                "session_evidence_path": str(
-                    session.session_dir / "runtime-session.json"
-                ),
-            })
-        except RuntimeSessionError as error:
-            recorder.append_event({
-                "phase": "runtime_start",
-                "status": "FAILED",
-                "reason": str(error),
-                "session_dir": (
-                    str(session.session_dir) if session is not None else None
-                ),
-            })
-            runtime_terminal = (
-                RunStatus.RUNTIME_START_FAILED,
-                f"the runtime session failed to start: {error}",
-            )
-        if runtime_terminal is None:
-            result_path = session.session_dir / "operation-result.json"
-            try:
-                result_map = session.run_operation(
-                    recorder.directory / "operation-request.json", result_path
-                )
-                operation_record["passed"] = result_map.get("passed") is True
-                operation_record["result"] = dict(result_map)
-                operation_record["result_path"] = str(result_path)
-                execution = result_map.get("execution")
-                recorder.append_event({
-                    "phase": "operation",
-                    "status": (
-                        str(execution.get("status"))
-                        if isinstance(execution, Mapping)
-                        else "UNKNOWN"
-                    ),
-                    "passed": result_map.get("passed") is True,
-                    "request_id": result_map.get("request_id"),
-                    "kind": result_map.get("kind"),
-                    "result_path": str(result_path),
-                })
-            except RuntimeSessionError as error:
-                recorder.append_event({
-                    "phase": "operation",
-                    "status": "FAILED",
-                    "reason": str(error),
-                })
-                runtime_terminal = (
-                    RunStatus.EXECUTION_FAILED,
-                    f"the operation failed at runtime: {error}",
-                )
-    finally:
-        # The stop is unconditional: cleanup evidence is recorded even after
-        # a partial start or an unexpected error.
-        cleanup_passed = False
-        if session is not None:
-            stop_evidence = session.stop()
-            cleanup_passed = bool(stop_evidence.cleanup.get("passed"))
-            record["runtime"] = {
-                **stop_evidence.serializable(),
-                "evidence_path": str(session.session_dir / "runtime-session.json"),
-            }
-            recorder.append_event({
-                "phase": "runtime_stop",
-                "status": str(stop_evidence.status),
-                "cleanup": dict(stop_evidence.cleanup),
-                "errors": list(stop_evidence.errors),
-            })
-    operation_record["cleanup_passed"] = cleanup_passed
-    if runtime_terminal is not None:
-        return runtime_terminal
-    if result_map is None:  # pragma: no cover - defensive
-        return (
-            RunStatus.EXECUTION_FAILED,
-            "no operation result was produced by the runtime session",
-        )
-    execution = result_map.get("execution")
-    if result_map.get("passed") is not True:
-        rejected = (
-            isinstance(execution, Mapping)
-            and execution.get("status") == "REJECTED"
-        )
-        if rejected:
-            return (
-                RunStatus.OPERATION_REJECTED,
-                "the operation was rejected before any motion: "
-                f"{execution.get('reason')}",
-            )
-        return (
-            RunStatus.EXECUTION_FAILED,
-            "the operation did not pass the execution gates: "
-            f"{result_map.get('error')}",
-        )
-    if not cleanup_passed:
-        return (
-            RunStatus.EXECUTION_FAILED,
-            "the operation executed but the session cleanup did not pass; "
-            "the run is not verified",
-        )
-    return None
 
 
-@dataclass(frozen=True)
-class _SkillTaskRef:
-    """Minimal TaskRef for one skill step (execute_skill needs id + skill)."""
+def _evidence_document(evidence: object, name: str) -> dict[str, object]:
+    """Normalize one session evidence object into a JSON-safe mapping.
 
-    task_id: str
-    skill: SkillType
+    The evidence object's own serialization wins when it provides one
+    (``serializable()`` or ``serialize()``), so computed verdicts such as
+    ``MultiRobotReadinessEvidence.passed`` survive; plain dataclasses fall
+    back to ``dataclasses.asdict``.
 
-
-def _parse_skill_request(
-    document: object, robot_id: str
-) -> list[tuple[SkillType, str | None]]:
-    """Parse a strict ``rocobrick-skill-request/v1`` document.
-
-    The top-level object must carry exactly ``schema``, ``robot_id``,
-    ``skill_params_path`` and ``steps``; ``robot_id`` must equal the
-    selected ``--robot-id``; ``skill_params_path`` must be a non-empty
-    string (resolved relative to the repository root by the caller); and
-    ``steps`` must be a non-empty list of objects carrying exactly ``skill``
-    (one of TRANSIT / WAIT / PICK) and ``physical_instance_id`` (required
-    and non-empty for TRANSIT/PICK, exactly ``None`` for WAIT).
-
-    Raises:
-        ValueError: On any deviation from the exact schema.
-    """
-    from rocobrick.models import SkillType
-
-    if not isinstance(document, Mapping):
-        raise ValueError("the skill request must be a JSON object")
-    actual = frozenset(str(key) for key in document)
-    missing = sorted(SKILL_REQUEST_TOP_KEYS - actual)
-    extra = sorted(actual - SKILL_REQUEST_TOP_KEYS)
-    if missing or extra:
-        raise ValueError(
-            f"the skill request must carry exactly "
-            f"{sorted(SKILL_REQUEST_TOP_KEYS)}; missing={missing} "
-            f"extra={extra}"
-        )
-    if document["schema"] != SKILL_REQUEST_SCHEMA:
-        raise ValueError(
-            f"skill request schema {document['schema']!r} is not "
-            f"{SKILL_REQUEST_SCHEMA!r}"
-        )
-    request_robot_id = document["robot_id"]
-    if not isinstance(request_robot_id, str) or not request_robot_id:
-        raise ValueError("skill request robot_id must be a non-empty string")
-    if request_robot_id != robot_id:
-        raise ValueError(
-            f"skill request robot_id {request_robot_id!r} does not equal the "
-            f"selected robot {robot_id!r}"
-        )
-    params_path = document["skill_params_path"]
-    if not isinstance(params_path, str) or not params_path:
-        raise ValueError(
-            "skill request skill_params_path must be a non-empty string"
-        )
-    steps_document = document["steps"]
-    if not isinstance(steps_document, list) or not steps_document:
-        raise ValueError("skill request steps must be a non-empty list")
-    steps: list[tuple[SkillType, str | None]] = []
-    for index, step in enumerate(steps_document):
-        if not isinstance(step, Mapping):
-            raise ValueError(f"skill request steps[{index}] must be an object")
-        step_keys = frozenset(str(key) for key in step)
-        step_missing = sorted(SKILL_STEP_KEYS - step_keys)
-        step_extra = sorted(step_keys - SKILL_STEP_KEYS)
-        if step_missing or step_extra:
-            raise ValueError(
-                f"skill request steps[{index}] must carry exactly "
-                f"{sorted(SKILL_STEP_KEYS)}; missing={step_missing} "
-                f"extra={step_extra}"
-            )
-        raw_skill = step["skill"]
-        if raw_skill not in SKILL_STEP_NAMES:
-            raise ValueError(
-                f"skill request steps[{index}].skill {raw_skill!r} is not "
-                f"one of {sorted(SKILL_STEP_NAMES)}"
-            )
-        skill = SkillType(str(raw_skill))
-        instance_id = step["physical_instance_id"]
-        if skill is SkillType.WAIT:
-            if instance_id is not None:
-                raise ValueError(
-                    f"skill request steps[{index}].physical_instance_id must "
-                    "be null for the WAIT skill"
-                )
-            steps.append((skill, None))
-            continue
-        if not isinstance(instance_id, str) or not instance_id:
-            raise ValueError(
-                f"skill request steps[{index}].physical_instance_id must be "
-                f"a non-empty string for the {str(skill.value)} skill"
-            )
-        steps.append((skill, instance_id))
-    return steps
-
-
-def _load_skill_scene_manifest(path: Path) -> Mapping[str, object]:
-    """Read the scene-snapshot manifest artifact strictly (read-only).
+    Args:
+        evidence: Mapping, serializing object, or dataclass.
+        name: Evidence name used in error messages.
 
     Returns:
-        The manifest mapping with ``scene_id``, ``frame_id`` and a
-        ``objects`` list of per-object metadata mappings.
+        The normalized evidence mapping.
 
     Raises:
-        ValueError: If the file is unreadable, is not the
-            ``rocobrick-scene-snapshot-manifest/v1`` schema, or carries no
-            usable object metadata.
+        ValueError: If the evidence is not a serializable mapping.
     """
-    try:
-        document = json.loads(path.read_bytes().decode("utf-8"))
-    except (OSError, UnicodeDecodeError, ValueError) as error:
-        raise ValueError(
-            f"the scene manifest {path} is unreadable: {error}"
-        ) from error
-    if not isinstance(document, Mapping):
-        raise ValueError(f"the scene manifest {path} must be a JSON object")
-    if document.get("schema") != MANIFEST_SCHEMA:
-        raise ValueError(
-            f"the scene manifest schema {document.get('schema')!r} is not "
-            f"{MANIFEST_SCHEMA!r}"
-        )
-    for label in ("scene_id", "frame_id"):
-        if not isinstance(document.get(label), str) or not document[label]:
-            raise ValueError(f"the scene manifest {label} must be a string")
-    objects = document.get("objects")
-    if not isinstance(objects, list) or not objects:
-        raise ValueError("the scene manifest objects must be a non-empty list")
-    for index, item in enumerate(objects):
-        if not isinstance(item, Mapping):
-            raise ValueError(
-                f"the scene manifest objects[{index}] must be an object"
-            )
-        for label in ("physical_instance_id", "asset_revision_sha256"):
-            if not isinstance(item.get(label), str) or not item[label]:
-                raise ValueError(
-                    f"the scene manifest objects[{index}].{label} must be a "
-                    "non-empty string"
-                )
-        if isinstance(item.get("brick_id"), bool) or not isinstance(
-            item.get("brick_id"), int
-        ):
-            raise ValueError(
-                f"the scene manifest objects[{index}].brick_id must be an "
-                "integer"
-            )
+    if isinstance(evidence, Mapping):
+        document = _json_value(dict(evidence))
+    elif callable(getattr(evidence, "serializable", None)):
+        document = _json_value(evidence.serializable())
+    elif callable(getattr(evidence, "serialize", None)):
+        document = _json_value(evidence.serialize())
+    elif is_dataclass(evidence) and not isinstance(evidence, type):
+        document = _json_value(evidence)
+    else:
+        raise ValueError(f"the {name} evidence is not a serializable mapping")
+    if not isinstance(document, dict):
+        raise ValueError(f"the {name} evidence is not a mapping")
     return document
 
 
-def _load_scene_snapshot(path: Path):
-    """Rebuild the immutable scene snapshot from its artifact document.
+def _readiness_rejection(
+    document: Mapping[str, object], robots: tuple[str, ...]
+) -> str | None:
+    """Return why readiness evidence cannot authorize the plan, if any.
 
-    The artifact is the exact document the host bridge wrote at session
-    start (canonical payload plus ``snapshot_sha256``); it is rebuilt through
-    the frozen :class:`rocobrick.scene_snapshot.SceneSnapshot` contract, so
-    any tampered field fails its canonical digest here.
+    Fail-closed and exact: ``passed`` and ``all_ready`` must both be ``True``;
+    the reported robot list must equal the validated plan robots exactly
+    (same order, no duplicate, no extra, no missing entry); the
+    ``readiness_by_robot`` mapping must carry exactly the plan robot keys; and
+    every robot's own report must explicitly say ``passed is True``. Nothing
+    is inferred from a missing or duplicated value.
 
-    Raises:
-        ValueError: If the artifact is unreadable or fails any frozen
-            snapshot check.
+    Args:
+        document: Normalized readiness evidence of the session start.
+        robots: Validated ``robots`` of the parsed operation plan.
+
+    Returns:
+        ``None`` only when every robot is proven ready, otherwise the reason.
     """
-    from rocobrick.planning_scene import box_from_aabb
-    from rocobrick.scene_snapshot import (
-        RuntimeHostBinding,
-        SceneObjectSnapshot,
-        SceneSnapshot,
-    )
-
-    try:
-        document = json.loads(path.read_bytes().decode("utf-8"))
-    except (OSError, UnicodeDecodeError, ValueError) as error:
-        raise ValueError(
-            f"the scene snapshot {path} is unreadable: {error}"
-        ) from error
-    if not isinstance(document, Mapping):
-        raise ValueError(f"the scene snapshot {path} must be a JSON object")
-    try:
-        host = RuntimeHostBinding(**dict(document.get("host", {})))
-        objects = tuple(
-            SceneObjectSnapshot(
-                physical_instance_id=item["physical_instance_id"],
-                brick_id=item["brick_id"],
-                prim_path=item["prim_path"],
-                aabb=box_from_aabb(
-                    object_id=item["aabb"]["object_id"],
-                    frame_id=item["aabb"]["frame_id"],
-                    minimum_m=list(item["aabb"]["minimum_m"]),
-                    maximum_m=list(item["aabb"]["maximum_m"]),
-                ),
-                asset_revision_sha256=item["asset_revision_sha256"],
-                provenance=dict(item["provenance"]),
+    if (
+        document.get("passed") is not True
+        or document.get("all_ready") is not True
+    ):
+        return (
+            "the session readiness evidence does not report passed=True and "
+            f"all_ready=True: {dict(document)}"
+        )
+    reported = document.get("robots")
+    if not isinstance(reported, (list, tuple)) or list(reported) != list(
+        robots
+    ):
+        return (
+            f"the readiness evidence robots {reported!r} are not exactly the "
+            f"plan robots {list(robots)}"
+        )
+    by_robot = document.get("readiness_by_robot")
+    if not isinstance(by_robot, Mapping):
+        return "the readiness evidence carries no readiness_by_robot mapping"
+    if set(by_robot) != set(robots):
+        extra = sorted(set(by_robot) - set(robots))
+        missing = sorted(set(robots) - set(by_robot))
+        return (
+            "the readiness evidence readiness_by_robot keys are not exactly "
+            f"the plan robots: missing={missing} extra={extra}"
+        )
+    for robot in robots:
+        entry = by_robot.get(robot)
+        if not isinstance(entry, Mapping):
+            return (
+                f"the readiness evidence carries no report for robot {robot!r}"
             )
-            for item in document.get("objects", [])
-        )
-        return SceneSnapshot(
-            schema=document["schema"],
-            scene_id=document["scene_id"],
-            frame_id=document["frame_id"],
-            host=host,
-            objects=objects,
-            snapshot_sha256=document["snapshot_sha256"],
-        )
-    except (KeyError, TypeError, ValueError) as error:
-        raise ValueError(
-            f"the scene snapshot {path} failed its immutable contract: "
-            f"{error}"
-        ) from error
+        if entry.get("passed") is not True:
+            return f"robot {robot!r} is not ready: {dict(entry)}"
+    return None
 
 
-def _build_planning_scene_document(
-    args: "_Arguments",
-    record: dict[str, object],
-    steps: list[tuple[SkillType, str | None]],
-    runtime_sha: str,
+def _cleanup_passed(document: Mapping[str, object]) -> bool:
+    """Return whether session cleanup evidence proves a clean scoped stop.
+
+    Fail-closed: the session's own cleanup verdict must be ``True`` AND the
+    explicit termination evidence of the resources THIS session owned must
+    prove a verified container removal and a reaped host stop with no
+    session-scoped leftovers. A bare boolean or an empty mapping never counts
+    as termination evidence.
+
+    Args:
+        document: Normalized session stop evidence.
+
+    Returns:
+        True only when every owned-resource termination flag is explicitly
+        proven passing.
+    """
+    cleanup = document.get("cleanup")
+    if not isinstance(cleanup, Mapping):
+        return False
+    if cleanup.get("passed") is not True:
+        return False
+    if cleanup.get("container_removed") is not True:
+        return False
+    if cleanup.get("host_stopped") is not True:
+        return False
+    leftovers = cleanup.get("leftovers")
+    if isinstance(leftovers, Mapping) and (
+        leftovers.get("session_containers")
+        or leftovers.get("session_processes")
+    ):
+        return False
+    return True
+
+
+def _plan_failure_reason(document: Mapping[str, object]) -> str:
+    """Summarize the first non-confirmed operation of a run document.
+
+    Args:
+        document: Serialized ``rocobrick-operation-plan-run/v1`` document.
+
+    Returns:
+        A human-readable summary naming the first operation that did not end
+        confirmed, with its status and recorded reason when available.
+    """
+    operations = document.get("operations")
+    if not isinstance(operations, Mapping) or not operations:
+        return "no operation was confirmed by the scheduler"
+    for operation_id, item in operations.items():
+        if not isinstance(item, Mapping):
+            continue
+        if item.get("status") == "CONFIRMED" and item.get("passed") is True:
+            continue
+        reason = item.get("reason")
+        return (
+            f"operation {operation_id!r} on robot {item.get('robot_id')!r} "
+            f"ended {item.get('status')}: "
+            f"{reason if reason is not None else 'no reason recorded'}"
+        )
+    return "not every operation was confirmed"
+
+
+def _place_down_upper_part(operation: object) -> str | None:
+    """Return the upper part a PLACE_DOWN operation targets, when declared.
+
+    Args:
+        operation: One parsed external ``RobotOperation`` (duck-typed).
+
+    Returns:
+        The non-empty ``upper_physical_instance_id`` of the operation target,
+        or ``None`` when the operation carries no such target value.
+    """
+    target = getattr(operation, "target", None)
+    values = getattr(target, "values", None)
+    if not isinstance(values, Mapping):
+        return None
+    upper = values.get("upper_physical_instance_id")
+    return upper if isinstance(upper, str) and upper else None
+
+
+def _evidence_label_proven(evidence: object, label: str) -> bool:
+    """Return whether one required evidence label carries an explicit proof.
+
+    Mirrors the frozen scheduler predicate: the label must be present in the
+    evidence mapping and its value must be neither ``None`` nor ``False``.
+
+    Args:
+        evidence: The serialized per-operation evidence mapping (or anything
+            else found under the ``evidence`` key).
+        label: Required evidence label name.
+
+    Returns:
+        True only when the label is present with an explicit value.
+    """
+    if not isinstance(evidence, Mapping) or label not in evidence:
+        return False
+    value = evidence[label]
+    return value is not None and value is not False
+
+
+def _pending_assembly_effect_check(
+    stap_plan: object,
+    operation_plan: object,
+    run_document: Mapping[str, object],
 ) -> dict[str, object]:
-    """Bind the scene snapshot objects and derive the planning-scene payload.
+    """Verify every pending STAP task's assembly effect is evidenced.
 
-    Every snapshot object is re-bound through the frozen
-    ``bind_scene_object`` checks (scene/frame/runtime-USD/asset-revision
-    identity, all values taken from the run's own artifacts, never from the
-    snapshot alone) and the allowed boxes are compiled into the exact
-    ``PlanningSceneUpdate`` payload document carried by APPLY_PLANNING_SCENE.
+    This is the final semantic gate of a dispatch run: ``EXECUTED`` requires
+    each pending STAP task to have exactly one ``PLACE_DOWN`` operation in the
+    external plan that executes that task's part on that task's allocated
+    robot, whose serialized scheduler result is ``CONFIRMED``/``passed`` and
+    whose evidence carries every required connection, release and retreat
+    label. A binding of the external plan to the STAP plan, a CONFIRMED
+    observation of another skill, or a missing operation is never assembly
+    effect evidence, and the check is fail-closed on any missing or
+    malformed input.
 
-    Raises:
-        ValueError: When manifest and snapshot disagree, the snapshot was
-            captured for another robot, or any binding check fails.
+    Args:
+        stap_plan: The authoritative validated STAP plan.
+        operation_plan: The parsed external operation plan.
+        run_document: The serialized ``rocobrick-operation-plan-run/v1``
+            document of the scheduler run.
+
+    Returns:
+        A JSON-safe evidence document with ``passed``, the pending, evidenced
+        and missing task ids, and one per-task verification entry.
     """
-    from rocobrick.scene_snapshot import bind_scene_object, build_planning_scene_update
-    from rocobrick.structural_binding import StructuralBinding
-
-    manifest = _load_skill_scene_manifest(args.scene_manifest)
-    snapshot = _load_scene_snapshot(args.scene_snapshot_out)
-    if snapshot.scene_id != manifest["scene_id"]:
-        raise ValueError(
-            f"the scene snapshot scene_id {snapshot.scene_id!r} does not "
-            f"equal the manifest scene_id {manifest['scene_id']!r}"
-        )
-    if snapshot.frame_id != manifest["frame_id"]:
-        raise ValueError(
-            f"the scene snapshot frame_id {snapshot.frame_id!r} does not "
-            f"equal the manifest frame_id {manifest['frame_id']!r}"
-        )
-    if snapshot.host.robot_id != args.robot_id:
-        raise ValueError(
-            f"the scene snapshot was captured for robot "
-            f"{snapshot.host.robot_id!r}, not {args.robot_id!r}"
-        )
-    binding_record = record.get("binding")
-    binding_document = (
-        binding_record.get("binding")
-        if isinstance(binding_record, Mapping)
-        else None
+    tasks = getattr(stap_plan, "tasks", None)
+    operations = getattr(operation_plan, "operations", None)
+    run_operations = run_document.get("operations")
+    run_operations = (
+        run_operations if isinstance(run_operations, Mapping) else {}
     )
-    if not isinstance(binding_document, Mapping):
-        raise ValueError("the run carries no accepted structural binding")
-    manifest_objects = {
-        item["physical_instance_id"]: item for item in manifest["objects"]
+    document: dict[str, object] = {
+        "schema": ASSEMBLY_EFFECT_SCHEMA,
+        "required_evidence_labels": list(ASSEMBLY_EVIDENCE_LABELS),
+        "pending_task_ids": [],
+        "evidenced_task_ids": [],
+        "missing_task_ids": [],
+        "tasks": [],
+        "passed": False,
+        "reason": None,
     }
-    requested = {
-        instance_id
-        for _skill, instance_id in steps
-        if instance_id is not None
-    }
-    bound_objects = []
-    for scene_object in snapshot.objects:
-        instance_id = scene_object.physical_instance_id
-        manifest_item = manifest_objects.get(instance_id)
-        if manifest_item is None:
-            raise ValueError(
-                f"the scene snapshot object {instance_id!r} is absent from "
-                f"the scene manifest"
-            )
-        per_object_binding = StructuralBinding(
-            plan_id=str(binding_document["plan_id"]),
-            task_id=str(binding_document["task_id"]),
-            physical_instance_id=instance_id,
-            brick_id=int(manifest_item["brick_id"]),
-            robot_id=args.robot_id,
-            source_goal_key=str(binding_document["source_goal_key"]),
-            grid_xyz=tuple(
-                int(value) for value in binding_document["grid_xyz"]
-            ),
-            orientation=int(binding_document["orientation"]),
-            color=str(binding_document["color"]),
-            motion_geometry=str(binding_document["motion_geometry"]),
-            plan_sha256=str(binding_document["plan_sha256"]),
-            task_start_sha256=str(binding_document["task_start_sha256"]),
-            task_goal_sha256=str(binding_document["task_goal_sha256"]),
+    if not isinstance(tasks, Mapping) or not isinstance(operations, Mapping):
+        document["reason"] = (
+            "the authoritative STAP tasks or the parsed operation plan are "
+            "not available for the assembly-effect check"
         )
-        bound_objects.append(
-            bind_scene_object(
-                per_object_binding,
-                snapshot,
-                expected_scene_id=str(manifest["scene_id"]),
-                expected_frame_id=str(manifest["frame_id"]),
-                expected_runtime_usd_path=str(
-                    REPO_ROOT / RUNTIME_USD_PINNED_PATH
-                ),
-                expected_runtime_usd_sha256=runtime_sha,
-                expected_asset_revision_sha256=manifest_item[
-                    "asset_revision_sha256"
-                ],
-            )
-        )
-    bound_objects.sort(key=lambda item: item.object.physical_instance_id)
-    for instance_id in sorted(requested):
-        if not any(
-            item.object.physical_instance_id == instance_id
-            for item in bound_objects
-        ):
-            raise ValueError(
-                f"the scene snapshot carries no brick {instance_id!r} "
-                "requested by the skill request"
-            )
-    pick_targets = sorted(
-        {
-            instance_id
-            for skill, instance_id in steps
-            if skill is SkillType.PICK and instance_id is not None
+        return document
+    entries: list[dict[str, object]] = []
+    pending: list[str] = []
+    evidenced: list[str] = []
+    missing: list[str] = []
+    for task_id, task in tasks.items():
+        task_name = str(task_id)
+        part_id = getattr(task, "physical_instance_id", None)
+        robot_id = getattr(task, "primary_robot", None)
+        skill = str(getattr(task, "skill", ""))
+        entry: dict[str, object] = {
+            "task_id": task_name,
+            "physical_instance_id": part_id,
+            "primary_robot": robot_id,
+            "skill": skill,
+            "required_evidence_labels": list(ASSEMBLY_EVIDENCE_LABELS),
+            "operation_id": None,
+            "operation_status": None,
+            "operation_passed": None,
+            "missing_evidence_labels": list(ASSEMBLY_EVIDENCE_LABELS),
+            "confirmed": False,
+            "reason": None,
         }
-    )
-    gripper_contact_links = ("gripper_base", "gripper_link1", "gripper_link2")
-    allowed_collision_pairs = tuple(
-        sorted(
-            (
-                (instance_id, link)
-                if instance_id < link
-                else (link, instance_id)
+        pending.append(task_name)
+        matching = [
+            operation
+            for operation in operations.values()
+            if getattr(operation, "skill", None) == PENDING_TASK_SKILL
+            and getattr(operation, "source_task_id", None) == task_id
+            and getattr(operation, "executor_robot_id", None) == robot_id
+            and _place_down_upper_part(operation) == part_id
+        ]
+        if len(matching) != 1:
+            entry["reason"] = (
+                f"the external plan has {len(matching)} {PENDING_TASK_SKILL} "
+                f"operations for STAP task {task_name!r} (part {part_id!r} on "
+                f"robot {robot_id!r}); exactly one is required"
             )
-            for instance_id in pick_targets
-            for link in gripper_contact_links
+            missing.append(task_name)
+            entries.append(entry)
+            continue
+        operation = matching[0]
+        operation_id = getattr(operation, "operation_id", None)
+        entry["operation_id"] = operation_id
+        result = (
+            run_operations.get(operation_id)
+            if isinstance(operation_id, str)
+            else None
         )
-    )
-    update = build_planning_scene_update(
-        bound_objects,
-        allowed_collision_pairs=allowed_collision_pairs,
-    )
-    return asdict(update)
+        if not isinstance(result, Mapping):
+            entry["reason"] = (
+                f"operation {operation_id!r} has no scheduler result in the "
+                "run document"
+            )
+            missing.append(task_name)
+            entries.append(entry)
+            continue
+        status = result.get("status")
+        passed = result.get("passed") is True
+        entry["operation_status"] = status
+        entry["operation_passed"] = passed
+        missing_labels = [
+            label
+            for label in ASSEMBLY_EVIDENCE_LABELS
+            if not _evidence_label_proven(result.get("evidence"), label)
+        ]
+        entry["missing_evidence_labels"] = missing_labels
+        if status != "CONFIRMED" or not passed:
+            entry["reason"] = (
+                f"operation {operation_id!r} for STAP task {task_name!r} "
+                f"ended {status!r} (passed={passed!r}) instead of CONFIRMED"
+            )
+            missing.append(task_name)
+        elif missing_labels:
+            entry["reason"] = (
+                f"operation {operation_id!r} for STAP task {task_name!r} is "
+                f"CONFIRMED but lacks the assembly evidence labels "
+                f"{missing_labels}"
+            )
+            missing.append(task_name)
+        else:
+            entry["confirmed"] = True
+            evidenced.append(task_name)
+        entries.append(entry)
+    document["pending_task_ids"] = pending
+    document["evidenced_task_ids"] = evidenced
+    document["missing_task_ids"] = missing
+    document["tasks"] = entries
+    document["passed"] = not missing
+    if missing:
+        document["reason"] = (
+            "pending STAP assembly effects are not evidenced for tasks "
+            f"{missing}; each pending task requires one CONFIRMED "
+            f"{PENDING_TASK_SKILL} operation for its part and robot with the "
+            f"evidence labels {list(ASSEMBLY_EVIDENCE_LABELS)}"
+        )
+    return document
 
 
-def _skill_execution_phase(
+def _robot_operation_plan_phase(
     args: "_Arguments",
     record: dict[str, object],
     recorder: EvidenceRecorder,
     contract: TcpContract | None,
-    runtime_sha: str | None,
-    calibration_sha: str | None,
+    stap_plan: object,
 ) -> tuple[RunStatus, str] | None:
-    """Start the runtime session, execute the skill steps, stop cleanly.
+    """Validate the external plan, authorize, run the session, aggregate.
 
-    Every immutable gate and the TCP authorization have already passed when
-    this runs. The skill request is parsed strictly (any deviation is
-    ``INVALID_INPUT`` and starts zero processes), the session is started,
-    the scene snapshot artifact written at start becomes the frozen
-    planning-scene update, and every step runs its skill program through
-    :class:`rocobrick.session_phase_backend.SessionPhaseBackend`. The
-    session is always stopped with cleanup evidence.
+    Every gate — external plan capture/parse/cross-binding and the strict TCP
+    authorization — completes before the real multi-robot session is created.
+    The session is started for every validated plan robot; a readiness
+    failure schedules zero operations. The plan itself runs through
+    ``OperationPlanRunner`` in strict mode over ``SkillOperationExecutor``,
+    which observes the session's real read-only scene transport, and the
+    session is stopped with cleanup evidence in a ``finally`` block on every
+    path. A final semantic check then requires every pending STAP task's
+    assembly effect to be evidenced by one CONFIRMED ``PLACE_DOWN`` operation
+    for that exact task/part/robot with the required connection, release and
+    retreat labels; ``robot-operation-plan-run.json`` is left in ``record``
+    for the caller to finalize with the post-phase input digests.
+
+    Args:
+        args: Parsed command-line arguments with the external plan and the
+            explicit scene option group.
+        record: The mutable preflight record, updated in place.
+        recorder: The run evidence recorder.
+        contract: The re-derived TCP contract from the TCP gate.
+        stap_plan: The authoritative validated STAP plan.
 
     Returns:
-        ``None`` when every step ended without a FAILED phase and the
-        cleanup passed (the caller reports ``EXECUTED``), otherwise the
-        terminal status and reason.
+        ``None`` when every robot was ready, every operation was confirmed,
+        every pending STAP assembly effect is evidenced, the cleanup passed
+        and the inputs stayed immutable (the caller reports ``EXECUTED``),
+        otherwise the terminal status and reason.
     """
-    from rocobrick.models import FailureReason
-    from rocobrick.runtime_session import RuntimeSessionError
-    from rocobrick.session_phase_backend import (
-        SessionPhaseBackend,
-        SkillStepSpec,
-    )
-    from rocobrick.skill_execution import execute_skill
-    from rocobrick.skills import PhaseStatus
-    from rocobrick.skill_targets import (
-        TcpProvenance,
-        load_robot_base_frame,
-        load_skill_params,
+    from rocobrick.robot_operation_executor import SkillOperationExecutor
+    from rocobrick.robot_operation_runner import (
+        RUN_SCHEMA,
+        OperationPlanRunner,
+        serialize_run_result,
     )
 
-    skill_record: dict[str, object] = {
-        "request": None,
-        "params": None,
-        "steps": [],
-        "all_steps_confirmed": False,
-        "cleanup_passed": False,
+    plan_record: dict[str, object] = {
+        "path": str(args.robot_operation_plan_path),
+        "captured_path": str(recorder.directory / PLAN_CAPTURE_NAME),
+        "schema": None,
+        "plan_id": None,
+        "source_plan_id": None,
+        "robots": None,
+        "operations": [],
+        "execution_layers": [],
+        "planned_schedule": [],
+        "sha256": None,
+        "bytes": None,
+        "validated": False,
+        "source_plan_bound": stap_plan is not None,
+        "error": None,
     }
-    record["skill_execution"] = skill_record
-    record["skills"] = skill_record["steps"]
+    record["robot_operation_plan"] = plan_record
     try:
-        raw = args.skill_request_path.read_bytes()
-        document = json.loads(raw.decode("utf-8"))
-        steps = _parse_skill_request(document, args.robot_id)
-    except (OSError, ValueError) as error:
-        return (
-            RunStatus.INVALID_INPUT,
-            f"the skill request document is not valid: {error}",
+        # The original bytes are captured verbatim into the run directory and
+        # the capture is what gets parsed, so the audited copy and the parsed
+        # bytes can never diverge.
+        recorder.capture_input(
+            PLAN_CAPTURE_NAME, args.robot_operation_plan_path
         )
-    skill_record["request"] = document
+        raw = (recorder.directory / PLAN_CAPTURE_NAME).read_bytes()
+    except OSError as error:
+        reason = f"the robot operation plan is unreadable: {error}"
+        plan_record["error"] = reason
+        recorder.append_event({
+            "phase": "robot_operation_plan",
+            "status": "REJECTED",
+            "reason": reason,
+        })
+        return RunStatus.INVALID_INPUT, reason
+    plan_record["sha256"] = sha256(raw).hexdigest()
+    plan_record["bytes"] = len(raw)
     try:
-        if not isinstance(args.config_path, Path):
-            raise ValueError("the --config path is required for skill runs")
-        params = load_skill_params(REPO_ROOT / document["skill_params_path"])
-        base = load_robot_base_frame(args.config_path, args.robot_id)
-    except (OSError, ValueError) as error:
-        return (
-            RunStatus.INVALID_INPUT,
-            f"the skill inputs are not valid: {error}",
+        payload = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError) as error:
+        reason = (
+            f"the robot operation plan is not valid UTF-8 JSON: {error}"
         )
-    skill_record["params"] = asdict(params)
-    provenance = TcpProvenance(
-        runtime_model_sha256=str(runtime_sha),
-        source_sha256=str(calibration_sha),
-    )
+        plan_record["error"] = reason
+        recorder.append_event({
+            "phase": "robot_operation_plan",
+            "status": "REJECTED",
+            "reason": reason,
+            "sha256": plan_record["sha256"],
+        })
+        return RunStatus.INVALID_INPUT, reason
+    try:
+        operation_plan = parse_robot_operation_plan(
+            payload, source_plan=stap_plan
+        )
+    except RobotOperationPlanError as error:
+        reason = (
+            f"the robot operation plan failed strict validation against the "
+            f"STAP binding: {error}"
+        )
+        plan_record["error"] = reason
+        recorder.append_event({
+            "phase": "robot_operation_plan",
+            "status": "REJECTED",
+            "reason": reason,
+            "sha256": plan_record["sha256"],
+        })
+        return RunStatus.INVALID_INPUT, reason
+    plan_record.update({
+        "schema": operation_plan.schema,
+        "plan_id": operation_plan.plan_id,
+        "source_plan_id": operation_plan.source_plan_id,
+        "robots": list(operation_plan.robots),
+        "operations": [
+            {
+                "operation_id": operation.operation_id,
+                "source_task_id": operation.source_task_id,
+                "skill": operation.skill,
+                "executor_robot_id": operation.executor_robot_id,
+                "participants": list(operation.participants),
+                "resources": list(operation.resources),
+                "evidence_requirements": list(
+                    operation.evidence_requirements
+                ),
+                "target": (
+                    dict(operation.target.values)
+                    if operation.target is not None
+                    else None
+                ),
+            }
+            for operation in operation_plan.operations.values()
+        ],
+        "execution_layers": [
+            list(layer) for layer in operation_plan.execution_layers
+        ],
+        "planned_schedule": [
+            [
+                {
+                    "operation_id": item.operation_id,
+                    "robot_id": item.robot_id,
+                }
+                for item in slot
+            ]
+            for slot in operation_plan.planned_schedule
+        ],
+        "validated": True,
+    })
+    record["checks"]["robot_operation_plan_validated"] = True
+    record["checks"]["robot_operation_plan_cross_bound"] = True
+    recorder.append_event({
+        "phase": "robot_operation_plan",
+        "status": "VALIDATED",
+        "schema": operation_plan.schema,
+        "plan_id": operation_plan.plan_id,
+        "source_plan_id": operation_plan.source_plan_id,
+        "robots": list(operation_plan.robots),
+        "operation_ids": list(operation_plan.operations),
+        "execution_layers": [
+            list(layer) for layer in operation_plan.execution_layers
+        ],
+        "sha256": plan_record["sha256"],
+        "captured_path": plan_record["captured_path"],
+    })
 
-    pick_target_ids = tuple(sorted({
-        instance_id
-        for skill, instance_id in steps
-        if skill is SkillType.PICK and instance_id is not None
-    }))
+    authorized = _authorize_tcp_dispatch(args, record, recorder, contract)
+    if isinstance(authorized[0], RunStatus):
+        return authorized
+
+    run_document: dict[str, object] = {
+        "schema": RUN_SCHEMA,
+        "passed": False,
+        "scheduler_ran": False,
+        "scheduler_passed": False,
+        "operations": {},
+        "layers": [],
+        "evidence": [],
+        "resources": [],
+        "cancellations": [],
+        "unsafe_terminals": [],
+        "readiness": None,
+        "cleanup": None,
+        "cleanup_passed": False,
+        "motion_sent": False,
+    }
+    record["robot_operation_plan_run"] = run_document
+
     session = None
+    readiness_document: dict[str, object] | None = None
+    cleanup_document: dict[str, object] | None = None
     cleanup_passed = False
     runtime_terminal: tuple[RunStatus, str] | None = None
-    first_failure: str | None = None
-    operation_rejected = False
-    all_steps_confirmed = True
+    scheduler_result = None
     try:
         try:
-            import inspect
-
-            factory_parameters = inspect.signature(_create_session).parameters
-            if {
-                "collision_filter_robot_id",
-                "collision_filter_instance_ids",
-            }.issubset(factory_parameters):
-                session = _create_session(
-                    recorder.directory / "runtime-session",
-                    args,
-                    collision_filter_robot_id=args.robot_id,
-                    collision_filter_instance_ids=pick_target_ids,
-                )
-            else:
-                # Preserve the historical injected factory seam used by
-                # offline tests and callers that intentionally provide the
-                # two-argument fake session factory.
-                session = _create_session(
-                    recorder.directory / "runtime-session",
-                    args,
-                )
+            session = _create_session(
+                recorder.directory / "runtime-session",
+                args,
+                operation_plan.robots,
+            )
+        except Exception as error:
+            reason = (
+                f"the multi-robot session could not be created: {error}"
+            )
+            recorder.append_event({
+                "phase": "runtime_start",
+                "status": "FAILED",
+                "reason": reason,
+                "session_dir": None,
+            })
+            runtime_terminal = (RunStatus.RUNTIME_START_FAILED, reason)
+        if runtime_terminal is None:
             recorder.append_event({
                 "phase": "runtime_start",
                 "status": "STARTING",
                 "session_dir": str(session.session_dir),
             })
-            readiness = session.start()
-            recorder.append_event({
-                "phase": "runtime_start",
-                "status": "READY",
-                "passed": readiness.passed,
-                "readiness": asdict(readiness),
-                "session_evidence_path": str(
-                    session.session_dir / "runtime-session.json"
-                ),
-            })
-        except RuntimeSessionError as error:
-            recorder.append_event({
-                "phase": "runtime_start",
-                "status": "FAILED",
-                "reason": str(error),
-                "session_dir": (
-                    str(session.session_dir) if session is not None else None
-                ),
-            })
-            return (
-                RunStatus.RUNTIME_START_FAILED,
-                f"the runtime session failed to start: {error}",
-            )
-        try:
-            planning_scene_update = _build_planning_scene_document(
-                args, record, steps, str(runtime_sha)
-            )
-        except ValueError as error:
-            return (
-                RunStatus.EXECUTION_FAILED,
-                f"the scene snapshot could not become a planning scene "
-                f"update: {error}",
-            )
-        skill_record["planning_scene_update"] = planning_scene_update
-
-        def publish(event: object) -> None:
-            recorder.append_event({"phase": "skill_execution", "event": event})
-
-        for index, (skill, instance_id) in enumerate(steps):
-            task_ref = _SkillTaskRef(
-                task_id=f"skill-{index}-{str(skill.value)}", skill=skill
-            )
-            backend = SessionPhaseBackend(
-                session=session,
-                run_dir=session.session_dir,
-                base=base,
-                provenance=provenance,
-                spec=SkillStepSpec(
-                    skill=skill,
-                    physical_instance_id=instance_id,
-                    params=params,
-                ),
-                planning_scene_update=planning_scene_update,
-                request_prefix=f"skill-{index}",
-                operation_timeout_s=SKILL_OPERATION_TIMEOUT_S,
-            )
             try:
-                result = asyncio.run(
-                    execute_skill(
-                        task_ref,
-                        run_id=recorder.run_id,
-                        backend=backend,
-                        publish=publish,
-                    )
+                readiness = session.start()
+            except Exception as error:
+                reason = (
+                    f"the multi-robot session failed to start: {error}"
                 )
-            except Exception as error:  # pragma: no cover - defensive
-                all_steps_confirmed = False
-                first_failure = first_failure or (
-                    f"step {index} ({str(skill.value)}) raised {error}"
-                )
-                skill_record["steps"].append({
-                    "skill": str(skill.value),
-                    "physical_instance_id": instance_id,
-                    "assembled": False,
-                    "retreat_confirmed": False,
-                    "phases": [],
-                    "events": 0,
-                    "error": str(error),
+                recorder.append_event({
+                    "phase": "runtime_start",
+                    "status": "FAILED",
+                    "reason": reason,
+                    "session_dir": str(session.session_dir),
                 })
-                break
-            step_confirmed = all(
-                phase.status is not PhaseStatus.FAILED
-                for phase in result.phases
-            )
-            all_steps_confirmed = all_steps_confirmed and step_confirmed
-            for phase in result.phases:
-                if phase.status is not PhaseStatus.FAILED:
-                    continue
-                reason_text = (
-                    str(phase.reason.value)
-                    if phase.reason is not None
-                    else "UNKNOWN"
-                )
-                if first_failure is None:
-                    first_failure = (
-                        f"step {index} ({str(skill.value)}) phase "
-                        f"{phase.phase.phase_id} failed: {reason_text}"
+                runtime_terminal = (RunStatus.RUNTIME_START_FAILED, reason)
+            else:
+                try:
+                    readiness_document = _evidence_document(
+                        readiness, "readiness"
                     )
-                if phase.reason is FailureReason.COLLISION_BLOCKED:
-                    operation_rejected = True
-            skill_record["steps"].append({
-                "skill": str(skill.value),
-                "physical_instance_id": instance_id,
-                "assembled": result.assembled,
-                "retreat_confirmed": result.retreat_confirmed,
-                "phases": [
-                    {
-                        "phase_id": phase.phase.phase_id,
-                        "status": str(phase.status.value),
-                        "reason": (
-                            str(phase.reason.value)
-                            if phase.reason is not None
-                            else None
-                        ),
-                    }
-                    for phase in result.phases
-                ],
-                "events": len(result.events),
-            })
-        skill_record["all_steps_confirmed"] = all_steps_confirmed
-        if not all_steps_confirmed:
-            runtime_terminal = (
-                RunStatus.OPERATION_REJECTED
-                if operation_rejected
-                else RunStatus.EXECUTION_FAILED,
-                (
-                    "the skill request was rejected before motion"
-                    if operation_rejected
-                    else "the skill execution failed"
+                except (TypeError, ValueError) as error:
+                    reason = (
+                        "the multi-robot session readiness evidence is not "
+                        f"serializable: {error}"
+                    )
+                    run_document["readiness_rejection"] = reason
+                    recorder.append_event({
+                        "phase": "runtime_start",
+                        "status": "FAILED",
+                        "reason": reason,
+                        "session_dir": str(session.session_dir),
+                    })
+                    runtime_terminal = (
+                        RunStatus.RUNTIME_START_FAILED,
+                        reason,
+                    )
+                else:
+                    rejection = _readiness_rejection(
+                        readiness_document, operation_plan.robots
+                    )
+                    if rejection is not None:
+                        run_document["readiness_rejection"] = rejection
+                        recorder.append_event({
+                            "phase": "runtime_start",
+                            "status": "FAILED",
+                            "reason": rejection,
+                            "readiness": readiness_document,
+                            "session_dir": str(session.session_dir),
+                        })
+                        runtime_terminal = (
+                            RunStatus.RUNTIME_START_FAILED,
+                            rejection,
+                        )
+                    else:
+                        record["checks"][
+                            "robot_operation_plan_readiness_passed"
+                        ] = True
+                        recorder.append_event({
+                            "phase": "runtime_start",
+                            "status": "READY",
+                            "passed": True,
+                            "readiness": readiness_document,
+                            "session_dir": str(session.session_dir),
+                        })
+        if runtime_terminal is None:
+            try:
+                executor = SkillOperationExecutor(
+                    operation_plan.robots, session
                 )
-                + f": {first_failure}",
-            )
+                runner = OperationPlanRunner(
+                    plan=operation_plan,
+                    executor=executor,
+                    canceler=executor,
+                    operation_timeout_s=OPERATION_TIMEOUT_S,
+                    cancel_timeout_s=CANCEL_TIMEOUT_S,
+                    allow_legacy_results=False,
+                )
+                scheduler_result = asyncio.run(runner.run())
+                run_document = serialize_run_result(
+                    scheduler_result, readiness=readiness_document
+                )
+                run_document["scheduler_ran"] = True
+                run_document["scheduler_passed"] = bool(
+                    scheduler_result.passed
+                )
+            except Exception as error:
+                reason = (
+                    "the robot operation plan run failed before a result was "
+                    f"produced: {error}"
+                )
+                recorder.append_event({
+                    "phase": "robot_operation_plan_run",
+                    "status": "FAILED",
+                    "reason": reason,
+                })
+                runtime_terminal = (RunStatus.EXECUTION_FAILED, reason)
+            else:
+                record["checks"][
+                    "robot_operation_plan_scheduler_ran"
+                ] = True
+                record["checks"][
+                    "robot_operation_plan_scheduler_passed"
+                ] = bool(scheduler_result.passed)
     finally:
-        # The stop is unconditional: cleanup evidence is recorded even after
-        # a partial start or an unexpected error.
         if session is not None:
-            stop_evidence = session.stop()
-            cleanup_passed = bool(stop_evidence.cleanup.get("passed"))
-            record["runtime"] = {
-                **stop_evidence.serializable(),
-                "evidence_path": str(session.session_dir / "runtime-session.json"),
-            }
+            try:
+                stop_evidence = session.stop()
+                cleanup_document = _evidence_document(
+                    stop_evidence, "cleanup"
+                )
+                cleanup_passed = _cleanup_passed(cleanup_document)
+            except Exception as error:  # noqa: BLE001 - cleanup is audited
+                cleanup_document = {
+                    "cleanup_passed": False,
+                    "cleanup_error": str(error),
+                }
+                cleanup_passed = False
+            record["runtime"] = cleanup_document
+            record["checks"][
+                "robot_operation_plan_cleanup_passed"
+            ] = cleanup_passed
             recorder.append_event({
                 "phase": "runtime_stop",
-                "status": str(stop_evidence.status),
-                "cleanup": dict(stop_evidence.cleanup),
-                "errors": list(stop_evidence.errors),
+                "status": "STOPPED" if cleanup_passed else "FAILED",
+                "cleanup_passed": cleanup_passed,
+                "cleanup": cleanup_document,
             })
-    skill_record["cleanup_passed"] = cleanup_passed
-    if runtime_terminal is not None:
-        return runtime_terminal
-    if not cleanup_passed:
-        return (
-            RunStatus.EXECUTION_FAILED,
-            "the skill steps executed but the session cleanup did not pass; "
-            "the run is not verified",
+            if not cleanup_passed and runtime_terminal is None:
+                runtime_terminal = (
+                    RunStatus.EXECUTION_FAILED,
+                    "the multi-robot session cleanup did not pass; the run "
+                    "is not verified",
+                )
+    record["robot_operation_plan_run"] = run_document
+    run_document["readiness"] = readiness_document
+    run_document["cleanup"] = cleanup_document
+    run_document["cleanup_passed"] = cleanup_passed
+    operations_document = run_document.get("operations")
+    motion_sent = any(
+        isinstance(item, Mapping) and item.get("motion_sent") is True
+        for item in (
+            operations_document.values()
+            if isinstance(operations_document, Mapping)
+            else ()
         )
-    return None
+    )
+    run_document["motion_sent"] = motion_sent
+    record["checks"]["motion_sent"] = motion_sent
+
+    # Final semantic check: EXECUTED requires every pending STAP task's
+    # assembly effect to be evidenced by a CONFIRMED PLACE_DOWN operation for
+    # that exact task/part/robot carrying the required connection, release and
+    # retreat labels. The STAP binding alone, or a CONFIRMED observation of
+    # another skill, never substitutes for the assembly effect.
+    assembly_effects = _pending_assembly_effect_check(
+        stap_plan, operation_plan, run_document
+    )
+    assembly_effects_passed = assembly_effects.get("passed") is True
+    run_document["stap_assembly_effects"] = assembly_effects
+    record["checks"]["robot_operation_plan_pending_tasks_confirmed"] = (
+        assembly_effects_passed
+    )
+    recorder.append_event({
+        "phase": "stap_assembly_effects",
+        "status": "CONFIRMED" if assembly_effects_passed else "FAILED",
+        "passed": assembly_effects_passed,
+        "pending_task_ids": assembly_effects.get("pending_task_ids"),
+        "evidenced_task_ids": assembly_effects.get("evidenced_task_ids"),
+        "missing_task_ids": assembly_effects.get("missing_task_ids"),
+        "tasks": assembly_effects.get("tasks"),
+        "reason": assembly_effects.get("reason"),
+    })
+
+    if runtime_terminal is not None:
+        terminal = runtime_terminal
+    elif run_document.get("scheduler_passed") is not True:
+        terminal = (
+            RunStatus.EXECUTION_FAILED,
+            "the robot operation plan did not pass: "
+            + _plan_failure_reason(run_document),
+        )
+    elif not assembly_effects_passed:
+        terminal = (
+            RunStatus.EXECUTION_FAILED,
+            "the run does not evidence every pending STAP assembly effect: "
+            + str(
+                assembly_effects.get("reason")
+                or "missing CONFIRMED PLACE_DOWN evidence"
+            ),
+        )
+    else:
+        terminal = None
+    recorder.append_event({
+        "phase": "robot_operation_plan_run",
+        "status": "CONFIRMED" if terminal is None else str(terminal[0]),
+        "scheduler_ran": bool(run_document.get("scheduler_ran")),
+        "scheduler_passed": bool(run_document.get("scheduler_passed")),
+        "pending_stap_tasks_confirmed": assembly_effects_passed,
+        "missing_assembly_task_ids": assembly_effects.get(
+            "missing_task_ids"
+        ),
+        "readiness_passed": bool(
+            record["checks"].get("robot_operation_plan_readiness_passed")
+        ),
+        "cleanup_passed": cleanup_passed,
+        "motion_sent": motion_sent,
+        "operations": {
+            operation_id: {
+                "status": item.get("status"),
+                "passed": item.get("passed"),
+                "terminal": item.get("terminal"),
+                "motion_sent": item.get("motion_sent"),
+                "reason": item.get("reason"),
+            }
+            for operation_id, item in (
+                operations_document.items()
+                if isinstance(operations_document, Mapping)
+                else ()
+            )
+            if isinstance(item, Mapping)
+        },
+        "unsafe_terminals": list(
+            run_document.get("unsafe_terminals") or ()
+        ),
+    })
+    return terminal
 
 
 def _run(args: _Arguments) -> RunOutcome:
@@ -1716,16 +1683,6 @@ def _run(args: _Arguments) -> RunOutcome:
             "backend": args.backend,
             "robot_id": args.robot_id,
             "preflight_only": args.preflight_only,
-            "operation": (
-                str(args.operation_path)
-                if args.operation_path is not None
-                else None
-            ),
-            "skill_request": (
-                str(args.skill_request_path)
-                if args.skill_request_path is not None
-                else None
-            ),
             "robot_operation_plan": (
                 str(args.robot_operation_plan_path)
                 if args.robot_operation_plan_path is not None
@@ -1738,14 +1695,6 @@ def _run(args: _Arguments) -> RunOutcome:
         "backend": args.backend,
         "robot_id": args.robot_id,
         "preflight_only": args.preflight_only,
-        "operation_path": (
-            str(args.operation_path) if args.operation_path is not None else None
-        ),
-        "skill_request_path": (
-            str(args.skill_request_path)
-            if args.skill_request_path is not None
-            else None
-        ),
         "robot_operation_plan_path": (
             str(args.robot_operation_plan_path)
             if args.robot_operation_plan_path is not None
@@ -1760,9 +1709,8 @@ def _run(args: _Arguments) -> RunOutcome:
         "binding": None,
         "tcp": None,
         "dispatch": None,
-        "operation": None,
-        "skills": None,
-        "skill_execution": None,
+        "robot_operation_plan": None,
+        "robot_operation_plan_run": None,
         "runtime": None,
         "checks": {},
     }
@@ -1895,145 +1843,43 @@ def _run(args: _Arguments) -> RunOutcome:
                 "status": str(terminal[0]) if terminal is not None else "PASSED",
                 "tcp": tcp_record,
             })
-        # Phase 4: CAPABILITY / DISPATCH decision. Without --operation the
-        # dispatch path is deliberately not implemented; nothing is ever sent
-        # to any runtime. With the internal --operation bridge the formal
-        # R4.2 runtime session runs after every gate has passed.
+        # Phase 4: CAPABILITY / DISPATCH decision. ``--robot-operation-plan``
+        # is the only production dispatch entry; without it nothing is ever
+        # sent to any runtime. The plan path captures and validates the
+        # external document and authorizes the calibrated TCP strictly before
+        # any real session exists.
         if binding is not None:
             if terminal is None and args.robot_operation_plan_path is not None:
-                try:
-                    raw_operation_plan = json.loads(
-                        args.robot_operation_plan_path.read_text(encoding="utf-8")
-                    )
-                    operation_plan = parse_robot_operation_plan(
-                        raw_operation_plan,
-                        source_plan=plan,
-                    )
-                except (OSError, ValueError, RobotOperationPlanError) as error:
-                    terminal = (
-                        RunStatus.INVALID_INPUT,
-                        f"robot-operation-plan/v1 is invalid: {error}",
-                    )
-                    record["dispatch"] = {
-                        "implemented": False,
-                        "dispatch_requested": True,
-                        "blocked": True,
-                        "status": str(terminal[0]),
-                        "reason": terminal[1],
-                    }
-                    recorder.append_event({
-                        "phase": "robot_operation_plan",
-                        "status": "REJECTED",
-                        "reason": terminal[1],
-                    })
-                else:
-                    record["robot_operation_plan"] = {
-                        "path": str(args.robot_operation_plan_path),
-                        "schema": operation_plan.schema,
-                        "plan_id": operation_plan.plan_id,
-                        "source_plan_id": operation_plan.source_plan_id,
-                        "robots": list(operation_plan.robots),
-                        "operation_ids": list(operation_plan.operations),
-                        "execution_layers": [
-                            list(layer) for layer in operation_plan.execution_layers
-                        ],
-                        "planned_schedule": [
-                            [
-                                {
-                                    "operation_id": item.operation_id,
-                                    "robot_id": item.robot_id,
-                                }
-                                for item in slot
-                            ]
-                            for slot in operation_plan.planned_schedule
-                        ],
-                        "validated": True,
-                    }
-                    recorder.append_event({
-                        "phase": "robot_operation_plan",
-                        "status": "VALIDATED",
-                        "plan_id": operation_plan.plan_id,
-                        "source_plan_id": operation_plan.source_plan_id,
-                        "robots": list(operation_plan.robots),
-                    })
-                    terminal = (
-                        RunStatus.EXECUTION_NOT_IMPLEMENTED,
-                        "robot-operation-plan/v1 validated; real runtime dispatch "
-                        "is intentionally deferred until the multi-robot executor "
-                        "is connected",
-                    )
-                    record["dispatch"] = {
-                        "implemented": False,
-                        "dispatch_requested": True,
-                        "blocked": True,
-                        "status": str(terminal[0]),
-                        "reason": terminal[1],
-                    }
-            elif terminal is None and args.operation_path is not None:
                 record["dispatch"] = {
                     "implemented": True,
                     "dispatch_requested": True,
                     "blocked": False,
                     "status": "RUNTIME_DISPATCH",
                     "reason": (
-                        "explicit --operation dispatch through the R4.2 "
-                        "Isaac/MoveIt runtime session"
+                        "explicit --robot-operation-plan dispatch through the "
+                        "real multi-robot session"
                     ),
                 }
                 recorder.append_event({
                     "phase": "dispatch",
                     "status": "RUNTIME_DISPATCH",
-                    "operation": str(args.operation_path),
+                    "robot_operation_plan": str(
+                        args.robot_operation_plan_path
+                    ),
                 })
-                terminal = _runtime_operation_phase(
-                    args, record, recorder, contract
+                terminal = _robot_operation_plan_phase(
+                    args, record, recorder, contract, plan
                 )
                 if terminal is None:
                     terminal = (
                         RunStatus.EXECUTED,
-                        "the operation executed against the live runtime and "
-                        "the session stopped with passing cleanup",
+                        "the robot operation plan executed: every robot was "
+                        "ready, every operation was confirmed, every pending "
+                        "STAP assembly effect is evidenced, and the "
+                        "multi-robot session stopped with passing cleanup",
                     )
-                record["dispatch"]["status"] = str(terminal[0])
-                record["dispatch"]["reason"] = terminal[1]
-            elif terminal is None and args.skill_request_path is not None:
-                record["dispatch"] = {
-                    "implemented": True,
-                    "dispatch_requested": True,
-                    "blocked": False,
-                    "status": "RUNTIME_DISPATCH",
-                    "reason": (
-                        "explicit --skill-request dispatch through the R4.2 "
-                        "Isaac/MoveIt runtime session"
-                    ),
-                }
-                recorder.append_event({
-                    "phase": "dispatch",
-                    "status": "RUNTIME_DISPATCH",
-                    "skill_request": str(args.skill_request_path),
-                })
-                authorized = _authorize_tcp_dispatch(
-                    args, record, recorder, contract
-                )
-                if isinstance(authorized[0], RunStatus):
-                    terminal = authorized
                 else:
-                    runtime_sha, calibration_sha = authorized
-                    terminal = _skill_execution_phase(
-                        args,
-                        record,
-                        recorder,
-                        contract,
-                        runtime_sha,
-                        calibration_sha,
-                    )
-                if terminal is None:
-                    terminal = (
-                        RunStatus.EXECUTED,
-                        "every skill step executed against the live runtime "
-                        "without a FAILED phase and the session stopped with "
-                        "passing cleanup",
-                    )
+                    record["dispatch"]["blocked"] = True
                 record["dispatch"]["status"] = str(terminal[0])
                 record["dispatch"]["reason"] = terminal[1]
             elif terminal is None:
@@ -2070,13 +1916,30 @@ def _run(args: _Arguments) -> RunOutcome:
             RunStatus.INTERNAL_ERROR,
             f"unexpected internal error: {error}",
         )
-    # Phase 5: IMMUTABILITY of the original input files.
+    # Phase 5: IMMUTABILITY of the original input files, including the
+    # captured external operation plan when this run requested one.
+    run_document = record.get("robot_operation_plan_run")
+    plan_record = record.get("robot_operation_plan")
     if inputs is not None:
         originals = {
             "plan": inputs.plan_path,
             "task_start": inputs.start_path,
             "task_goal": inputs.goal_path,
         }
+        expected = dict(inputs.sha256)
+        sizes = dict(inputs.sizes)
+        if (
+            isinstance(plan_record, Mapping)
+            and isinstance(plan_record.get("sha256"), str)
+            and isinstance(plan_record.get("path"), str)
+        ):
+            originals["robot_operation_plan"] = Path(
+                str(plan_record["path"])
+            )
+            expected["robot_operation_plan"] = str(plan_record["sha256"])
+            sizes["robot_operation_plan"] = plan_record.get("bytes")
+        after: dict[str, str] = {}
+        immutable = False
         try:
             after = {
                 name: sha256(path.read_bytes()).hexdigest()
@@ -2089,14 +1952,41 @@ def _run(args: _Arguments) -> RunOutcome:
                 f"input files could not be re-read after the phases: {error}",
             )
         else:
-            immutable = after == dict(inputs.sha256)
+            immutable = after == expected
             record["checks"]["inputs_immutable_after_all_phases"] = immutable
             if not immutable:
                 terminal = (
                     RunStatus.INPUT_MUTATED,
                     f"input files changed on disk during the run: "
-                    f"before={dict(inputs.sha256)} after={after}",
+                    f"before={expected} after={after}",
                 )
+        if isinstance(run_document, dict):
+            # The run document is finalized only after every phase, so its
+            # ``passed`` verdict can require unchanged inputs and the written
+            # copy can carry the post-run digests.
+            run_document["inputs"] = {
+                "sha256_before": expected,
+                "bytes": sizes,
+                "sha256_after_all_phases": after,
+                "immutable_after_all_phases": immutable,
+            }
+            run_document["passed"] = bool(
+                run_document.get("scheduler_ran") is True
+                and run_document.get("scheduler_passed") is True
+                and record["checks"].get(
+                    "robot_operation_plan_readiness_passed"
+                )
+                is True
+                and record["checks"].get(
+                    "robot_operation_plan_cleanup_passed"
+                )
+                is True
+                and record["checks"].get(
+                    "robot_operation_plan_pending_tasks_confirmed"
+                )
+                is True
+                and immutable
+            )
     status, reason = (
         terminal
         if terminal is not None
@@ -2105,53 +1995,36 @@ def _run(args: _Arguments) -> RunOutcome:
             "the run ended without a terminal status",
         )
     )
-    record["checks"]["no_motion_dispatched"] = (
-        args.operation_path is None and args.skill_request_path is None
+    motion_sent = record["checks"].get("motion_sent") is True
+    record["checks"]["robot_operation_plan_dispatched"] = (
+        args.robot_operation_plan_path is not None
     )
-    record["checks"]["operation_dispatched"] = args.operation_path is not None
-    record["checks"]["skill_steps_dispatched"] = (
-        args.skill_request_path is not None
+    record["checks"]["runtime_dispatched"] = (
+        isinstance(record.get("runtime"), Mapping)
     )
+    record["checks"]["no_motion_dispatched"] = not motion_sent
     record["checks"]["inputs_immutable_after_runtime"] = record["checks"].get(
         "inputs_immutable_after_all_phases", False
     )
-    operation_record = record.get("operation")
-    runtime_record = record.get("runtime")
-    operation_passed = bool(
-        isinstance(operation_record, Mapping)
-        and operation_record.get("passed") is True
-    )
-    skill_execution_record = record.get("skill_execution")
-    skill_steps_passed = bool(
-        isinstance(skill_execution_record, Mapping)
-        and skill_execution_record.get("all_steps_confirmed") is True
-    )
-    cleanup_passed = bool(
-        isinstance(runtime_record, Mapping)
-        and isinstance(runtime_record.get("cleanup"), Mapping)
-        and runtime_record["cleanup"].get("passed") is True
+    robot_plan_passed = bool(
+        isinstance(run_document, Mapping)
+        and run_document.get("passed") is True
     )
     record["status"] = str(status)
-    dispatch_passed = (
-        operation_passed if args.operation_path is not None else skill_steps_passed
-    )
     record["passed"] = status is RunStatus.PREFLIGHT_ONLY or (
-        status is RunStatus.EXECUTED and dispatch_passed and cleanup_passed
+        status is RunStatus.EXECUTED and robot_plan_passed
     )
     record["reason"] = reason
     record["exit_code"] = EXIT_CODES[status]
     record["evidence_dir"] = str(recorder.directory)
-    # The TRANSIT / WAIT / PICK programs carry no retreat phase, so the
-    # retreat_clear boolean honestly mirrors the overall run result there.
+    # This phase implements no retreat capability, so the retreat_clear
+    # boolean honestly mirrors the overall run result for a plan dispatch.
     retreat_clear = True
-    if args.skill_request_path is not None:
+    if args.robot_operation_plan_path is not None:
         retreat_clear = bool(record["passed"])
-        if isinstance(skill_execution_record, dict):
-            skill_execution_record["retreat_clear"] = retreat_clear
-            skill_execution_record["retreat_clear_note"] = (
-                "no retreat phase in TRANSIT/WAIT/PICK programs; mirrors "
-                "overall result"
-            )
+        if isinstance(run_document, dict):
+            run_document["retreat_clear"] = retreat_clear
+            recorder.write_json(PLAN_RUN_NAME, run_document)
     recorder.write_json("preflight.json", record)
     result = FinalResult(
         input_valid=status
@@ -2174,15 +2047,18 @@ def _run(args: _Arguments) -> RunOutcome:
         "preflight_path": str(recorder.directory / "preflight.json"),
         **asdict(result),
     }
-    if args.operation_path is not None:
-        # Link the runtime lifecycle evidence and the operation result from
-        # the run result document (the full documents live in the run dir).
-        result_document["operation"] = record.get("operation")
-        result_document["runtime_session"] = record.get("runtime")
-    if args.skill_request_path is not None:
-        # Link the per-step skill summaries and the runtime lifecycle from
-        # the run result document (the full documents live in the run dir).
-        result_document["skills"] = record.get("skills")
+    if args.robot_operation_plan_path is not None:
+        # Link the external plan record, the aggregated run document (which
+        # carries readiness, operations, layers, cancellations, resources,
+        # cleanup and the immutable input digests) and the runtime lifecycle
+        # from the run result document; the full documents live in the run
+        # directory.
+        result_document["robot_operation_plan"] = record.get(
+            "robot_operation_plan"
+        )
+        result_document["robot_operation_plan_run"] = record.get(
+            "robot_operation_plan_run"
+        )
         result_document["runtime_session"] = record.get("runtime")
     recorder.write_json("result.json", result_document)
     recorder.append_event({
@@ -2215,28 +2091,11 @@ def _parse_arguments(argv: list[str] | None) -> _Arguments:
         _UsageError: If the command line is invalid.
     """
     namespace = build_parser().parse_args(argv)
-    if namespace.preflight_only and namespace.operation is not None:
-        raise _UsageError(
-            "--preflight-only cannot be combined with --operation"
-        )
     if namespace.robot_operation_plan is not None:
         if namespace.preflight_only:
             raise _UsageError(
-                "--robot-operation-plan cannot be combined with --preflight-only"
-            )
-        if namespace.operation is not None or namespace.skill_request is not None:
-            raise _UsageError(
                 "--robot-operation-plan cannot be combined with "
-                "--operation or --skill-request"
-            )
-    if namespace.skill_request is not None:
-        if namespace.operation is not None:
-            raise _UsageError(
-                "--skill-request cannot be combined with --operation"
-            )
-        if namespace.preflight_only:
-            raise _UsageError(
-                "--skill-request cannot be combined with --preflight-only"
+                "--preflight-only"
             )
         if (
             namespace.scene_manifest is None
@@ -2245,12 +2104,22 @@ def _parse_arguments(argv: list[str] | None) -> _Arguments:
             or namespace.config is None
         ):
             raise _UsageError(
-                "--skill-request requires --scene-manifest, "
-                "--scene-snapshot-out, --host-instance-id and --config"
+                "--robot-operation-plan requires --scene-manifest, "
+                "--scene-snapshot-out, --host-instance-id and --config; "
+                "there is no fake runtime fallback"
             )
-    scene_fields = (namespace.scene_manifest, namespace.scene_snapshot_out, namespace.host_instance_id)
-    if any(value is not None for value in scene_fields) and not all(value is not None for value in scene_fields):
-        raise _UsageError("--scene-manifest, --scene-snapshot-out and --host-instance-id must be provided together")
+    scene_fields = (
+        namespace.scene_manifest,
+        namespace.scene_snapshot_out,
+        namespace.host_instance_id,
+    )
+    if any(value is not None for value in scene_fields) and not all(
+        value is not None for value in scene_fields
+    ):
+        raise _UsageError(
+            "--scene-manifest, --scene-snapshot-out and --host-instance-id "
+            "must be provided together"
+        )
     if namespace.scene_manifest is not None and namespace.config is None:
         raise _UsageError(
             "--config must be provided together with --scene-manifest, "
@@ -2263,8 +2132,6 @@ def _parse_arguments(argv: list[str] | None) -> _Arguments:
         robot_id=namespace.robot_id,
         run_dir=namespace.run_dir,
         preflight_only=namespace.preflight_only,
-        operation_path=namespace.operation,
-        skill_request_path=namespace.skill_request,
         robot_operation_plan_path=namespace.robot_operation_plan,
         scene_manifest=namespace.scene_manifest,
         scene_snapshot_out=namespace.scene_snapshot_out,
