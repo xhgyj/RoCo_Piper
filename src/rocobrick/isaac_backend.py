@@ -10,11 +10,12 @@ process boundary.
 
 This module is pure data plus the accepted admission contract: the builders
 run ``rocobrick.admission.strict_action_admission`` BEFORE any serialization,
-so an inadmissible target can never be encoded, transported, or executed. No
-STAP/task parsing, no target derivation, no plan semantics, and no TCP
-interpretation live here. ROS/Isaac imports are absent so the module imports
-cleanly on the host and inside the container (Python 3.10 compatible through
-:mod:`rocobrick.compat`).
+so an inadmissible target can never be encoded, transported, or executed. The
+no-motion scene operations (APPLY_PLANNING_SCENE, SCENE_QUERY) carry strictly
+validated documents instead of targets. No STAP/task parsing, no target
+derivation, no plan semantics, and no TCP interpretation live here. ROS/Isaac
+imports are absent so the module imports cleanly on the host and inside the
+container (Python 3.10 compatible through :mod:`rocobrick.compat`).
 """
 
 from __future__ import annotations
@@ -28,8 +29,18 @@ from rocobrick.admission import strict_action_admission
 from rocobrick.compat import StrEnum
 from rocobrick.moveit_contract import (
     ARM_JOINT_NAMES,
+    GripperTarget,
     JointTarget,
     Link6PoseTarget,
+    TcpPoseTarget,
+)
+from rocobrick.planning_scene import (
+    SCHEMA as PLANNING_SCENE_SCHEMA,
+)
+from rocobrick.planning_scene import (
+    PlanningSceneUpdate,
+    box_from_aabb,
+    scene_digest,
 )
 
 OPERATION_SCHEMA = "rocobrick-runtime-operation/v1"
@@ -62,6 +73,34 @@ POSE_PAYLOAD_KEYS = frozenset({
     "tip_link",
     "tcp_status",
 })
+TCP_PAYLOAD_KEYS = POSE_PAYLOAD_KEYS | {"runtime_model_sha256", "source_sha256"}
+GRIPPER_PAYLOAD_KEYS = frozenset({
+    "opening_m",
+    "duration_s",
+    "goal_tolerance",
+    "expected_opening_m",
+})
+SCENE_QUERY_PAYLOAD_KEYS = frozenset({
+    "brick_physical_instance_ids",
+    "connection_pairs",
+    "include_gripper",
+})
+# Exact top-level keys of the document built from a
+# rocobrick.planning_scene.PlanningSceneUpdate (dataclasses.asdict shape).
+PLANNING_SCENE_PAYLOAD_KEYS = frozenset({
+    "schema",
+    "scene_id",
+    "boxes",
+    "expected_scene_digest",
+    "allowed_collision_pairs",
+})
+PLANNING_SCENE_BOX_KEYS = frozenset({
+    "object_id",
+    "frame_id",
+    "minimum_m",
+    "maximum_m",
+    "geometry_digest",
+})
 
 
 class OperationKind(StrEnum):
@@ -70,6 +109,10 @@ class OperationKind(StrEnum):
     READINESS = "READINESS"
     JOINT_TARGET = "JOINT_TARGET"
     LINK6_POSE = "LINK6_POSE"
+    TCP_POSE = "TCP_POSE"
+    GRIPPER_TARGET = "GRIPPER_TARGET"
+    APPLY_PLANNING_SCENE = "APPLY_PLANNING_SCENE"
+    SCENE_QUERY = "SCENE_QUERY"
 
 
 class OperationContractError(ValueError):
@@ -85,6 +128,15 @@ def _is_finite(value: object) -> bool:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return False
     return math.isfinite(float(value))
+
+
+def _is_sha256_digest(value: object) -> bool:
+    """True for a lowercase 64-character SHA-256 hex digest string."""
+    return (
+        isinstance(value, str)
+        and len(value) == 64
+        and all(char in "0123456789abcdef" for char in value)
+    )
 
 
 def _require_exact_keys(
@@ -317,6 +369,178 @@ def link6_pose_operation(
     )
 
 
+def tcp_pose_operation(
+    target: TcpPoseTarget, timeout_s: float, request_id: str
+) -> RuntimeOperation:
+    """Admit a calibrated TCP pose target, then serialize it as TCP_POSE.
+
+    Raises:
+        OperationContractError: If ``timeout_s`` or ``request_id`` are invalid.
+        OperationRejected: If ``strict_action_admission`` refuses the target.
+    """
+    if not _is_finite(timeout_s) or float(timeout_s) <= 0.0:
+        raise OperationContractError(
+            f"timeout_s must be finite and positive, got {timeout_s!r}"
+        )
+    if not isinstance(request_id, str) or not request_id:
+        raise OperationContractError("request_id must be a non-empty string")
+    decision = strict_action_admission(target)
+    if not decision.accepted:
+        raise OperationRejected(
+            f"tcp pose target rejected before serialization: {decision.reason}"
+        )
+    payload: dict[str, object] = {
+        "frame_id": str(target.frame_id),
+        "position": [float(value) for value in target.position],
+        "orientation_xyzw": [float(value) for value in target.orientation_xyzw],
+        "position_tolerance_m": float(target.position_tolerance_m),
+        "orientation_tolerance_rad": float(target.orientation_tolerance_rad),
+        "tip_link": str(target.tip_link),
+        "tcp_status": str(target.tcp_status),
+        "runtime_model_sha256": str(target.runtime_model_sha256),
+        "source_sha256": str(target.source_sha256),
+    }
+    return RuntimeOperation(
+        kind=OperationKind.TCP_POSE,
+        payload=payload,
+        timeout_s=float(timeout_s),
+        request_id=request_id,
+    )
+
+
+def gripper_operation(
+    target: GripperTarget, timeout_s: float, request_id: str
+) -> RuntimeOperation:
+    """Admit a gripper target, then serialize it as a GRIPPER_TARGET request.
+
+    Raises:
+        OperationContractError: If ``timeout_s`` or ``request_id`` are invalid.
+        OperationRejected: If ``strict_action_admission`` refuses the target.
+    """
+    if not _is_finite(timeout_s) or float(timeout_s) <= 0.0:
+        raise OperationContractError(
+            f"timeout_s must be finite and positive, got {timeout_s!r}"
+        )
+    if not isinstance(request_id, str) or not request_id:
+        raise OperationContractError("request_id must be a non-empty string")
+    decision = strict_action_admission(target)
+    if not decision.accepted:
+        raise OperationRejected(
+            f"gripper target rejected before serialization: {decision.reason}"
+        )
+    payload: dict[str, object] = {
+        "opening_m": float(target.opening_m),
+        "duration_s": float(target.duration_s),
+        "goal_tolerance": float(target.goal_tolerance),
+        "expected_opening_m": [
+            float(target.expected_opening_m[0]),
+            float(target.expected_opening_m[1]),
+        ],
+    }
+    return RuntimeOperation(
+        kind=OperationKind.GRIPPER_TARGET,
+        payload=payload,
+        timeout_s=float(timeout_s),
+        request_id=request_id,
+    )
+
+
+def planning_scene_operation(
+    update: Mapping[str, object], timeout_s: float, request_id: str
+) -> RuntimeOperation:
+    """Validate a planning-scene update document, then serialize it verbatim.
+
+    The payload is the EXACT top-level document of the accepted
+    :class:`rocobrick.planning_scene.PlanningSceneUpdate` (its
+    ``dataclasses.asdict`` shape); it is re-validated strictly and carried
+    unchanged. No motion is admitted here, so strict admission does not run.
+
+    Raises:
+        OperationContractError: If ``timeout_s``, ``request_id`` or the
+            update document violate their exact schemas.
+    """
+    if not _is_finite(timeout_s) or float(timeout_s) <= 0.0:
+        raise OperationContractError(
+            f"timeout_s must be finite and positive, got {timeout_s!r}"
+        )
+    if not isinstance(request_id, str) or not request_id:
+        raise OperationContractError("request_id must be a non-empty string")
+    planning_scene_update_from_payload(update)
+    return RuntimeOperation(
+        kind=OperationKind.APPLY_PLANNING_SCENE,
+        payload=dict(update),
+        timeout_s=float(timeout_s),
+        request_id=request_id,
+    )
+
+
+def scene_query_operation(
+    brick_physical_instance_ids: object,
+    connection_pairs: object,
+    *,
+    include_gripper: bool,
+    timeout_s: float,
+    request_id: str,
+) -> RuntimeOperation:
+    """Serialize a SCENE_QUERY request (no motion, no admission).
+
+    Raises:
+        OperationContractError: If ``timeout_s``, ``request_id`` or the query
+            selections violate their exact schemas.
+    """
+    if not _is_finite(timeout_s) or float(timeout_s) <= 0.0:
+        raise OperationContractError(
+            f"timeout_s must be finite and positive, got {timeout_s!r}"
+        )
+    if not isinstance(request_id, str) or not request_id:
+        raise OperationContractError("request_id must be a non-empty string")
+    if not isinstance(brick_physical_instance_ids, (list, tuple)) or not (
+        brick_physical_instance_ids
+    ):
+        raise OperationContractError(
+            "brick_physical_instance_ids must be a non-empty list of strings"
+        )
+    if not all(
+        isinstance(value, str) and value
+        for value in brick_physical_instance_ids
+    ):
+        raise OperationContractError(
+            "brick_physical_instance_ids must be a non-empty list of "
+            "non-empty strings"
+        )
+    if not isinstance(connection_pairs, (list, tuple)):
+        raise OperationContractError(
+            "connection_pairs must be a list of exactly-two-string lists"
+        )
+    for index, pair in enumerate(connection_pairs):
+        if (
+            not isinstance(pair, (list, tuple))
+            or len(pair) != 2
+            or not all(isinstance(value, str) and value for value in pair)
+        ):
+            raise OperationContractError(
+                f"connection_pairs[{index}] must be a list of exactly two "
+                "non-empty strings"
+            )
+    if not isinstance(include_gripper, bool):
+        raise OperationContractError("include_gripper must be a boolean")
+    payload: dict[str, object] = {
+        "brick_physical_instance_ids": [
+            str(value) for value in brick_physical_instance_ids
+        ],
+        "connection_pairs": [
+            [str(pair[0]), str(pair[1])] for pair in connection_pairs
+        ],
+        "include_gripper": bool(include_gripper),
+    }
+    return RuntimeOperation(
+        kind=OperationKind.SCENE_QUERY,
+        payload=payload,
+        timeout_s=float(timeout_s),
+        request_id=request_id,
+    )
+
+
 def _require_finite_sequence(values: object, length: int, label: str) -> tuple:
     if not isinstance(values, (list, tuple)) or len(values) != length:
         raise OperationContractError(
@@ -386,14 +610,255 @@ def link6_pose_target_from_payload(payload: Mapping[str, object]) -> Link6PoseTa
     )
 
 
+def tcp_pose_target_from_payload(payload: Mapping[str, object]) -> TcpPoseTarget:
+    """Rebuild a ``TcpPoseTarget`` from a strict TCP_POSE payload."""
+    _require_exact_keys(payload, TCP_PAYLOAD_KEYS, "tcp pose payload")
+    for label in ("frame_id", "tip_link", "tcp_status"):
+        if not isinstance(payload[label], str) or not payload[label]:
+            raise OperationContractError(f"tcp pose payload {label} must be a string")
+    for label in ("runtime_model_sha256", "source_sha256"):
+        if not _is_sha256_digest(payload[label]):
+            raise OperationContractError(
+                f"tcp pose payload {label} must be a lowercase SHA-256 digest"
+            )
+    position = _require_finite_sequence(payload["position"], 3, "position")
+    orientation = _require_finite_sequence(
+        payload["orientation_xyzw"], 4, "orientation_xyzw"
+    )
+    tolerances = []
+    for label in ("position_tolerance_m", "orientation_tolerance_rad"):
+        value = payload[label]
+        if not _is_finite(value) or float(value) <= 0.0:
+            raise OperationContractError(
+                f"tcp pose payload {label} must be finite and positive, "
+                f"got {value!r}"
+            )
+        tolerances.append(float(value))
+    return TcpPoseTarget(
+        frame_id=str(payload["frame_id"]),
+        position=position,  # type: ignore[arg-type]
+        orientation_xyzw=orientation,  # type: ignore[arg-type]
+        position_tolerance_m=tolerances[0],
+        orientation_tolerance_rad=tolerances[1],
+        tip_link=str(payload["tip_link"]),
+        tcp_status=str(payload["tcp_status"]),
+        runtime_model_sha256=str(payload["runtime_model_sha256"]),
+        source_sha256=str(payload["source_sha256"]),
+    )
+
+
+def gripper_target_from_payload(payload: Mapping[str, object]) -> GripperTarget:
+    """Rebuild a ``GripperTarget`` from a strict GRIPPER_TARGET payload."""
+    _require_exact_keys(payload, GRIPPER_PAYLOAD_KEYS, "gripper payload")
+    scalars = []
+    for label in ("opening_m", "duration_s", "goal_tolerance"):
+        value = payload[label]
+        if not _is_finite(value):
+            raise OperationContractError(
+                f"gripper payload {label} must be a finite number, got {value!r}"
+            )
+        scalars.append(float(value))
+    window_document = payload["expected_opening_m"]
+    if not isinstance(window_document, (list, tuple)) or len(window_document) != 2:
+        raise OperationContractError(
+            "gripper payload expected_opening_m must be exactly two numbers"
+        )
+    if not all(_is_finite(value) for value in window_document):
+        raise OperationContractError(
+            "gripper payload expected_opening_m must carry only finite numbers"
+        )
+    low, high = (float(value) for value in window_document)
+    if low > high:
+        raise OperationContractError(
+            "gripper payload expected_opening_m must satisfy lo <= hi, "
+            f"got [{low}, {high}]"
+        )
+    return GripperTarget(
+        opening_m=scalars[0],
+        duration_s=scalars[1],
+        goal_tolerance=scalars[2],
+        expected_opening_m=(low, high),
+    )
+
+
+def scene_query_from_payload(payload: Mapping[str, object]) -> dict[str, object]:
+    """Normalize a strict SCENE_QUERY payload into its canonical selection."""
+    _require_exact_keys(payload, SCENE_QUERY_PAYLOAD_KEYS, "scene query payload")
+    ids_document = payload["brick_physical_instance_ids"]
+    if not isinstance(ids_document, (list, tuple)) or not ids_document:
+        raise OperationContractError(
+            "scene query payload brick_physical_instance_ids must be a "
+            "non-empty list of strings"
+        )
+    if not all(isinstance(value, str) and value for value in ids_document):
+        raise OperationContractError(
+            "scene query payload brick_physical_instance_ids must carry only "
+            "non-empty strings"
+        )
+    pairs_document = payload["connection_pairs"]
+    if not isinstance(pairs_document, (list, tuple)):
+        raise OperationContractError(
+            "scene query payload connection_pairs must be a list of "
+            "exactly-two-string lists"
+        )
+    pairs: list[list[str]] = []
+    for index, pair in enumerate(pairs_document):
+        if (
+            not isinstance(pair, (list, tuple))
+            or len(pair) != 2
+            or not all(isinstance(value, str) and value for value in pair)
+        ):
+            raise OperationContractError(
+                f"scene query payload connection_pairs[{index}] must be a "
+                "list of exactly two non-empty strings"
+            )
+        pairs.append([str(pair[0]), str(pair[1])])
+    include_gripper = payload["include_gripper"]
+    if not isinstance(include_gripper, bool):
+        raise OperationContractError(
+            "scene query payload include_gripper must be a boolean"
+        )
+    return {
+        "brick_physical_instance_ids": [str(value) for value in ids_document],
+        "connection_pairs": pairs,
+        "include_gripper": bool(include_gripper),
+    }
+
+
+def _planning_scene_box_from_payload(
+    box_document: object, index: int
+) -> object:
+    """Validate one serialized box and rebuild it through ``box_from_aabb``.
+
+    The exact-key, string, finiteness and digest checks reuse the frozen
+    planning-scene contract: ``box_from_aabb`` recomputes the canonical box
+    digest, so a tampered digest or coordinate pair is rejected here without
+    duplicating any geometry logic.
+    """
+    _require_exact_keys(
+        box_document, PLANNING_SCENE_BOX_KEYS, f"boxes[{index}]"
+    )
+    assert isinstance(box_document, Mapping)  # noqa: S101 - narrowed above
+    for label in ("object_id", "frame_id"):
+        value = box_document[label]
+        if not isinstance(value, str) or not value:
+            raise OperationContractError(
+                f"planning scene payload boxes[{index}].{label} must be a "
+                "non-empty string"
+            )
+    if not _is_sha256_digest(box_document["geometry_digest"]):
+        raise OperationContractError(
+            f"planning scene payload boxes[{index}].geometry_digest must be "
+            "a lowercase SHA-256 digest"
+        )
+    minimum = _require_finite_sequence(
+        box_document["minimum_m"], 3, f"boxes[{index}].minimum_m"
+    )
+    maximum = _require_finite_sequence(
+        box_document["maximum_m"], 3, f"boxes[{index}].maximum_m"
+    )
+    try:
+        return box_from_aabb(
+            object_id=str(box_document["object_id"]),
+            frame_id=str(box_document["frame_id"]),
+            minimum_m=minimum,  # type: ignore[arg-type]
+            maximum_m=maximum,  # type: ignore[arg-type]
+        )
+    except ValueError as error:
+        raise OperationContractError(
+            f"planning scene payload boxes[{index}] is not a valid "
+            f"axis-aligned box: {error}"
+        ) from error
+
+
+def planning_scene_update_from_payload(
+    payload: Mapping[str, object],
+) -> PlanningSceneUpdate:
+    """Re-validate a serialized planning-scene update and rebuild it.
+
+    The document must be the EXACT top-level shape emitted for a
+    :class:`rocobrick.planning_scene.PlanningSceneUpdate`; every box is
+    rebuilt through the frozen contract (which re-digests the geometry) and
+    the expected scene digest is re-derived with :func:`scene_digest`, so a
+    tampered claim can never pass.
+
+    Raises:
+        OperationContractError: On any exact-key, type, digest or
+            content mismatch.
+    """
+    _require_exact_keys(
+        payload, PLANNING_SCENE_PAYLOAD_KEYS, "planning scene payload"
+    )
+    assert isinstance(payload, Mapping)  # noqa: S101 - narrowed above
+    if payload["schema"] != PLANNING_SCENE_SCHEMA:
+        raise OperationContractError(
+            f"planning scene payload schema {payload['schema']!r} is not "
+            f"{PLANNING_SCENE_SCHEMA!r}"
+        )
+    scene_id = payload["scene_id"]
+    if not isinstance(scene_id, str) or not scene_id:
+        raise OperationContractError(
+            "planning scene payload scene_id must be a non-empty string"
+        )
+    expected_digest = payload["expected_scene_digest"]
+    if not _is_sha256_digest(expected_digest):
+        raise OperationContractError(
+            "planning scene payload expected_scene_digest must be a "
+            "lowercase SHA-256 digest"
+        )
+    boxes_document = payload["boxes"]
+    if not isinstance(boxes_document, (list, tuple)):
+        raise OperationContractError(
+            "planning scene payload boxes must be an array"
+        )
+    boxes = tuple(
+        _planning_scene_box_from_payload(box_document, index)
+        for index, box_document in enumerate(boxes_document)
+    )
+    pairs_document = payload["allowed_collision_pairs"]
+    if not isinstance(pairs_document, (list, tuple)):
+        raise OperationContractError(
+            "planning scene payload allowed_collision_pairs must be an array"
+        )
+    pairs: list[tuple[str, str]] = []
+    for index, pair in enumerate(pairs_document):
+        if (
+            not isinstance(pair, (list, tuple))
+            or len(pair) != 2
+            or not all(isinstance(value, str) and value for value in pair)
+        ):
+            raise OperationContractError(
+                f"planning scene payload allowed_collision_pairs[{index}] "
+                "must be a pair of non-empty strings"
+            )
+        pairs.append((str(pair[0]), str(pair[1])))
+    try:
+        update = PlanningSceneUpdate(
+            scene_id=scene_id,
+            boxes=boxes,  # type: ignore[arg-type]
+            expected_scene_digest=str(expected_digest),
+            allowed_collision_pairs=tuple(pairs),
+        )
+    except ValueError as error:
+        raise OperationContractError(
+            f"planning scene payload is not a valid scene update: {error}"
+        ) from error
+    if scene_digest(update) != str(expected_digest):
+        raise OperationContractError(
+            "planning scene payload expected_scene_digest does not match "
+            "the scene content"
+        )
+    return update
+
+
 def target_for_operation(
     operation: RuntimeOperation,
-) -> Union[JointTarget, Link6PoseTarget]:
+) -> Union[JointTarget, Link6PoseTarget, TcpPoseTarget, GripperTarget]:
     """Rebuild the admitted motion target carried by a motion operation.
 
-    READINESS carries no target (this raises). Motion payloads are rebuilt
-    through the formal dataclasses and re-checked with
-    ``strict_action_admission``; a rejected target raises
+    READINESS, APPLY_PLANNING_SCENE and SCENE_QUERY carry no motion target
+    (this raises). Motion payloads are rebuilt through the formal dataclasses
+    and re-checked with ``strict_action_admission``; a rejected target raises
     :class:`OperationRejected` so no inadmissible motion is ever sent.
 
     Raises:
@@ -405,12 +870,23 @@ def target_for_operation(
         raise OperationContractError(
             "a READINESS operation carries no motion target"
         )
-    if operation.kind is OperationKind.JOINT_TARGET:
-        target: JointTarget | Link6PoseTarget = joint_target_from_payload(
-            operation.payload
+    if operation.kind in (
+        OperationKind.APPLY_PLANNING_SCENE,
+        OperationKind.SCENE_QUERY,
+    ):
+        raise OperationContractError(
+            f"a {str(operation.kind.value)} operation carries no motion target"
         )
-    else:
+    if operation.kind is OperationKind.JOINT_TARGET:
+        target: JointTarget | Link6PoseTarget | TcpPoseTarget | GripperTarget = (
+            joint_target_from_payload(operation.payload)
+        )
+    elif operation.kind is OperationKind.LINK6_POSE:
         target = link6_pose_target_from_payload(operation.payload)
+    elif operation.kind is OperationKind.TCP_POSE:
+        target = tcp_pose_target_from_payload(operation.payload)
+    else:
+        target = gripper_target_from_payload(operation.payload)
     decision = strict_action_admission(target)
     if not decision.accepted:
         raise OperationRejected(
@@ -420,19 +896,32 @@ def target_for_operation(
 
 
 __all__ = [
+    "GRIPPER_PAYLOAD_KEYS",
     "OPERATION_KEYS",
     "OPERATION_RESULT_KEYS",
     "OPERATION_RESULT_SCHEMA",
     "OPERATION_SCHEMA",
+    "PLANNING_SCENE_BOX_KEYS",
+    "PLANNING_SCENE_PAYLOAD_KEYS",
+    "SCENE_QUERY_PAYLOAD_KEYS",
+    "TCP_PAYLOAD_KEYS",
     "OperationContractError",
     "OperationKind",
     "OperationRejected",
     "RuntimeOperation",
     "RuntimeOperationResult",
+    "gripper_operation",
+    "gripper_target_from_payload",
     "joint_operation",
     "joint_target_from_payload",
     "link6_pose_operation",
     "link6_pose_target_from_payload",
+    "planning_scene_operation",
+    "planning_scene_update_from_payload",
     "readiness_operation",
+    "scene_query_from_payload",
+    "scene_query_operation",
     "target_for_operation",
+    "tcp_pose_operation",
+    "tcp_pose_target_from_payload",
 ]

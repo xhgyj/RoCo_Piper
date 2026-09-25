@@ -15,6 +15,7 @@ from rocobrick.moveit_contract import (
     ARM_JOINT_NAMES,
     BASE_FRAME,
     EXECUTION_POSITION_LIMITS,
+    GRIPPER_OPENING_RANGE_M,
     LIMIT_EPSILON,
     MAX_ORIENTATION_TOLERANCE_RAD,
     MAX_POSITION_TOLERANCE_M,
@@ -26,6 +27,7 @@ from rocobrick.moveit_contract import (
     TCP_STATUS_CALIBRATED_PROJECT,
     TIP_LINK,
     AdmissionDecision,
+    GripperTarget,
     JointTarget,
     Link6PoseTarget,
     TcpPoseTarget,
@@ -296,8 +298,65 @@ def validate_tcp_pose_target(target: TcpPoseTarget) -> AdmissionDecision:
     )
 
 
+def validate_gripper_target(target: GripperTarget) -> AdmissionDecision:
+    """Admit a GripperTarget: finite bounds, opening inside the official range.
+
+    Collected-problem rejection mirroring :func:`validate_link6_pose_target`.
+    The expected-opening window is NOT required to contain ``opening_m``:
+    closing onto a placed brick legitimately commands less than the expected
+    contact width, so the window stays a claim the measured opening must land
+    in, never a constraint on the command.
+    """
+    problems: list[str] = []
+    lower, upper = GRIPPER_OPENING_RANGE_M
+    if not _is_finite(target.opening_m) or not (
+        lower <= float(target.opening_m) <= upper
+    ):
+        problems.append(
+            f"opening_m must be finite within [{lower}, {upper}], "
+            f"got {target.opening_m}"
+        )
+    if not _is_finite(target.duration_s) or float(target.duration_s) <= 0.0:
+        problems.append(
+            f"duration_s must be finite and positive, got {target.duration_s}"
+        )
+    if not _is_finite(target.goal_tolerance) or float(target.goal_tolerance) <= 0.0:
+        problems.append(
+            f"goal_tolerance must be finite and positive, got {target.goal_tolerance}"
+        )
+    window = (
+        tuple(target.expected_opening_m)
+        if isinstance(target.expected_opening_m, (list, tuple))
+        else ()
+    )
+    if (
+        len(window) != 2
+        or not all(_is_finite(value) for value in window)
+        or not (0.0 <= float(window[0]) <= float(window[1]) <= 0.1)
+    ):
+        problems.append(
+            "expected_opening_m must be exactly two finite values with "
+            f"0.0 <= lo <= hi <= 0.1, got {target.expected_opening_m}"
+        )
+    if problems:
+        return _rejected(
+            "gripper target rejected: " + "; ".join(problems),
+            {"problems": tuple(problems)},
+        )
+    return AdmissionDecision(
+        accepted=True,
+        reason="ok",
+        details={
+            "opening_m": float(target.opening_m),
+            "duration_s": float(target.duration_s),
+            "goal_tolerance": float(target.goal_tolerance),
+            "expected_opening_m": tuple(float(value) for value in window),
+        },
+    )
+
+
 def strict_action_admission(
-    target: JointTarget | Link6PoseTarget | TcpPoseTarget,
+    target: JointTarget | Link6PoseTarget | TcpPoseTarget | GripperTarget,
 ) -> AdmissionDecision:
     """Final pre-send admission; rejects unknown target types outright.
 
@@ -306,7 +365,9 @@ def strict_action_admission(
     :func:`rocobrick.moveit_requests.build_joint_target`, while unchanged
     joints may legitimately sit anywhere inside the limits (live P1 evidence).
     Pose targets (link6 and the project-calibrated TCP) are verified against
-    the full pose contract. Nothing is clamped or corrected.
+    the full pose contract. Gripper targets are checked against the official
+    logical-opening range and their window/consistency bounds. Nothing is
+    clamped or corrected.
     """
     if isinstance(target, JointTarget):
         return validate_joint_target(target)
@@ -314,6 +375,8 @@ def strict_action_admission(
         return validate_link6_pose_target(target)
     if isinstance(target, TcpPoseTarget):
         return validate_tcp_pose_target(target)
+    if isinstance(target, GripperTarget):
+        return validate_gripper_target(target)
     return _rejected(
         f"unsupported target type {type(target).__name__}",
         {"type": type(target).__name__},
@@ -322,6 +385,7 @@ def strict_action_admission(
 
 __all__ = [
     "strict_action_admission",
+    "validate_gripper_target",
     "validate_joint_target",
     "validate_link6_pose_target",
     "validate_tcp_pose_target",

@@ -17,6 +17,7 @@ from __future__ import annotations
 import ast
 import dataclasses
 import importlib
+import json
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import SimpleNamespace
@@ -25,7 +26,9 @@ import pytest
 
 from rocobrick.moveit_contract import (
     ACTION_ARM_FOLLOW,
+    ACTION_GRIPPER_FOLLOW,
     ARM_JOINT_NAMES,
+    GRIPPER_JOINT_NAMES,
     JOINT_NAMES,
     MOVE_GROUP_ACTION_CANDIDATES,
     REQUIRED_CONTROLLERS,
@@ -36,6 +39,7 @@ from rocobrick.moveit_contract import (
     TOPIC_ISAAC_JOINT_COMMAND,
     TOPIC_ISAAC_JOINT_STATES,
     TOPIC_JOINT_STATES,
+    GripperTarget,
     JointTarget,
     Link6PoseTarget,
 )
@@ -48,7 +52,9 @@ from rocobrick.moveit_execution import (
 from rocobrick.moveit_requests import build_joint_target, build_link6_pose_target
 from rocobrick.ros_moveit_executor import RosMoveItExecutor
 from rocobrick.ros_moveit_runtime import (
+    SCENE_STATE_SCHEMA,
     SERVICE_CALL_TIMEOUT_S,
+    SERVICE_SCENE_STATE,
     ReadinessSnapshot,
     RosMoveItFactories,
     RosMoveItRuntime,
@@ -305,6 +311,39 @@ FAKE_GOAL_STATUS = SimpleNamespace(
 )
 
 
+# Fake scene-state Trigger and gripper trajectory message classes.
+class FakeTriggerSrv:
+    class Request:
+        def __init__(self) -> None:
+            self.placeholder = True
+
+
+class FakeFollowJointTrajectoryGoal:
+    def __init__(self) -> None:
+        self.trajectory = SimpleNamespace(joint_names=[], points=[])
+        self.goal_tolerance: list = []
+
+
+class FakeJointTrajectoryPoint:
+    def __init__(self) -> None:
+        self.positions: list = []
+        self.time_from_start = None
+
+
+class FakeJointTolerance:
+    def __init__(self) -> None:
+        self.name = ""
+        self.position = 0.0
+        self.velocity = 0.0
+        self.acceleration = 0.0
+
+
+class FakeDuration:
+    def __init__(self) -> None:
+        self.sec = 0
+        self.nanosec = 0
+
+
 def fake_factories() -> RosMoveItFactories:
     return RosMoveItFactories(
         clock_type=lambda: FakeClockMsg,
@@ -327,6 +366,12 @@ def fake_factories() -> RosMoveItFactories:
             node, action_type, name
         ),
         goal_status_type=lambda: FAKE_GOAL_STATUS,
+        trigger_type=lambda: FakeTriggerSrv,
+        trigger_request_factory=lambda: FakeTriggerSrv.Request(),
+        follow_joint_trajectory_goal_factory=FakeFollowJointTrajectoryGoal,
+        joint_trajectory_point_factory=FakeJointTrajectoryPoint,
+        joint_tolerance_factory=FakeJointTolerance,
+        duration_factory=FakeDuration,
     )
 
 
@@ -338,8 +383,10 @@ class World:
     runtime: RosMoveItRuntime = None  # type: ignore[assignment]
     controllers: FakeServiceClient = None  # type: ignore[assignment]
     fk: FakeServiceClient = None  # type: ignore[assignment]
+    scene_state: FakeServiceClient = None  # type: ignore[assignment]
     arm: FakeActionClient = None  # type: ignore[assignment]
     move_group: FakeActionClient = None  # type: ignore[assignment]
+    gripper: FakeActionClient = None  # type: ignore[assignment]
 
 
 def make_world(*, fk_verifier=None) -> World:
@@ -370,8 +417,10 @@ def make_world(*, fk_verifier=None) -> World:
         runtime=runtime,
         controllers=node.service_clients[SERVICE_LIST_CONTROLLERS],
         fk=node.service_clients[SERVICE_COMPUTE_FK],
+        scene_state=node.service_clients[SERVICE_SCENE_STATE],
         arm=node.action_clients[ACTION_ARM_FOLLOW],
         move_group=node.action_clients[MOVE_GROUP_ACTION_CANDIDATES[0]],
+        gripper=node.action_clients[ACTION_GRIPPER_FOLLOW],
     )
 
 
@@ -640,16 +689,30 @@ def test_registration_wires_the_exact_topic_and_client_names():
         SERVICE_LIST_CONTROLLERS,
         SERVICE_PLAN,
         SERVICE_COMPUTE_FK,
+        SERVICE_SCENE_STATE,
     }
     assert set(world.node.action_clients) == {
         ACTION_ARM_FOLLOW,
         MOVE_GROUP_ACTION_CANDIDATES[0],
+        ACTION_GRIPPER_FOLLOW,
     }
     world.runtime.register_subscriptions()
     world.runtime.register_clients()
     assert len(world.node.subscriptions) == 4
-    assert len(world.node.service_clients) == 3
-    assert len(world.node.action_clients) == 2
+    assert len(world.node.service_clients) == 4
+    assert len(world.node.action_clients) == 3
+
+
+def test_scene_state_and_gripper_clients_are_not_readiness_gates():
+    """Both new clients register but stay outside the motion-readiness gates."""
+    world = make_world()
+    prime_ready(world)
+    world.scene_state.ready = False
+    world.gripper.server_ready = False
+    snapshot = world.runtime.readiness_snapshot()
+    assert snapshot.passed is True
+    assert snapshot.arm_action_ready is True
+    assert snapshot.move_group_action_ready is True
 
 
 # ----------------------------------------------------------- readiness snapshot
@@ -1156,6 +1219,220 @@ def test_send_link6_pose_rejects_inadmissible_targets_before_any_send(pose_targe
     assert world.move_group.goals == []
 
 
+# ------------------------------------------------- send: gripper execution
+
+
+def gripper_target(
+    *,
+    opening_m: float = 0.02,
+    duration_s: float = 1.0,
+    goal_tolerance: float = 0.005,
+    expected_opening_m: tuple[float, float] = (0.0, 0.03),
+) -> GripperTarget:
+    return GripperTarget(
+        opening_m=opening_m,
+        duration_s=duration_s,
+        goal_tolerance=goal_tolerance,
+        expected_opening_m=expected_opening_m,
+    )
+
+
+def script_gripper_terminal(
+    world: World, *, status: int, final_state=None
+) -> FakeGoalHandle:
+    handle = FakeGoalHandle()
+    world.events.append(lambda: world.gripper.pending.set(handle))
+    if final_state is not None:
+        world.events.append(
+            lambda: publish(
+                world.node, TOPIC_ISAAC_JOINT_STATES, FakeJointStateMsg(final_state)
+            )
+        )
+    world.events.append(
+        lambda: handle.result_future.set(
+            SimpleNamespace(status=status, result=SimpleNamespace())
+        )
+    )
+    return handle
+
+
+def test_send_gripper_builds_the_exact_two_point_goal():
+    world = make_world()
+    prime_ready(world)
+    script_gripper_terminal(
+        world,
+        status=FAKE_GOAL_STATUS.STATUS_SUCCEEDED,
+        final_state={**BASELINE, "gripper_joint1": 0.01, "gripper_joint2": -0.01},
+    )
+    target = gripper_target()
+    result = world.runtime.send_gripper(target, 20.0)
+    assert result.status is ExecutionStatus.SUCCEEDED
+    assert len(world.gripper.goals) == 1
+    goal = world.gripper.goals[0]
+    assert goal.trajectory.joint_names == list(GRIPPER_JOINT_NAMES)
+    points = goal.trajectory.points
+    assert len(points) == 2
+    # Point 0 is the measured state at t=0, point 1 the logical opening
+    # mapped onto the symmetric finger positions after duration_s.
+    assert points[0].positions == [
+        BASELINE["gripper_joint1"],
+        BASELINE["gripper_joint2"],
+    ]
+    assert points[0].time_from_start.sec == 0
+    assert points[0].time_from_start.nanosec == 0
+    assert points[1].positions == [0.01, -0.01]
+    assert points[1].time_from_start.sec == 1
+    assert [(item.name, item.position) for item in goal.goal_tolerance] == [
+        (name, target.goal_tolerance) for name in GRIPPER_JOINT_NAMES
+    ]
+
+
+def test_send_gripper_succeeds_on_an_aborted_contact_stall_within_window():
+    """A brick stall legitimately ABORTS; the measured window still passes."""
+    world = make_world()
+    prime_ready(world)
+    script_gripper_terminal(
+        world,
+        status=FAKE_GOAL_STATUS.STATUS_ABORTED,
+        final_state={**BASELINE, "gripper_joint1": 0.01, "gripper_joint2": -0.01},
+    )
+    result = world.runtime.send_gripper(gripper_target(), 20.0)
+    assert result.status is ExecutionStatus.SUCCEEDED
+    assert is_success(result) is True
+    assert result.details["action_status"] == "ABORTED"
+    assert result.details["measured_opening_m"] == pytest.approx(0.02)
+    assert result.details["commanded_opening_m"] == pytest.approx(0.02)
+    assert result.details["expected_opening_m"] == [0.0, 0.03]
+    assert result.final_errors["gripper_opening_m"] == pytest.approx(0.0, abs=1e-12)
+    assert result.planned_waypoints == 2
+    assert result.command_messages == 1
+
+
+def test_send_gripper_fails_when_the_measurement_leaves_the_window():
+    world = make_world()
+    prime_ready(world)
+    script_gripper_terminal(
+        world,
+        status=FAKE_GOAL_STATUS.STATUS_SUCCEEDED,
+        final_state={**BASELINE, "gripper_joint1": 0.045, "gripper_joint2": -0.045},
+    )
+    result = world.runtime.send_gripper(gripper_target(), 20.0)
+    assert result.status is ExecutionStatus.FAILED
+    assert is_success(result) is False
+    assert result.details["measured_opening_m"] == pytest.approx(0.09)
+    assert result.final_errors["gripper_opening_m"] == pytest.approx(0.07)
+    assert "outside the expected opening window" in result.details["error"]
+
+
+def test_send_gripper_fails_on_a_mimic_violation_without_faking():
+    world = make_world()
+    prime_ready(world)
+    script_gripper_terminal(
+        world,
+        status=FAKE_GOAL_STATUS.STATUS_SUCCEEDED,
+        final_state={**BASELINE, "gripper_joint1": 0.01},
+    )
+    result = world.runtime.send_gripper(gripper_target(), 20.0)
+    assert result.status is ExecutionStatus.FAILED
+    assert is_success(result) is False
+    assert result.details["measured_opening_m"] is None
+    assert result.final_errors["gripper_opening_m"] is None
+    assert "mimic relation" in result.details["measured_opening_error"]
+    assert "refusing to fake" in result.details["error"]
+
+
+def test_send_gripper_times_out_cancels_and_never_succeeds():
+    world = make_world()
+    prime_ready(world)
+    handle = FakeGoalHandle()
+    world.events.append(lambda: world.gripper.pending.set(handle))
+    result = world.runtime.send_gripper(gripper_target(), 0.5)
+    assert result.status is ExecutionStatus.TIMED_OUT
+    assert result.details["phase"] == "execution"
+    assert handle.cancel_calls == 1
+    assert result.details["cancel"]["attempted"] is True
+
+
+def test_send_gripper_rejects_inadmissible_targets_before_any_send():
+    world = make_world()
+    prime_ready(world)
+    invalid = gripper_target(opening_m=0.11)
+    result = world.runtime.send_gripper(invalid, 5.0)
+    assert result.status is ExecutionStatus.REJECTED
+    assert result.command_messages == 0
+    assert world.gripper.goals == []
+
+
+def test_send_gripper_refuses_motion_before_readiness():
+    world = make_world()
+    result = world.runtime.send_gripper(gripper_target(), 5.0)
+    assert result.status is ExecutionStatus.FAILED
+    assert "readiness" in result.details["error"]
+    assert world.gripper.goals == []
+
+
+def test_send_gripper_fails_without_a_start_state(monkeypatch):
+    world = make_world()
+    prime_ready(world)
+    # Readiness holds, but no finger state is observable at goal-build time.
+    monkeypatch.setattr(
+        world.runtime,
+        "readiness_snapshot",
+        lambda: ReadinessSnapshot(**dict.fromkeys(SNAPSHOT_FIELDS, True)),
+    )
+    monkeypatch.setattr(world.runtime, "latest_isaac_state", lambda: None)
+    script_gripper_terminal(world, status=FAKE_GOAL_STATUS.STATUS_SUCCEEDED)
+    result = world.runtime.send_gripper(gripper_target(), 5.0)
+    assert result.status is ExecutionStatus.FAILED
+    assert "start point cannot be built" in result.details["error"]
+    assert world.gripper.goals == []
+
+
+# ------------------------------------------------------------ scene state
+
+
+def test_query_scene_state_returns_the_parsed_document():
+    world = make_world()
+    document = {
+        "schema": SCENE_STATE_SCHEMA,
+        "sim_time_s": 3.25,
+        "bricks": {"brick-44": {"aabb_min": [0.0, 0.0, 0.0]}},
+        "connections": {"brick-44|brick-45": True},
+    }
+    world.scene_state.response = SimpleNamespace(message=json.dumps(document))
+    assert world.runtime.query_scene_state(5.0) == document
+    assert len(world.scene_state.requests) == 1
+
+
+def test_query_scene_state_rejects_a_wrong_schema():
+    world = make_world()
+    world.scene_state.response = SimpleNamespace(
+        message=json.dumps({"schema": "other-scene/v9"})
+    )
+    with pytest.raises(RuntimeError, match="schema"):
+        world.runtime.query_scene_state(5.0)
+
+
+def test_query_scene_state_rejects_a_non_json_message():
+    world = make_world()
+    world.scene_state.response = SimpleNamespace(message="definitely not json")
+    with pytest.raises(RuntimeError, match="JSON"):
+        world.runtime.query_scene_state(5.0)
+
+
+def test_query_scene_state_raises_when_the_client_is_unavailable():
+    world = make_world()
+    world.scene_state.ready = False
+    with pytest.raises(RuntimeError, match="not available"):
+        world.runtime.query_scene_state(5.0)
+
+
+def test_query_scene_state_raises_when_the_service_never_answers():
+    world = make_world()
+    with pytest.raises(RuntimeError, match="did not answer"):
+        world.runtime.query_scene_state(0.5)
+
+
 # ------------------------------------------------------------------- executor
 
 
@@ -1242,10 +1519,16 @@ def test_shutdown_destroys_every_registered_handle():
         ]
     )
     assert sorted(world.node.destroyed_clients) == sorted(
-        [SERVICE_LIST_CONTROLLERS, SERVICE_PLAN, SERVICE_COMPUTE_FK]
+        [
+            SERVICE_LIST_CONTROLLERS,
+            SERVICE_PLAN,
+            SERVICE_COMPUTE_FK,
+            SERVICE_SCENE_STATE,
+        ]
     )
     assert world.arm.destroyed is True
     assert world.move_group.destroyed is True
+    assert world.gripper.destroyed is True
     assert world.runtime.shutdown_errors == []
     snapshot = world.runtime.readiness_snapshot()
     assert snapshot.passed is False

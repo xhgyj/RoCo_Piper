@@ -21,6 +21,8 @@ class IsaacSceneConfig:
     workspace_position_m: tuple[float, float, float]
     workspace_orientation_wxyz: tuple[float, float, float, float]
     physics_hz: int
+    collision_filter_robot_id: str | None = None
+    collision_filter_instance_ids: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -31,6 +33,49 @@ class IsaacLoadedScene:
     measured_robots: Mapping[str, LoadedRobot]
     parts: Mapping[str, LoadedPart]
     topology_paths: Mapping[int, str]
+    collision_filter_pairs: tuple[tuple[str, str], ...] = ()
+
+
+def _apply_collision_filters(
+    stage: object,
+    *,
+    robot: RobotSpawnSpec,
+    part_paths: Mapping[str, str],
+    instance_ids: tuple[str, ...],
+) -> tuple[tuple[str, str], ...]:
+    """Filter only authorized target-brick/gripper collisions."""
+    if not instance_ids:
+        return ()
+    from pxr import Sdf, UsdPhysics
+
+    contact_links = ("gripper_base", "gripper_link1", "gripper_link2")
+    pairs: list[tuple[str, str]] = []
+    for instance_id in instance_ids:
+        part_path = part_paths.get(instance_id)
+        if not isinstance(part_path, str) or not part_path:
+            raise SceneBootstrapError(
+                f"collision filter target is not a loaded instance: {instance_id}"
+            )
+        part = stage.GetPrimAtPath(part_path)
+        if not part.IsValid():
+            raise SceneBootstrapError(
+                f"collision filter target prim is invalid: {part_path}"
+            )
+        for link in contact_links:
+            link_path = f"{robot.prim_path}/{link}"
+            gripper = stage.GetPrimAtPath(link_path)
+            if not gripper.IsValid():
+                raise SceneBootstrapError(
+                    f"collision filter gripper link prim is invalid: {link_path}"
+                )
+            UsdPhysics.FilteredPairsAPI.Apply(gripper).CreateFilteredPairsRel().AddTarget(
+                Sdf.Path(part_path)
+            )
+            UsdPhysics.FilteredPairsAPI.Apply(part).CreateFilteredPairsRel().AddTarget(
+                Sdf.Path(link_path)
+            )
+            pairs.append((link_path, part_path))
+    return tuple(pairs)
 
 
 def _xyzw(wxyz: object) -> tuple[float, float, float, float]:
@@ -130,6 +175,30 @@ async def load_verified_scene(
             if not stage.GetPrimAtPath(sensor_path).IsValid():
                 raise SceneBootstrapError(f"configured sensor missing for {robot_id}: {sensor_path}")
 
+    collision_filter_pairs: tuple[tuple[str, str], ...] = ()
+    if config.collision_filter_instance_ids:
+        robot_id = config.collision_filter_robot_id
+        if not isinstance(robot_id, str) or robot_id not in robots:
+            raise SceneBootstrapError(
+                "collision filter requires a configured executor robot"
+            )
+        pre_filter_paths = {**initial_paths, **loose_paths}
+        instance_paths = {
+            instance_id: pre_filter_paths[topology_id]
+            for topology_id, instance_id in topology.instance_by_topology_id.items()
+            if topology_id in pre_filter_paths
+        }
+        collision_filter_pairs = _apply_collision_filters(
+            stage,
+            robot=robots[robot_id],
+            part_paths={
+                instance_id: instance_paths[instance_id]
+                for instance_id in config.collision_filter_instance_ids
+                if instance_id in instance_paths
+            },
+            instance_ids=config.collision_filter_instance_ids,
+        )
+
     await world.reset_async()
     await world.play_async()
     for _ in range(max(2, config.physics_hz // 10)):
@@ -167,5 +236,6 @@ async def load_verified_scene(
                 f"initial connection missing: {connection['stud_id']} -> {connection['hole_id']}"
             )
     return IsaacLoadedScene(
-        app, world, articulations, measured_robots, parts, topology_paths
+        app, world, articulations, measured_robots, parts, topology_paths,
+        collision_filter_pairs,
     )

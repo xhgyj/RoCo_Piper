@@ -537,8 +537,10 @@ def _validate_bound_scene_object(item: object, index: int) -> None:
 
 def build_planning_scene_update(
     bound_objects: Sequence[BoundSceneObject],
+    *,
+    allowed_collision_pairs: Sequence[tuple[str, str]] = (),
 ) -> PlanningSceneUpdate:
-    """Build a deterministic planning-scene update from allowed objects."""
+    """Build a deterministic scene update with explicit contact allowances."""
     items = _sequence(bound_objects, "bound_objects")
     if not items:
         _fail("bound_objects", "must be non-empty")
@@ -556,16 +558,21 @@ def build_planning_scene_update(
         _fail("bound_objects", "must already be strictly ordered by physical_instance_id")
 
     boxes = tuple(item.object.aabb for item in items)
+    canonical_pairs = tuple(
+        sorted((str(first), str(second)) for first, second in allowed_collision_pairs)
+    )
     placeholder = PlanningSceneUpdate(
         scene_id=snapshot.scene_id,
         boxes=boxes,
         expected_scene_digest="0" * 64,
+        allowed_collision_pairs=canonical_pairs,
     )
     expected_scene_digest = scene_digest(placeholder)
     return PlanningSceneUpdate(
         scene_id=snapshot.scene_id,
         boxes=boxes,
         expected_scene_digest=expected_scene_digest,
+        allowed_collision_pairs=canonical_pairs,
     )
 
 

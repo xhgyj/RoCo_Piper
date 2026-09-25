@@ -21,6 +21,7 @@ import pytest
 
 from rocobrick.admission import (
     strict_action_admission,
+    validate_gripper_target,
     validate_joint_target,
     validate_link6_pose_target,
     validate_trajectory_waypoints,
@@ -34,10 +35,12 @@ from rocobrick.feedback import (
 )
 from rocobrick.moveit_contract import (
     ACTION_ARM_FOLLOW,
+    ACTION_GRIPPER_FOLLOW,
     ARM_JOINT_NAMES,
     BASE_FRAME,
     EXECUTION_POSITION_LIMITS,
     GRIPPER_JOINT_NAMES,
+    GRIPPER_OPENING_RANGE_M,
     JOINT_NAMES,
     LIMIT_EPSILON,
     MAX_ORIENTATION_TOLERANCE_RAD,
@@ -55,6 +58,7 @@ from rocobrick.moveit_contract import (
     TOPIC_ISAAC_JOINT_STATES,
     TOPIC_JOINT_STATES,
     AdmissionDecision,
+    GripperTarget,
     JointTarget,
     Link6PoseTarget,
 )
@@ -607,6 +611,74 @@ def test_strict_action_admission_rejects_out_of_bounds_before_any_send():
     decision = strict_action_admission(outside)
     assert decision.accepted is False
     assert decision.details["excess"]["joint1"] == pytest.approx(9.0 - 2.6179938)
+
+
+def gripper_target(**overrides) -> GripperTarget:
+    values = dict(
+        opening_m=0.02,
+        duration_s=1.0,
+        goal_tolerance=0.005,
+        expected_opening_m=(0.0, 0.03),
+    )
+    values.update(overrides)
+    return GripperTarget(**values)
+
+
+def test_gripper_contract_constants_pin_the_official_opening_range():
+    assert ACTION_GRIPPER_FOLLOW == "/gripper_controller/follow_joint_trajectory"
+    assert GRIPPER_OPENING_RANGE_M == (0.0, 0.1)
+
+
+def test_validate_gripper_target_accepts_the_canonical_target():
+    decision = validate_gripper_target(gripper_target())
+    assert decision.accepted is True
+    assert decision.reason == "ok"
+    assert decision.details["opening_m"] == pytest.approx(0.02)
+    # The exact bounds of the official range admit inclusive.
+    assert validate_gripper_target(gripper_target(opening_m=0.0)).accepted is True
+    assert validate_gripper_target(gripper_target(opening_m=0.1)).accepted is True
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"opening_m": 0.11},
+        {"opening_m": -0.001},
+        {"opening_m": float("nan")},
+        {"opening_m": float("inf")},
+        {"duration_s": 0.0},
+        {"duration_s": -1.0},
+        {"duration_s": float("nan")},
+        {"goal_tolerance": 0.0},
+        {"goal_tolerance": -0.005},
+        {"goal_tolerance": float("inf")},
+        {"expected_opening_m": (0.05, 0.02)},
+        {"expected_opening_m": (-0.01, 0.02)},
+        {"expected_opening_m": (0.0, 0.11)},
+        {"expected_opening_m": (0.01,)},
+        {"expected_opening_m": (0.01, 0.02, 0.03)},
+        {"expected_opening_m": (0.0, float("nan"))},
+    ],
+)
+def test_validate_gripper_target_rejects_bad_bounds(overrides):
+    decision = validate_gripper_target(gripper_target(**overrides))
+    assert decision.accepted is False
+    assert decision.details["problems"]
+
+
+def test_validate_gripper_target_does_not_require_the_window_to_contain_opening():
+    """Closing onto a brick commands less than the expected contact width."""
+    decision = validate_gripper_target(
+        gripper_target(opening_m=0.0, expected_opening_m=(0.028, 0.032))
+    )
+    assert decision.accepted is True
+
+
+def test_strict_action_admission_dispatches_gripper_targets():
+    assert strict_action_admission(gripper_target()).accepted is True
+    rejected = strict_action_admission(gripper_target(opening_m=0.5))
+    assert rejected.accepted is False
+    assert "opening_m" in rejected.reason
 
 
 # ------------------------------------------------------------------- readiness

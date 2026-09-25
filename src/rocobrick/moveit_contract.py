@@ -53,6 +53,10 @@ TOPIC_ISAAC_JOINT_COMMAND: str = "/isaac_joint_command"
 # Actions and services (live-resolved names recorded in the P1 evidence).
 MOVE_GROUP_ACTION_CANDIDATES: tuple[str, ...] = ("/move_action", "/move_group")
 ACTION_ARM_FOLLOW: str = "/arm_controller/follow_joint_trajectory"
+# Gripper execution contract: the logical opening [0.0, 0.1] m maps onto the
+# symmetric finger positions via rocobrick.gripper.logical_gripper_to_fingers.
+ACTION_GRIPPER_FOLLOW: str = "/gripper_controller/follow_joint_trajectory"
+GRIPPER_OPENING_RANGE_M: tuple[float, float] = (0.0, 0.1)
 SERVICE_LIST_CONTROLLERS: str = "/controller_manager/list_controllers"
 SERVICE_PLAN: str = "/plan_kinematic_path"
 SERVICE_COMPUTE_FK: str = "/compute_fk"
@@ -148,6 +152,16 @@ class TcpPoseTarget:
     tcp_status: str = TCP_STATUS_CALIBRATED_PROJECT
     runtime_model_sha256: str = field(kw_only=True)
     source_sha256: str = field(kw_only=True)
+
+
+@dataclass(frozen=True)
+class GripperTarget:
+    """Logical gripper opening goal executed as a two-point finger trajectory."""
+
+    opening_m: float
+    duration_s: float
+    goal_tolerance: float
+    expected_opening_m: tuple[float, float]
 
 
 @dataclass(frozen=True)

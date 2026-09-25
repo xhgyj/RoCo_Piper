@@ -10,6 +10,8 @@ from rocobrick.compat import StrEnum
 
 class SkillType(StrEnum):
     PICK = "PICK"
+    TRANSIT = "TRANSIT"
+    WAIT = "WAIT"
     HANDOVER = "HANDOVER"
     PLACE_DOWN = "PLACE_DOWN"
     SUPPORT_BOTTOM = "SUPPORT_BOTTOM"

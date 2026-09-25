@@ -67,11 +67,16 @@ MODE_B_FORBIDDEN_MODULES = {"socket", "grpc", "zmq"}
 def bridge_module():
     """Import the bridge module without booting isaacsim, omni, or rclpy.
 
+    The module is registered in ``sys.modules`` before execution because the
+    bridge's frozen value types are dataclasses and dataclasses resolve their
+    postponed string annotations through ``sys.modules``.
+
     Returns:
         The imported bridge module.
     """
     spec = importlib.util.spec_from_file_location("p05_host_bridge", BRIDGE_PATH)
     module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
     spec.loader.exec_module(module)
     return module
 
@@ -258,7 +263,7 @@ def test_bridge_extension_never_enabled(bridge_source: str) -> None:
     ):
         assert token not in bridge_source, token
     assert "import rclpy" in bridge_source
-    assert "rclpy.init()" in bridge_source
+    assert "rclpy.init(signal_handler_options=SignalHandlerOptions.NO)" in bridge_source
 
 
 def test_run_bridge_pins_disabled_extension_and_bundled_rclpy(
@@ -324,21 +329,61 @@ def test_joint_state_message_fields(bridge_source: str) -> None:
     assert "get_joint_positions()" in bridge_source
 
 
-def test_headless_simulation_app(bridge_tree) -> None:
-    """SimulationApp must be constructed headless and only inside run_bridge."""
+def test_kit_child_regime_without_simulation_app(
+    bridge_module, bridge_tree, bridge_source: str
+) -> None:
+    """The bridge must run only inside the Kit child regime.
+
+    SimulationApp must never be constructed (its standalone regime segfaults
+    inside BrickSim scene loading; the bricksim launcher regime does not).
+    run_bridge must fail closed outside the Kit child regime, the Kit launch
+    argv must disable the ros2 bridge extension and re-exec this exact file
+    via --exec, and no UI may be imported.
+    """
     calls = [
         node
         for node in ast.walk(bridge_tree)
         if isinstance(node, ast.Call)
         and getattr(node.func, "id", "") == "SimulationApp"
     ]
-    assert len(calls) == 1
-    settings = calls[0].args[0]
-    keys = {
-        key.value: value.value for key, value in zip(settings.keys, settings.values)
-    }
-    assert keys.get("headless") is True
+    assert calls == []
     assert "omni.ui" not in ast.dump(bridge_tree)
+    start = bridge_source.index("def run_bridge")
+    end = bridge_source.index("def write_evidence")
+    run_body = bridge_source[start:end]
+    assert "if not _running_inside_kit():" in run_body
+    assert "must run inside the Kit child regime" in run_body
+    args = bridge_module.parse_args(["--evidence-out", "/tmp/e.json"])
+    kit_argv = bridge_module._kit_launch_argv(args)
+    assert kit_argv[0] == "isaacsim.exp.full"
+    assert kit_argv[kit_argv.index("--disable") + 1] == "isaacsim.ros2.bridge"
+    assert "--/app/content/emptyStageOnStart=false" in kit_argv
+    exec_index = kit_argv.index("--exec")
+    assert kit_argv[exec_index + 1].split()[0] == str(bridge_module.BRIDGE_FILE)
+
+
+def test_kit_launch_argv_round_trips_every_argument(bridge_module) -> None:
+    """The rebuilt bridge argv must parse back into the identical arguments."""
+    base = [
+        "--max-steps", "600", "--time-limit", "180", "--ready-timeout", "90",
+        "--hold-steps", "60", "--hold-seconds", "2.0",
+        "--evidence-out", "/tmp/e.json",
+        "--scene-manifest", "/tmp/m.json", "--scene-snapshot-out", "/tmp/s.json",
+        "--host-instance-id", "repro-001",
+        "--plan", "/tmp/plan.json", "--config", "/tmp/config.json",
+    ]
+    parsed = bridge_module.parse_args(base)
+    rebuilt = bridge_module.parse_args(bridge_module._argv_from_args(parsed))
+    for field in (
+        "max_steps", "time_limit", "ready_timeout", "hold_steps", "hold_seconds",
+        "evidence_out", "scene_manifest", "scene_snapshot_out",
+        "host_instance_id", "plan", "config",
+    ):
+        assert getattr(rebuilt, field) == getattr(parsed, field)
+    minimal = bridge_module.parse_args(["--evidence-out", "/tmp/e.json"])
+    argv = bridge_module._argv_from_args(minimal)
+    assert "--scene-manifest" not in argv
+    assert "--plan" not in argv
 
 
 def test_run_is_bounded(bridge_module, bridge_tree) -> None:
@@ -436,7 +481,7 @@ def test_orderly_cleanup_ros_first(bridge_tree, bridge_source: str) -> None:
         for node in ast.walk(bridge_tree)
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
     }
-    assert {"destroy_node", "shutdown", "stop", "close"} <= calls
+    assert {"destroy_node", "shutdown", "stop"} <= calls
     has_finally = any(
         node.finalbody for node in ast.walk(bridge_tree) if isinstance(node, ast.Try)
     )
@@ -446,10 +491,10 @@ def test_orderly_cleanup_ros_first(bridge_tree, bridge_source: str) -> None:
     shutdown_body = bridge_source[start:end]
     order_ok = (
         shutdown_body.index("node.destroy_node()")
-        < shutdown_body.index("rclpy.shutdown()")
+        < shutdown_body.index("try_shutdown")
         < shutdown_body.index("world.stop()")
         < shutdown_body.index("get_timeline_interface().stop()")
-        < shutdown_body.index("self.app.close()")
+        < shutdown_body.index("get_app().shutdown()")
     )
     assert order_ok, "cleanup order must be rclpy, world, timeline, app"
     evidence_first = bridge_source.index("finally:")
@@ -462,18 +507,12 @@ def test_orderly_cleanup_ros_first(bridge_tree, bridge_source: str) -> None:
 def test_passed_protocol_survives_kit_fast_shutdown(
     bridge_source: str, bridge_module
 ) -> None:
-    """passed must be persisted progressively and tolerate Kit dying in close.
-
-    Kit fastShutdown terminates the process inside ``app.close()`` without
-    returning, so the evidence protocol flushes ``app_close_initiated``
-    BEFORE the call and recomputes ``passed`` on every flush; the final
-    post-shutdown write only happens when close() actually returns.
-    """
+    """passed persists progressively and uses Kit's supported shutdown API."""
     shutdown_start = bridge_source.index("def shutdown")
     shutdown_end = bridge_source.index("def parse_args")
     shutdown_body = bridge_source[shutdown_start:shutdown_end]
     assert shutdown_body.index('status["app_close_initiated"] = True') < (
-        shutdown_body.index("self.app.close()")
+        shutdown_body.index("                get_app().shutdown()")
     )
     assert (
         'self.evidence["passed"] = evaluate_passed(self.evidence)'

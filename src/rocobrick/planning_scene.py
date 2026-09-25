@@ -24,6 +24,7 @@ SCHEMA: str = "rocobrick-planning-scene-update/v1"
 # Canonical identity tags hashed into the digests (stable contract versions).
 _BOX_IDENTITY_TAG: str = "rocobrick-planning-scene-box/v1"
 _SCENE_IDENTITY_TAG: str = "rocobrick-planning-scene-digest/v1"
+_ALLOWED_COLLISION_PAIR_TAG: str = "rocobrick-planning-scene-allowed-collision-pair/v1"
 
 
 def _sha256_text(text: str) -> str:
@@ -94,17 +95,17 @@ def box_geometry_digest(
 
 
 def scene_digest(update: PlanningSceneUpdate) -> str:
-    """Deterministic SHA-256 over the canonical whole-scene identity.
-
-    Hashes the schema, scene id, and the geometry digest of every box in
-    tuple order, so the expected digest of an update pins its exact content.
-    """
+    """Deterministic SHA-256 over boxes and explicit contact allowances."""
     identity = "\n".join(
         (
             _SCENE_IDENTITY_TAG,
             f"schema={update.schema}",
             f"scene_id={update.scene_id}",
             *[f"box={box.geometry_digest}" for box in update.boxes],
+            *[
+                f"allowed_collision_pair={first}|{second}"
+                for first, second in update.allowed_collision_pairs
+            ],
         )
     )
     return _sha256_text(identity)
@@ -212,6 +213,7 @@ class PlanningSceneUpdate:
     scene_id: str
     boxes: tuple[AxisAlignedBox, ...]
     expected_scene_digest: str
+    allowed_collision_pairs: tuple[tuple[str, str], ...] = ()
     schema: str = SCHEMA
 
     def __post_init__(self) -> None:
@@ -225,6 +227,25 @@ class PlanningSceneUpdate:
             if not isinstance(box, AxisAlignedBox):
                 raise ValueError(f"boxes[{index}] must be an AxisAlignedBox")
         object.__setattr__(self, "boxes", boxes)
+        pairs = tuple(
+            (str(first), str(second))
+            for first, second in self.allowed_collision_pairs
+        )
+        if any(
+            not first
+            or not second
+            or first >= second
+            for first, second in pairs
+        ):
+            raise ValueError(
+                "allowed_collision_pairs must contain canonical non-empty "
+                "strictly ordered string pairs"
+            )
+        if len(set(pairs)) != len(pairs) or tuple(sorted(pairs)) != pairs:
+            raise ValueError(
+                "allowed_collision_pairs must be unique and lexicographically ordered"
+            )
+        object.__setattr__(self, "allowed_collision_pairs", pairs)
         if not _is_sha256(self.expected_scene_digest):
             raise ValueError(
                 "expected_scene_digest must be a lowercase SHA-256 digest"

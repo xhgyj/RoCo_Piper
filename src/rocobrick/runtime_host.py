@@ -32,6 +32,8 @@ class LoadedRuntimeHost:
     def parts(self): return self.scene.parts
     @property
     def topology_paths(self): return self.scene.topology_paths
+    @property
+    def collision_filter_pairs(self): return self.scene.collision_filter_pairs
 
     def close(self) -> None:
         if getattr(self.app, "_rocobrick_runtime_host_closed", False):

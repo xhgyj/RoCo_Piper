@@ -48,6 +48,8 @@ def build_runtime_host_inputs(
     config: Mapping[str, object],
     *,
     config_dir: Path,
+    collision_filter_robot_id: str | None = None,
+    collision_filter_instance_ids: tuple[str, ...] = (),
 ) -> RuntimeHostInputs:
     """Build BrickSim topology and Isaac spawn inputs from validated facts.
 
@@ -114,6 +116,22 @@ def build_runtime_host_inputs(
         )
     if set(robots) != set(plan.robots):
         raise RuntimeHostInputError(f"robot config does not exactly match plan robots: {sorted(robots)}")
+    if collision_filter_robot_id is not None and collision_filter_robot_id not in robots:
+        raise RuntimeHostInputError(
+            f"collision filter robot is not configured: {collision_filter_robot_id}"
+        )
+    if len(set(collision_filter_instance_ids)) != len(collision_filter_instance_ids):
+        raise RuntimeHostInputError("collision filter instance ids must be unique")
+    if any(type(item) is not str or not item for item in collision_filter_instance_ids):
+        raise RuntimeHostInputError("collision filter instance ids must be non-empty strings")
+    known_instance_ids = set(plan.goal_parts)
+    unknown_filter_ids = sorted(set(collision_filter_instance_ids) - known_instance_ids)
+    if unknown_filter_ids:
+        raise RuntimeHostInputError(
+            f"collision filter instances are absent from plan goal parts: {unknown_filter_ids}"
+        )
+    if collision_filter_instance_ids and collision_filter_robot_id is None:
+        raise RuntimeHostInputError("collision filter instances require a robot id")
 
     env = _mapping(config.get("Env_Config"), "Env_Config")
     storage = _mapping(env.get("Storage_Config"), "Env_Config.Storage_Config")
@@ -128,5 +146,7 @@ def build_runtime_host_inputs(
         _seq(storage.get("Position"), "workspace position", 3),
         _seq(storage.get("Orientation"), "workspace orientation", 4),
         60,
+        collision_filter_robot_id,
+        tuple(collision_filter_instance_ids),
     )
     return RuntimeHostInputs(topology, MappingProxyType(dict(robots)), scene_config)
