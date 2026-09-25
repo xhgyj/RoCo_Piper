@@ -22,30 +22,48 @@ contract libraries and a future execution backend. Every invocation:
    on a plan whose gates all pass reports ``PREFLIGHT_ONLY`` with exit code
    0. No ROS, Isaac, Docker, GPU, MoveIt action, or motion is ever started
    or sent.
-6. With the INTERNAL/advanced ``--operation REQUEST_JSON`` bridge (until R5),
-   the same immutable gates run FIRST; only then is the formal R4.2 runtime
+6. With the INTERNAL/advanced ``--operation REQUEST_JSON`` bridge, the same
+   immutable gates run FIRST; only then is the formal R4.2 runtime
    session (:class:`rocobrick.runtime_session.IsaacMoveItSession`) started,
-   the operation (JOINT_TARGET or LINK6_POSE only, strictly admitted) is
+   the operation (JOINT_TARGET, LINK6_POSE, TCP_POSE, GRIPPER_TARGET,
+   APPLY_PLANNING_SCENE or SCENE_QUERY, strictly admitted) is
    executed against the live stack, and the session is stopped with cleanup
    evidence. Terminal statuses: ``RUNTIME_START_FAILED`` (8),
    ``OPERATION_REJECTED`` (9), ``EXECUTION_FAILED`` (10), ``EXECUTED`` (0,
    only when the operation passed AND the cleanup passed). This path never
    infers an example1 STAP metric target, and the runtime lifecycle evidence
    plus the operation result are linked from the run result document.
-7. Re-hashes the original input files from disk after all phases — including
+7. With the INTERNAL/advanced ``--skill-request REQUEST_JSON`` bridge the
+   same gates and the same TCP authorization run FIRST; only then is one
+   READY runtime session driven through the generic skill programs
+   (TRANSIT / WAIT / PICK steps) by
+   :class:`rocobrick.session_phase_backend.SessionPhaseBackend` over
+   :func:`rocobrick.skill_execution.execute_skill`. The scene snapshot
+   artifact written by the session at start is turned into the frozen
+   planning-scene update, every skill step's phase operations land as
+   request/result documents in the run directory, and the session is
+   stopped with cleanup evidence. Terminal statuses mirror the operation
+   bridge: ``INVALID_INPUT`` (2) for a malformed request, ``UNRESOLVED_TCP``
+   (4), ``RUNTIME_START_FAILED`` (8), ``OPERATION_REJECTED`` (9) when a
+   phase operation was rejected before motion, ``EXECUTION_FAILED`` (10),
+   and ``EXECUTED`` (0, only when every step ended without a FAILED phase
+   AND the cleanup passed).
+8. Re-hashes the original input files from disk after all phases — including
    after the runtime — and fails with ``INPUT_MUTATED`` if any digest changed
    (IMMUTABILITY).
 
 The program is offline and pure apart from its evidence directory and the
-explicit ``--operation`` runtime bridge: without an operation it imports no
-runtime adapter module, and it writes evidence (input copies, phase events,
-``preflight.json``, and ``result.json``) only inside its own run directory.
-Exactly one final JSON line is printed to stdout; diagnostics go to stderr.
+explicit ``--operation`` / ``--skill-request`` runtime bridges: without one
+of them it imports no runtime adapter module, and it writes evidence (input
+copies, phase events, ``preflight.json``, and ``result.json``) only inside
+its own run directory. Exactly one final JSON line is printed to stdout;
+diagnostics go to stderr.
 """
 
 from __future__ import annotations
 
 import argparse
+import asyncio
 import json
 import re
 import sys
@@ -55,6 +73,7 @@ from datetime import UTC, datetime
 from hashlib import sha256
 from pathlib import Path
 from traceback import format_exc
+from typing import TYPE_CHECKING
 from uuid import uuid4
 
 from rocobrick.compat import StrEnum
@@ -77,10 +96,23 @@ from rocobrick.tcp_contract import (
     assess_piper_l_tcp,
     require_resolved_tcp,
 )
+from rocobrick.models import SkillType
+from rocobrick.robot_operation_plan import (
+    RobotOperationPlanError,
+    parse_robot_operation_plan,
+)
 
 RESULT_SCHEMA = "rocobrick-piper-run-result/v1"
 PREFLIGHT_SCHEMA = "rocobrick-piper-run-preflight/v1"
 TCP_ARTIFACT_SCHEMA = "rocobrick-piper-l-tcp-binding-contract/v1"
+SKILL_REQUEST_SCHEMA = "rocobrick-skill-request/v1"
+SKILL_REQUEST_TOP_KEYS = frozenset({"schema", "robot_id", "skill_params_path", "steps"})
+SKILL_STEP_KEYS = frozenset({"skill", "physical_instance_id"})
+SKILL_STEP_NAMES = frozenset({"TRANSIT", "WAIT", "PICK"})
+SKILL_OPERATION_TIMEOUT_S = 180.0
+MANIFEST_SCHEMA = "rocobrick-scene-snapshot-manifest/v1"
+
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 TCP_ARTIFACT = (
     REPO_ROOT / "artifacts" / "model-audit" / "piper_l_tcp_binding_contract.json"
@@ -184,9 +216,12 @@ class _Arguments:
     run_dir: Path | None
     preflight_only: bool
     operation_path: Path | None = None
+    skill_request_path: Path | None = None
+    robot_operation_plan_path: Path | None = None
     scene_manifest: Path | None = None
     scene_snapshot_out: Path | None = None
     host_instance_id: str | None = None
+    config_path: Path | None = None
 
 
 @dataclass(frozen=True)
@@ -282,16 +317,43 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--scene-manifest", type=Path, default=None)
     parser.add_argument("--scene-snapshot-out", type=Path, default=None)
     parser.add_argument("--host-instance-id", default=None)
+    parser.add_argument("--config", type=Path, default=None, metavar="USER_CONFIG_JSON")
     parser.add_argument(
         "--operation",
         default=None,
         type=Path,
         metavar="REQUEST_JSON",
         help=(
-            "INTERNAL/advanced bridge until R5: a strict RuntimeOperation "
-            "request (JOINT_TARGET or LINK6_POSE) executed against the live "
+            "INTERNAL/advanced bridge: a strict RuntimeOperation request "
+            "(JOINT_TARGET, LINK6_POSE, TCP_POSE, GRIPPER_TARGET, "
+            "APPLY_PLANNING_SCENE or SCENE_QUERY) executed against the live "
             "Isaac/MoveIt runtime session after every gate passes; cannot be "
             "combined with --preflight-only"
+        ),
+    )
+    parser.add_argument(
+        "--skill-request",
+        default=None,
+        type=Path,
+        dest="skill_request",
+        metavar="REQUEST_JSON",
+        help=(
+            "INTERNAL/advanced bridge: a strict rocobrick-skill-request/v1 "
+            "document (TRANSIT / WAIT / PICK steps) executed against the "
+            "live Isaac/MoveIt runtime session after every gate and the TCP "
+            "authorization pass; requires the full scene option group; "
+            "cannot be combined with --operation or --preflight-only"
+        ),
+    )
+    parser.add_argument(
+        "--robot-operation-plan",
+        default=None,
+        type=Path,
+        dest="robot_operation_plan",
+        metavar="PLAN_JSON",
+        help=(
+            "external robot-operation-plan/v1 document; it is validated "
+            "against the read-only assembly-plan/v2 binding"
         ),
     )
     return parser
@@ -550,7 +612,13 @@ def _rederive_tcp(tcp_record: dict[str, object]) -> TcpContract:
     return contract
 
 
-def _create_session(session_dir: Path, args: "_Arguments" | None = None):
+def _create_session(
+    session_dir: Path,
+    args: "_Arguments" | None = None,
+    *,
+    collision_filter_robot_id: str | None = None,
+    collision_filter_instance_ids: tuple[str, ...] = (),
+):
     """Create the R4.2 runtime session (injection seam for offline tests).
 
     The production construction is deliberately trivial: the real Isaac/
@@ -576,97 +644,42 @@ def _create_session(session_dir: Path, args: "_Arguments" | None = None):
         scene_manifest=args.scene_manifest if args is not None else None,
         scene_snapshot_out=args.scene_snapshot_out if args is not None else None,
         host_instance_id=args.host_instance_id if args is not None else None,
+        plan_path=args.plan_path if args is not None else None,
+        config_path=args.config_path if args is not None else None,
+        collision_filter_robot_id=collision_filter_robot_id,
+        collision_filter_instance_ids=collision_filter_instance_ids,
     )
     return IsaacMoveItSession(
         config, runner=SubprocessRunner(), session_dir=session_dir
     )
 
 
-def _runtime_operation_phase(
+def _authorize_tcp_dispatch(
     args: "_Arguments",
     record: dict[str, object],
     recorder: EvidenceRecorder,
     contract: TcpContract | None = None,
-) -> tuple[RunStatus, str] | None:
-    """Start the runtime session, execute the operation, and stop cleanly.
+) -> tuple[str | None, str | None] | tuple[RunStatus, str]:
+    """Authorize calibrated-TCP dispatch from the verified binding record.
 
-    Every immutable gate has already passed when this runs. The operation
-    document is validated strictly and strictly admitted BEFORE any session
-    exists (a rejection therefore starts zero processes). Runtime lifecycle
-    and operation evidence are appended as ``runtime_start`` / ``operation`` /
-    ``runtime_stop`` events and linked from the record.
+    Shared by the ``--operation`` and ``--skill-request`` bridges: extracts
+    the runtime USD and calibration SHA-256 provenance from the verified
+    binding artifact record, runs ``authorize_tcp`` fail-closed, and records
+    the full decision into ``record["tcp"]["authorization"]`` plus one
+    ``tcp_authorization`` evidence event. Nothing is sent here and no session
+    is created; a denial happens strictly before any runtime exists.
 
     Args:
-        args: Parsed command-line arguments with the operation path.
-        record: The mutable preflight record, updated in place.
+        args: Parsed command-line arguments.
+        record: The mutable preflight record (its ``tcp`` section carries the
+            verified binding record and receives the authorization decision).
         recorder: The run evidence recorder.
+        contract: The re-derived TCP contract from the TCP gate.
 
     Returns:
-        ``None`` when the operation passed and the cleanup passed (the caller
-        reports ``EXECUTED``), otherwise the terminal status and reason.
+        ``(runtime_sha256, calibration_sha256)`` when dispatch is allowed,
+        otherwise ``(RunStatus.UNRESOLVED_TCP, reason)``.
     """
-    from rocobrick.isaac_backend import (
-        OPERATION_SCHEMA,
-        OperationContractError,
-        OperationKind,
-        RuntimeOperation,
-        target_for_operation,
-    )
-    from rocobrick.runtime_session import RuntimeSessionError
-
-    operation_record: dict[str, object] = {
-        "source": str(args.operation_path),
-        "schema": None,
-        "kind": None,
-        "request_id": None,
-        "sha256": None,
-        "timeout_s": None,
-        "passed": False,
-        "result": None,
-        "result_path": None,
-    }
-    record["operation"] = operation_record
-    try:
-        raw = args.operation_path.read_bytes()
-        document = json.loads(raw.decode("utf-8"))
-        operation = RuntimeOperation.parse(document)
-    except (OSError, ValueError) as error:
-        return (
-            RunStatus.INVALID_INPUT,
-            f"the operation document is not a valid RuntimeOperation: {error}",
-        )
-    operation_record.update(
-        {
-            "schema": OPERATION_SCHEMA,
-            "kind": str(operation.kind.value),
-            "request_id": operation.request_id,
-            "sha256": sha256(raw).hexdigest(),
-            "timeout_s": operation.timeout_s,
-        }
-    )
-    if operation.kind not in (OperationKind.JOINT_TARGET, OperationKind.LINK6_POSE):
-        return (
-            RunStatus.OPERATION_REJECTED,
-            f"operation kind {operation.kind} is not dispatchable; only "
-            "JOINT_TARGET and LINK6_POSE are allowed",
-        )
-    try:
-        target_for_operation(operation)
-    except OperationContractError as error:
-        return (
-            RunStatus.OPERATION_REJECTED,
-            f"operation target rejected before dispatch: {error}",
-        )
-    operation_record["target_admitted"] = True
-    recorder.write_json("operation-request.json", operation.serialize())
-    recorder.append_event({
-        "phase": "operation_admission",
-        "status": "ACCEPTED",
-        "kind": str(operation.kind.value),
-        "request_id": operation.request_id,
-        "timeout_s": operation.timeout_s,
-    })
-
     tcp_authorization: dict[str, object] = {
         "decision": "DENY",
         "allowed": False,
@@ -679,7 +692,6 @@ def _runtime_operation_phase(
         "runtime_asset_sha256": None,
         "calibration_artifact_sha256": None,
     }
-    operation_record["tcp_authorization"] = tcp_authorization
     tcp_record = record.get("tcp")
     if isinstance(tcp_record, dict):
         tcp_record["authorization"] = tcp_authorization
@@ -821,6 +833,120 @@ def _runtime_operation_phase(
             "TCP capability authorization denied: "
             f"{tcp_authorization['reason']}",
         )
+    return runtime_sha, calibration_sha
+
+
+def _runtime_operation_phase(
+    args: "_Arguments",
+    record: dict[str, object],
+    recorder: EvidenceRecorder,
+    contract: TcpContract | None = None,
+) -> tuple[RunStatus, str] | None:
+    """Start the runtime session, execute the operation, and stop cleanly.
+
+    Every immutable gate has already passed when this runs. The operation
+    document is validated strictly and strictly admitted BEFORE any session
+    exists (a rejection therefore starts zero processes). Runtime lifecycle
+    and operation evidence are appended as ``runtime_start`` / ``operation`` /
+    ``runtime_stop`` events and linked from the record.
+
+    Args:
+        args: Parsed command-line arguments with the operation path.
+        record: The mutable preflight record, updated in place.
+        recorder: The run evidence recorder.
+
+    Returns:
+        ``None`` when the operation passed and the cleanup passed (the caller
+        reports ``EXECUTED``), otherwise the terminal status and reason.
+    """
+    from rocobrick.isaac_backend import (
+        OPERATION_SCHEMA,
+        OperationContractError,
+        OperationKind,
+        RuntimeOperation,
+        planning_scene_update_from_payload,
+        scene_query_from_payload,
+        target_for_operation,
+    )
+    from rocobrick.runtime_session import RuntimeSessionError
+
+    operation_record: dict[str, object] = {
+        "source": str(args.operation_path),
+        "schema": None,
+        "kind": None,
+        "request_id": None,
+        "sha256": None,
+        "timeout_s": None,
+        "passed": False,
+        "result": None,
+        "result_path": None,
+    }
+    record["operation"] = operation_record
+    try:
+        raw = args.operation_path.read_bytes()
+        document = json.loads(raw.decode("utf-8"))
+        operation = RuntimeOperation.parse(document)
+    except (OSError, ValueError) as error:
+        return (
+            RunStatus.INVALID_INPUT,
+            f"the operation document is not a valid RuntimeOperation: {error}",
+        )
+    operation_record.update(
+        {
+            "schema": OPERATION_SCHEMA,
+            "kind": str(operation.kind.value),
+            "request_id": operation.request_id,
+            "sha256": sha256(raw).hexdigest(),
+            "timeout_s": operation.timeout_s,
+        }
+    )
+    dispatchable = {
+        OperationKind.JOINT_TARGET,
+        OperationKind.LINK6_POSE,
+        OperationKind.TCP_POSE,
+        OperationKind.GRIPPER_TARGET,
+        OperationKind.APPLY_PLANNING_SCENE,
+        OperationKind.SCENE_QUERY,
+    }
+    if operation.kind not in dispatchable:
+        return (
+            RunStatus.OPERATION_REJECTED,
+            f"operation kind {operation.kind} is not dispatchable; only "
+            "JOINT_TARGET, LINK6_POSE, TCP_POSE, GRIPPER_TARGET, "
+            "APPLY_PLANNING_SCENE and SCENE_QUERY are allowed",
+        )
+    try:
+        if operation.kind is OperationKind.APPLY_PLANNING_SCENE:
+            planning_scene_update_from_payload(operation.payload)
+        elif operation.kind is OperationKind.SCENE_QUERY:
+            scene_query_from_payload(operation.payload)
+        else:
+            target_for_operation(operation)
+    except OperationContractError as error:
+        return (
+            RunStatus.OPERATION_REJECTED,
+            f"operation target rejected before dispatch: {error}",
+        )
+    operation_record["target_admitted"] = True
+    recorder.write_json("operation-request.json", operation.serialize())
+    recorder.append_event({
+        "phase": "operation_admission",
+        "status": "ACCEPTED",
+        "kind": str(operation.kind.value),
+        "request_id": operation.request_id,
+        "timeout_s": operation.timeout_s,
+    })
+
+    authorized = _authorize_tcp_dispatch(args, record, recorder, contract)
+    tcp_record_for_link = record.get("tcp")
+    operation_record["tcp_authorization"] = (
+        tcp_record_for_link.get("authorization")
+        if isinstance(tcp_record_for_link, dict)
+        else None
+    )
+    if isinstance(authorized[0], RunStatus):
+        return authorized
+    runtime_sha, calibration_sha = authorized
 
     session = None
     readiness = None
@@ -834,7 +960,10 @@ def _runtime_operation_phase(
             if args.scene_manifest is None:
                 session = _create_session(recorder.directory / "runtime-session")
             else:
-                session = _create_session(recorder.directory / "runtime-session", args)
+                session = _create_session(
+                    recorder.directory / "runtime-session",
+                    args,
+                )
             recorder.append_event({
                 "phase": "runtime_start",
                 "status": "STARTING",
@@ -946,6 +1075,616 @@ def _runtime_operation_phase(
     return None
 
 
+@dataclass(frozen=True)
+class _SkillTaskRef:
+    """Minimal TaskRef for one skill step (execute_skill needs id + skill)."""
+
+    task_id: str
+    skill: SkillType
+
+
+def _parse_skill_request(
+    document: object, robot_id: str
+) -> list[tuple[SkillType, str | None]]:
+    """Parse a strict ``rocobrick-skill-request/v1`` document.
+
+    The top-level object must carry exactly ``schema``, ``robot_id``,
+    ``skill_params_path`` and ``steps``; ``robot_id`` must equal the
+    selected ``--robot-id``; ``skill_params_path`` must be a non-empty
+    string (resolved relative to the repository root by the caller); and
+    ``steps`` must be a non-empty list of objects carrying exactly ``skill``
+    (one of TRANSIT / WAIT / PICK) and ``physical_instance_id`` (required
+    and non-empty for TRANSIT/PICK, exactly ``None`` for WAIT).
+
+    Raises:
+        ValueError: On any deviation from the exact schema.
+    """
+    from rocobrick.models import SkillType
+
+    if not isinstance(document, Mapping):
+        raise ValueError("the skill request must be a JSON object")
+    actual = frozenset(str(key) for key in document)
+    missing = sorted(SKILL_REQUEST_TOP_KEYS - actual)
+    extra = sorted(actual - SKILL_REQUEST_TOP_KEYS)
+    if missing or extra:
+        raise ValueError(
+            f"the skill request must carry exactly "
+            f"{sorted(SKILL_REQUEST_TOP_KEYS)}; missing={missing} "
+            f"extra={extra}"
+        )
+    if document["schema"] != SKILL_REQUEST_SCHEMA:
+        raise ValueError(
+            f"skill request schema {document['schema']!r} is not "
+            f"{SKILL_REQUEST_SCHEMA!r}"
+        )
+    request_robot_id = document["robot_id"]
+    if not isinstance(request_robot_id, str) or not request_robot_id:
+        raise ValueError("skill request robot_id must be a non-empty string")
+    if request_robot_id != robot_id:
+        raise ValueError(
+            f"skill request robot_id {request_robot_id!r} does not equal the "
+            f"selected robot {robot_id!r}"
+        )
+    params_path = document["skill_params_path"]
+    if not isinstance(params_path, str) or not params_path:
+        raise ValueError(
+            "skill request skill_params_path must be a non-empty string"
+        )
+    steps_document = document["steps"]
+    if not isinstance(steps_document, list) or not steps_document:
+        raise ValueError("skill request steps must be a non-empty list")
+    steps: list[tuple[SkillType, str | None]] = []
+    for index, step in enumerate(steps_document):
+        if not isinstance(step, Mapping):
+            raise ValueError(f"skill request steps[{index}] must be an object")
+        step_keys = frozenset(str(key) for key in step)
+        step_missing = sorted(SKILL_STEP_KEYS - step_keys)
+        step_extra = sorted(step_keys - SKILL_STEP_KEYS)
+        if step_missing or step_extra:
+            raise ValueError(
+                f"skill request steps[{index}] must carry exactly "
+                f"{sorted(SKILL_STEP_KEYS)}; missing={step_missing} "
+                f"extra={step_extra}"
+            )
+        raw_skill = step["skill"]
+        if raw_skill not in SKILL_STEP_NAMES:
+            raise ValueError(
+                f"skill request steps[{index}].skill {raw_skill!r} is not "
+                f"one of {sorted(SKILL_STEP_NAMES)}"
+            )
+        skill = SkillType(str(raw_skill))
+        instance_id = step["physical_instance_id"]
+        if skill is SkillType.WAIT:
+            if instance_id is not None:
+                raise ValueError(
+                    f"skill request steps[{index}].physical_instance_id must "
+                    "be null for the WAIT skill"
+                )
+            steps.append((skill, None))
+            continue
+        if not isinstance(instance_id, str) or not instance_id:
+            raise ValueError(
+                f"skill request steps[{index}].physical_instance_id must be "
+                f"a non-empty string for the {str(skill.value)} skill"
+            )
+        steps.append((skill, instance_id))
+    return steps
+
+
+def _load_skill_scene_manifest(path: Path) -> Mapping[str, object]:
+    """Read the scene-snapshot manifest artifact strictly (read-only).
+
+    Returns:
+        The manifest mapping with ``scene_id``, ``frame_id`` and a
+        ``objects`` list of per-object metadata mappings.
+
+    Raises:
+        ValueError: If the file is unreadable, is not the
+            ``rocobrick-scene-snapshot-manifest/v1`` schema, or carries no
+            usable object metadata.
+    """
+    try:
+        document = json.loads(path.read_bytes().decode("utf-8"))
+    except (OSError, UnicodeDecodeError, ValueError) as error:
+        raise ValueError(
+            f"the scene manifest {path} is unreadable: {error}"
+        ) from error
+    if not isinstance(document, Mapping):
+        raise ValueError(f"the scene manifest {path} must be a JSON object")
+    if document.get("schema") != MANIFEST_SCHEMA:
+        raise ValueError(
+            f"the scene manifest schema {document.get('schema')!r} is not "
+            f"{MANIFEST_SCHEMA!r}"
+        )
+    for label in ("scene_id", "frame_id"):
+        if not isinstance(document.get(label), str) or not document[label]:
+            raise ValueError(f"the scene manifest {label} must be a string")
+    objects = document.get("objects")
+    if not isinstance(objects, list) or not objects:
+        raise ValueError("the scene manifest objects must be a non-empty list")
+    for index, item in enumerate(objects):
+        if not isinstance(item, Mapping):
+            raise ValueError(
+                f"the scene manifest objects[{index}] must be an object"
+            )
+        for label in ("physical_instance_id", "asset_revision_sha256"):
+            if not isinstance(item.get(label), str) or not item[label]:
+                raise ValueError(
+                    f"the scene manifest objects[{index}].{label} must be a "
+                    "non-empty string"
+                )
+        if isinstance(item.get("brick_id"), bool) or not isinstance(
+            item.get("brick_id"), int
+        ):
+            raise ValueError(
+                f"the scene manifest objects[{index}].brick_id must be an "
+                "integer"
+            )
+    return document
+
+
+def _load_scene_snapshot(path: Path):
+    """Rebuild the immutable scene snapshot from its artifact document.
+
+    The artifact is the exact document the host bridge wrote at session
+    start (canonical payload plus ``snapshot_sha256``); it is rebuilt through
+    the frozen :class:`rocobrick.scene_snapshot.SceneSnapshot` contract, so
+    any tampered field fails its canonical digest here.
+
+    Raises:
+        ValueError: If the artifact is unreadable or fails any frozen
+            snapshot check.
+    """
+    from rocobrick.planning_scene import box_from_aabb
+    from rocobrick.scene_snapshot import (
+        RuntimeHostBinding,
+        SceneObjectSnapshot,
+        SceneSnapshot,
+    )
+
+    try:
+        document = json.loads(path.read_bytes().decode("utf-8"))
+    except (OSError, UnicodeDecodeError, ValueError) as error:
+        raise ValueError(
+            f"the scene snapshot {path} is unreadable: {error}"
+        ) from error
+    if not isinstance(document, Mapping):
+        raise ValueError(f"the scene snapshot {path} must be a JSON object")
+    try:
+        host = RuntimeHostBinding(**dict(document.get("host", {})))
+        objects = tuple(
+            SceneObjectSnapshot(
+                physical_instance_id=item["physical_instance_id"],
+                brick_id=item["brick_id"],
+                prim_path=item["prim_path"],
+                aabb=box_from_aabb(
+                    object_id=item["aabb"]["object_id"],
+                    frame_id=item["aabb"]["frame_id"],
+                    minimum_m=list(item["aabb"]["minimum_m"]),
+                    maximum_m=list(item["aabb"]["maximum_m"]),
+                ),
+                asset_revision_sha256=item["asset_revision_sha256"],
+                provenance=dict(item["provenance"]),
+            )
+            for item in document.get("objects", [])
+        )
+        return SceneSnapshot(
+            schema=document["schema"],
+            scene_id=document["scene_id"],
+            frame_id=document["frame_id"],
+            host=host,
+            objects=objects,
+            snapshot_sha256=document["snapshot_sha256"],
+        )
+    except (KeyError, TypeError, ValueError) as error:
+        raise ValueError(
+            f"the scene snapshot {path} failed its immutable contract: "
+            f"{error}"
+        ) from error
+
+
+def _build_planning_scene_document(
+    args: "_Arguments",
+    record: dict[str, object],
+    steps: list[tuple[SkillType, str | None]],
+    runtime_sha: str,
+) -> dict[str, object]:
+    """Bind the scene snapshot objects and derive the planning-scene payload.
+
+    Every snapshot object is re-bound through the frozen
+    ``bind_scene_object`` checks (scene/frame/runtime-USD/asset-revision
+    identity, all values taken from the run's own artifacts, never from the
+    snapshot alone) and the allowed boxes are compiled into the exact
+    ``PlanningSceneUpdate`` payload document carried by APPLY_PLANNING_SCENE.
+
+    Raises:
+        ValueError: When manifest and snapshot disagree, the snapshot was
+            captured for another robot, or any binding check fails.
+    """
+    from rocobrick.scene_snapshot import bind_scene_object, build_planning_scene_update
+    from rocobrick.structural_binding import StructuralBinding
+
+    manifest = _load_skill_scene_manifest(args.scene_manifest)
+    snapshot = _load_scene_snapshot(args.scene_snapshot_out)
+    if snapshot.scene_id != manifest["scene_id"]:
+        raise ValueError(
+            f"the scene snapshot scene_id {snapshot.scene_id!r} does not "
+            f"equal the manifest scene_id {manifest['scene_id']!r}"
+        )
+    if snapshot.frame_id != manifest["frame_id"]:
+        raise ValueError(
+            f"the scene snapshot frame_id {snapshot.frame_id!r} does not "
+            f"equal the manifest frame_id {manifest['frame_id']!r}"
+        )
+    if snapshot.host.robot_id != args.robot_id:
+        raise ValueError(
+            f"the scene snapshot was captured for robot "
+            f"{snapshot.host.robot_id!r}, not {args.robot_id!r}"
+        )
+    binding_record = record.get("binding")
+    binding_document = (
+        binding_record.get("binding")
+        if isinstance(binding_record, Mapping)
+        else None
+    )
+    if not isinstance(binding_document, Mapping):
+        raise ValueError("the run carries no accepted structural binding")
+    manifest_objects = {
+        item["physical_instance_id"]: item for item in manifest["objects"]
+    }
+    requested = {
+        instance_id
+        for _skill, instance_id in steps
+        if instance_id is not None
+    }
+    bound_objects = []
+    for scene_object in snapshot.objects:
+        instance_id = scene_object.physical_instance_id
+        manifest_item = manifest_objects.get(instance_id)
+        if manifest_item is None:
+            raise ValueError(
+                f"the scene snapshot object {instance_id!r} is absent from "
+                f"the scene manifest"
+            )
+        per_object_binding = StructuralBinding(
+            plan_id=str(binding_document["plan_id"]),
+            task_id=str(binding_document["task_id"]),
+            physical_instance_id=instance_id,
+            brick_id=int(manifest_item["brick_id"]),
+            robot_id=args.robot_id,
+            source_goal_key=str(binding_document["source_goal_key"]),
+            grid_xyz=tuple(
+                int(value) for value in binding_document["grid_xyz"]
+            ),
+            orientation=int(binding_document["orientation"]),
+            color=str(binding_document["color"]),
+            motion_geometry=str(binding_document["motion_geometry"]),
+            plan_sha256=str(binding_document["plan_sha256"]),
+            task_start_sha256=str(binding_document["task_start_sha256"]),
+            task_goal_sha256=str(binding_document["task_goal_sha256"]),
+        )
+        bound_objects.append(
+            bind_scene_object(
+                per_object_binding,
+                snapshot,
+                expected_scene_id=str(manifest["scene_id"]),
+                expected_frame_id=str(manifest["frame_id"]),
+                expected_runtime_usd_path=str(
+                    REPO_ROOT / RUNTIME_USD_PINNED_PATH
+                ),
+                expected_runtime_usd_sha256=runtime_sha,
+                expected_asset_revision_sha256=manifest_item[
+                    "asset_revision_sha256"
+                ],
+            )
+        )
+    bound_objects.sort(key=lambda item: item.object.physical_instance_id)
+    for instance_id in sorted(requested):
+        if not any(
+            item.object.physical_instance_id == instance_id
+            for item in bound_objects
+        ):
+            raise ValueError(
+                f"the scene snapshot carries no brick {instance_id!r} "
+                "requested by the skill request"
+            )
+    pick_targets = sorted(
+        {
+            instance_id
+            for skill, instance_id in steps
+            if skill is SkillType.PICK and instance_id is not None
+        }
+    )
+    gripper_contact_links = ("gripper_base", "gripper_link1", "gripper_link2")
+    allowed_collision_pairs = tuple(
+        sorted(
+            (
+                (instance_id, link)
+                if instance_id < link
+                else (link, instance_id)
+            )
+            for instance_id in pick_targets
+            for link in gripper_contact_links
+        )
+    )
+    update = build_planning_scene_update(
+        bound_objects,
+        allowed_collision_pairs=allowed_collision_pairs,
+    )
+    return asdict(update)
+
+
+def _skill_execution_phase(
+    args: "_Arguments",
+    record: dict[str, object],
+    recorder: EvidenceRecorder,
+    contract: TcpContract | None,
+    runtime_sha: str | None,
+    calibration_sha: str | None,
+) -> tuple[RunStatus, str] | None:
+    """Start the runtime session, execute the skill steps, stop cleanly.
+
+    Every immutable gate and the TCP authorization have already passed when
+    this runs. The skill request is parsed strictly (any deviation is
+    ``INVALID_INPUT`` and starts zero processes), the session is started,
+    the scene snapshot artifact written at start becomes the frozen
+    planning-scene update, and every step runs its skill program through
+    :class:`rocobrick.session_phase_backend.SessionPhaseBackend`. The
+    session is always stopped with cleanup evidence.
+
+    Returns:
+        ``None`` when every step ended without a FAILED phase and the
+        cleanup passed (the caller reports ``EXECUTED``), otherwise the
+        terminal status and reason.
+    """
+    from rocobrick.models import FailureReason
+    from rocobrick.runtime_session import RuntimeSessionError
+    from rocobrick.session_phase_backend import (
+        SessionPhaseBackend,
+        SkillStepSpec,
+    )
+    from rocobrick.skill_execution import execute_skill
+    from rocobrick.skills import PhaseStatus
+    from rocobrick.skill_targets import (
+        TcpProvenance,
+        load_robot_base_frame,
+        load_skill_params,
+    )
+
+    skill_record: dict[str, object] = {
+        "request": None,
+        "params": None,
+        "steps": [],
+        "all_steps_confirmed": False,
+        "cleanup_passed": False,
+    }
+    record["skill_execution"] = skill_record
+    record["skills"] = skill_record["steps"]
+    try:
+        raw = args.skill_request_path.read_bytes()
+        document = json.loads(raw.decode("utf-8"))
+        steps = _parse_skill_request(document, args.robot_id)
+    except (OSError, ValueError) as error:
+        return (
+            RunStatus.INVALID_INPUT,
+            f"the skill request document is not valid: {error}",
+        )
+    skill_record["request"] = document
+    try:
+        if not isinstance(args.config_path, Path):
+            raise ValueError("the --config path is required for skill runs")
+        params = load_skill_params(REPO_ROOT / document["skill_params_path"])
+        base = load_robot_base_frame(args.config_path, args.robot_id)
+    except (OSError, ValueError) as error:
+        return (
+            RunStatus.INVALID_INPUT,
+            f"the skill inputs are not valid: {error}",
+        )
+    skill_record["params"] = asdict(params)
+    provenance = TcpProvenance(
+        runtime_model_sha256=str(runtime_sha),
+        source_sha256=str(calibration_sha),
+    )
+
+    pick_target_ids = tuple(sorted({
+        instance_id
+        for skill, instance_id in steps
+        if skill is SkillType.PICK and instance_id is not None
+    }))
+    session = None
+    cleanup_passed = False
+    runtime_terminal: tuple[RunStatus, str] | None = None
+    first_failure: str | None = None
+    operation_rejected = False
+    all_steps_confirmed = True
+    try:
+        try:
+            import inspect
+
+            factory_parameters = inspect.signature(_create_session).parameters
+            if {
+                "collision_filter_robot_id",
+                "collision_filter_instance_ids",
+            }.issubset(factory_parameters):
+                session = _create_session(
+                    recorder.directory / "runtime-session",
+                    args,
+                    collision_filter_robot_id=args.robot_id,
+                    collision_filter_instance_ids=pick_target_ids,
+                )
+            else:
+                # Preserve the historical injected factory seam used by
+                # offline tests and callers that intentionally provide the
+                # two-argument fake session factory.
+                session = _create_session(
+                    recorder.directory / "runtime-session",
+                    args,
+                )
+            recorder.append_event({
+                "phase": "runtime_start",
+                "status": "STARTING",
+                "session_dir": str(session.session_dir),
+            })
+            readiness = session.start()
+            recorder.append_event({
+                "phase": "runtime_start",
+                "status": "READY",
+                "passed": readiness.passed,
+                "readiness": asdict(readiness),
+                "session_evidence_path": str(
+                    session.session_dir / "runtime-session.json"
+                ),
+            })
+        except RuntimeSessionError as error:
+            recorder.append_event({
+                "phase": "runtime_start",
+                "status": "FAILED",
+                "reason": str(error),
+                "session_dir": (
+                    str(session.session_dir) if session is not None else None
+                ),
+            })
+            return (
+                RunStatus.RUNTIME_START_FAILED,
+                f"the runtime session failed to start: {error}",
+            )
+        try:
+            planning_scene_update = _build_planning_scene_document(
+                args, record, steps, str(runtime_sha)
+            )
+        except ValueError as error:
+            return (
+                RunStatus.EXECUTION_FAILED,
+                f"the scene snapshot could not become a planning scene "
+                f"update: {error}",
+            )
+        skill_record["planning_scene_update"] = planning_scene_update
+
+        def publish(event: object) -> None:
+            recorder.append_event({"phase": "skill_execution", "event": event})
+
+        for index, (skill, instance_id) in enumerate(steps):
+            task_ref = _SkillTaskRef(
+                task_id=f"skill-{index}-{str(skill.value)}", skill=skill
+            )
+            backend = SessionPhaseBackend(
+                session=session,
+                run_dir=session.session_dir,
+                base=base,
+                provenance=provenance,
+                spec=SkillStepSpec(
+                    skill=skill,
+                    physical_instance_id=instance_id,
+                    params=params,
+                ),
+                planning_scene_update=planning_scene_update,
+                request_prefix=f"skill-{index}",
+                operation_timeout_s=SKILL_OPERATION_TIMEOUT_S,
+            )
+            try:
+                result = asyncio.run(
+                    execute_skill(
+                        task_ref,
+                        run_id=recorder.run_id,
+                        backend=backend,
+                        publish=publish,
+                    )
+                )
+            except Exception as error:  # pragma: no cover - defensive
+                all_steps_confirmed = False
+                first_failure = first_failure or (
+                    f"step {index} ({str(skill.value)}) raised {error}"
+                )
+                skill_record["steps"].append({
+                    "skill": str(skill.value),
+                    "physical_instance_id": instance_id,
+                    "assembled": False,
+                    "retreat_confirmed": False,
+                    "phases": [],
+                    "events": 0,
+                    "error": str(error),
+                })
+                break
+            step_confirmed = all(
+                phase.status is not PhaseStatus.FAILED
+                for phase in result.phases
+            )
+            all_steps_confirmed = all_steps_confirmed and step_confirmed
+            for phase in result.phases:
+                if phase.status is not PhaseStatus.FAILED:
+                    continue
+                reason_text = (
+                    str(phase.reason.value)
+                    if phase.reason is not None
+                    else "UNKNOWN"
+                )
+                if first_failure is None:
+                    first_failure = (
+                        f"step {index} ({str(skill.value)}) phase "
+                        f"{phase.phase.phase_id} failed: {reason_text}"
+                    )
+                if phase.reason is FailureReason.COLLISION_BLOCKED:
+                    operation_rejected = True
+            skill_record["steps"].append({
+                "skill": str(skill.value),
+                "physical_instance_id": instance_id,
+                "assembled": result.assembled,
+                "retreat_confirmed": result.retreat_confirmed,
+                "phases": [
+                    {
+                        "phase_id": phase.phase.phase_id,
+                        "status": str(phase.status.value),
+                        "reason": (
+                            str(phase.reason.value)
+                            if phase.reason is not None
+                            else None
+                        ),
+                    }
+                    for phase in result.phases
+                ],
+                "events": len(result.events),
+            })
+        skill_record["all_steps_confirmed"] = all_steps_confirmed
+        if not all_steps_confirmed:
+            runtime_terminal = (
+                RunStatus.OPERATION_REJECTED
+                if operation_rejected
+                else RunStatus.EXECUTION_FAILED,
+                (
+                    "the skill request was rejected before motion"
+                    if operation_rejected
+                    else "the skill execution failed"
+                )
+                + f": {first_failure}",
+            )
+    finally:
+        # The stop is unconditional: cleanup evidence is recorded even after
+        # a partial start or an unexpected error.
+        if session is not None:
+            stop_evidence = session.stop()
+            cleanup_passed = bool(stop_evidence.cleanup.get("passed"))
+            record["runtime"] = {
+                **stop_evidence.serializable(),
+                "evidence_path": str(session.session_dir / "runtime-session.json"),
+            }
+            recorder.append_event({
+                "phase": "runtime_stop",
+                "status": str(stop_evidence.status),
+                "cleanup": dict(stop_evidence.cleanup),
+                "errors": list(stop_evidence.errors),
+            })
+    skill_record["cleanup_passed"] = cleanup_passed
+    if runtime_terminal is not None:
+        return runtime_terminal
+    if not cleanup_passed:
+        return (
+            RunStatus.EXECUTION_FAILED,
+            "the skill steps executed but the session cleanup did not pass; "
+            "the run is not verified",
+        )
+    return None
+
+
 def _run(args: _Arguments) -> RunOutcome:
     """Execute the preflight phases and write the run evidence.
 
@@ -982,6 +1721,16 @@ def _run(args: _Arguments) -> RunOutcome:
                 if args.operation_path is not None
                 else None
             ),
+            "skill_request": (
+                str(args.skill_request_path)
+                if args.skill_request_path is not None
+                else None
+            ),
+            "robot_operation_plan": (
+                str(args.robot_operation_plan_path)
+                if args.robot_operation_plan_path is not None
+                else None
+            ),
         },
     )
     record: dict[str, object] = {
@@ -991,6 +1740,16 @@ def _run(args: _Arguments) -> RunOutcome:
         "preflight_only": args.preflight_only,
         "operation_path": (
             str(args.operation_path) if args.operation_path is not None else None
+        ),
+        "skill_request_path": (
+            str(args.skill_request_path)
+            if args.skill_request_path is not None
+            else None
+        ),
+        "robot_operation_plan_path": (
+            str(args.robot_operation_plan_path)
+            if args.robot_operation_plan_path is not None
+            else None
         ),
         "task_dir": str(args.task_dir),
         "plan_path": str(args.plan_path),
@@ -1002,6 +1761,8 @@ def _run(args: _Arguments) -> RunOutcome:
         "tcp": None,
         "dispatch": None,
         "operation": None,
+        "skills": None,
+        "skill_execution": None,
         "runtime": None,
         "checks": {},
     }
@@ -1139,7 +1900,76 @@ def _run(args: _Arguments) -> RunOutcome:
         # to any runtime. With the internal --operation bridge the formal
         # R4.2 runtime session runs after every gate has passed.
         if binding is not None:
-            if terminal is None and args.operation_path is not None:
+            if terminal is None and args.robot_operation_plan_path is not None:
+                try:
+                    raw_operation_plan = json.loads(
+                        args.robot_operation_plan_path.read_text(encoding="utf-8")
+                    )
+                    operation_plan = parse_robot_operation_plan(
+                        raw_operation_plan,
+                        source_plan=plan,
+                    )
+                except (OSError, ValueError, RobotOperationPlanError) as error:
+                    terminal = (
+                        RunStatus.INVALID_INPUT,
+                        f"robot-operation-plan/v1 is invalid: {error}",
+                    )
+                    record["dispatch"] = {
+                        "implemented": False,
+                        "dispatch_requested": True,
+                        "blocked": True,
+                        "status": str(terminal[0]),
+                        "reason": terminal[1],
+                    }
+                    recorder.append_event({
+                        "phase": "robot_operation_plan",
+                        "status": "REJECTED",
+                        "reason": terminal[1],
+                    })
+                else:
+                    record["robot_operation_plan"] = {
+                        "path": str(args.robot_operation_plan_path),
+                        "schema": operation_plan.schema,
+                        "plan_id": operation_plan.plan_id,
+                        "source_plan_id": operation_plan.source_plan_id,
+                        "robots": list(operation_plan.robots),
+                        "operation_ids": list(operation_plan.operations),
+                        "execution_layers": [
+                            list(layer) for layer in operation_plan.execution_layers
+                        ],
+                        "planned_schedule": [
+                            [
+                                {
+                                    "operation_id": item.operation_id,
+                                    "robot_id": item.robot_id,
+                                }
+                                for item in slot
+                            ]
+                            for slot in operation_plan.planned_schedule
+                        ],
+                        "validated": True,
+                    }
+                    recorder.append_event({
+                        "phase": "robot_operation_plan",
+                        "status": "VALIDATED",
+                        "plan_id": operation_plan.plan_id,
+                        "source_plan_id": operation_plan.source_plan_id,
+                        "robots": list(operation_plan.robots),
+                    })
+                    terminal = (
+                        RunStatus.EXECUTION_NOT_IMPLEMENTED,
+                        "robot-operation-plan/v1 validated; real runtime dispatch "
+                        "is intentionally deferred until the multi-robot executor "
+                        "is connected",
+                    )
+                    record["dispatch"] = {
+                        "implemented": False,
+                        "dispatch_requested": True,
+                        "blocked": True,
+                        "status": str(terminal[0]),
+                        "reason": terminal[1],
+                    }
+            elif terminal is None and args.operation_path is not None:
                 record["dispatch"] = {
                     "implemented": True,
                     "dispatch_requested": True,
@@ -1163,6 +1993,46 @@ def _run(args: _Arguments) -> RunOutcome:
                         RunStatus.EXECUTED,
                         "the operation executed against the live runtime and "
                         "the session stopped with passing cleanup",
+                    )
+                record["dispatch"]["status"] = str(terminal[0])
+                record["dispatch"]["reason"] = terminal[1]
+            elif terminal is None and args.skill_request_path is not None:
+                record["dispatch"] = {
+                    "implemented": True,
+                    "dispatch_requested": True,
+                    "blocked": False,
+                    "status": "RUNTIME_DISPATCH",
+                    "reason": (
+                        "explicit --skill-request dispatch through the R4.2 "
+                        "Isaac/MoveIt runtime session"
+                    ),
+                }
+                recorder.append_event({
+                    "phase": "dispatch",
+                    "status": "RUNTIME_DISPATCH",
+                    "skill_request": str(args.skill_request_path),
+                })
+                authorized = _authorize_tcp_dispatch(
+                    args, record, recorder, contract
+                )
+                if isinstance(authorized[0], RunStatus):
+                    terminal = authorized
+                else:
+                    runtime_sha, calibration_sha = authorized
+                    terminal = _skill_execution_phase(
+                        args,
+                        record,
+                        recorder,
+                        contract,
+                        runtime_sha,
+                        calibration_sha,
+                    )
+                if terminal is None:
+                    terminal = (
+                        RunStatus.EXECUTED,
+                        "every skill step executed against the live runtime "
+                        "without a FAILED phase and the session stopped with "
+                        "passing cleanup",
                     )
                 record["dispatch"]["status"] = str(terminal[0])
                 record["dispatch"]["reason"] = terminal[1]
@@ -1235,8 +2105,13 @@ def _run(args: _Arguments) -> RunOutcome:
             "the run ended without a terminal status",
         )
     )
-    record["checks"]["no_motion_dispatched"] = args.operation_path is None
+    record["checks"]["no_motion_dispatched"] = (
+        args.operation_path is None and args.skill_request_path is None
+    )
     record["checks"]["operation_dispatched"] = args.operation_path is not None
+    record["checks"]["skill_steps_dispatched"] = (
+        args.skill_request_path is not None
+    )
     record["checks"]["inputs_immutable_after_runtime"] = record["checks"].get(
         "inputs_immutable_after_all_phases", False
     )
@@ -1246,18 +2121,37 @@ def _run(args: _Arguments) -> RunOutcome:
         isinstance(operation_record, Mapping)
         and operation_record.get("passed") is True
     )
+    skill_execution_record = record.get("skill_execution")
+    skill_steps_passed = bool(
+        isinstance(skill_execution_record, Mapping)
+        and skill_execution_record.get("all_steps_confirmed") is True
+    )
     cleanup_passed = bool(
         isinstance(runtime_record, Mapping)
         and isinstance(runtime_record.get("cleanup"), Mapping)
         and runtime_record["cleanup"].get("passed") is True
     )
     record["status"] = str(status)
+    dispatch_passed = (
+        operation_passed if args.operation_path is not None else skill_steps_passed
+    )
     record["passed"] = status is RunStatus.PREFLIGHT_ONLY or (
-        status is RunStatus.EXECUTED and operation_passed and cleanup_passed
+        status is RunStatus.EXECUTED and dispatch_passed and cleanup_passed
     )
     record["reason"] = reason
     record["exit_code"] = EXIT_CODES[status]
     record["evidence_dir"] = str(recorder.directory)
+    # The TRANSIT / WAIT / PICK programs carry no retreat phase, so the
+    # retreat_clear boolean honestly mirrors the overall run result there.
+    retreat_clear = True
+    if args.skill_request_path is not None:
+        retreat_clear = bool(record["passed"])
+        if isinstance(skill_execution_record, dict):
+            skill_execution_record["retreat_clear"] = retreat_clear
+            skill_execution_record["retreat_clear_note"] = (
+                "no retreat phase in TRANSIT/WAIT/PICK programs; mirrors "
+                "overall result"
+            )
     recorder.write_json("preflight.json", record)
     result = FinalResult(
         input_valid=status
@@ -1265,7 +2159,7 @@ def _run(args: _Arguments) -> RunOutcome:
         tasks_complete=binding is not None,
         structure_valid=binding is not None,
         execution_safe=record["passed"],
-        retreat_clear=True,
+        retreat_clear=retreat_clear,
         evidence_complete=True,
         reason=reason,
     )
@@ -1284,6 +2178,11 @@ def _run(args: _Arguments) -> RunOutcome:
         # Link the runtime lifecycle evidence and the operation result from
         # the run result document (the full documents live in the run dir).
         result_document["operation"] = record.get("operation")
+        result_document["runtime_session"] = record.get("runtime")
+    if args.skill_request_path is not None:
+        # Link the per-step skill summaries and the runtime lifecycle from
+        # the run result document (the full documents live in the run dir).
+        result_document["skills"] = record.get("skills")
         result_document["runtime_session"] = record.get("runtime")
     recorder.write_json("result.json", result_document)
     recorder.append_event({
@@ -1320,9 +2219,43 @@ def _parse_arguments(argv: list[str] | None) -> _Arguments:
         raise _UsageError(
             "--preflight-only cannot be combined with --operation"
         )
+    if namespace.robot_operation_plan is not None:
+        if namespace.preflight_only:
+            raise _UsageError(
+                "--robot-operation-plan cannot be combined with --preflight-only"
+            )
+        if namespace.operation is not None or namespace.skill_request is not None:
+            raise _UsageError(
+                "--robot-operation-plan cannot be combined with "
+                "--operation or --skill-request"
+            )
+    if namespace.skill_request is not None:
+        if namespace.operation is not None:
+            raise _UsageError(
+                "--skill-request cannot be combined with --operation"
+            )
+        if namespace.preflight_only:
+            raise _UsageError(
+                "--skill-request cannot be combined with --preflight-only"
+            )
+        if (
+            namespace.scene_manifest is None
+            or namespace.scene_snapshot_out is None
+            or namespace.host_instance_id is None
+            or namespace.config is None
+        ):
+            raise _UsageError(
+                "--skill-request requires --scene-manifest, "
+                "--scene-snapshot-out, --host-instance-id and --config"
+            )
     scene_fields = (namespace.scene_manifest, namespace.scene_snapshot_out, namespace.host_instance_id)
     if any(value is not None for value in scene_fields) and not all(value is not None for value in scene_fields):
         raise _UsageError("--scene-manifest, --scene-snapshot-out and --host-instance-id must be provided together")
+    if namespace.scene_manifest is not None and namespace.config is None:
+        raise _UsageError(
+            "--config must be provided together with --scene-manifest, "
+            "--scene-snapshot-out and --host-instance-id"
+        )
     return _Arguments(
         task_dir=namespace.task,
         plan_path=namespace.plan,
@@ -1331,9 +2264,12 @@ def _parse_arguments(argv: list[str] | None) -> _Arguments:
         run_dir=namespace.run_dir,
         preflight_only=namespace.preflight_only,
         operation_path=namespace.operation,
+        skill_request_path=namespace.skill_request,
+        robot_operation_plan_path=namespace.robot_operation_plan,
         scene_manifest=namespace.scene_manifest,
         scene_snapshot_out=namespace.scene_snapshot_out,
         host_instance_id=namespace.host_instance_id,
+        config_path=namespace.config,
     )
 
 
