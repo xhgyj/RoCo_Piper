@@ -782,6 +782,25 @@ class SkillOperationExecutor:
             else None
         )
         carrying = target_values.get("carrying_physical_instance_id")
+        if carrying is not None:
+            if not isinstance(carrying, str) or not carrying:
+                return self._failed(operation, "TARGET_INVALID: carrying_physical_instance_id")
+            if self._state_ledger is None:
+                return self._failed(operation, "CARRYING_STATE_UNAVAILABLE")
+            holding = self._state_ledger.observe(robot_id, f"holding:{carrying}")
+            if holding is None:
+                return self._failed(operation, "HOLDING_REQUIRED")
+            # Carrying TRANSIT needs synchronized object/TCP tracking and an
+            # attached planning-scene model. The current adapter only proves
+            # an empty TCP pose, so reject before dispatching motion.
+            return self._failed(operation, "CARRYING_TRANSIT_UNAVAILABLE")
+        if self._state_ledger is not None:
+            active_holding = [
+                key for key in self._state_ledger.snapshot(robot_id)
+                if key.startswith("holding:")
+            ]
+            if active_holding:
+                return self._failed(operation, "CARRYING_INSTANCE_REQUIRED")
         if result.passed and result.terminal and result.safe_to_release:
             final_scene = await self._observe_or_cancel(robot_id, asyncio.Event())
             if final_scene is None or not isinstance(final_scene.get("bricks"), Mapping):
@@ -798,18 +817,7 @@ class SkillOperationExecutor:
                 )
             evidence["transit_scene_feedback_confirmed"] = True
             evidence["transit_feedback_confirmed"] = True
-            if carrying is not None:
-                evidence["carrying_state_confirmed"] = False
-                return OperationExecution(
-                    operation_id=operation.operation_id,
-                    robot_id=robot_id,
-                    status=OperationStatus.FAILED,
-                    passed=False,
-                    terminal=result.terminal,
-                    motion_sent=result.motion_sent,
-                    evidence=evidence,
-                    reason="CARRYING_STATE_UNCONFIRMED",
-                )
+            evidence["carrying_state_confirmed"] = False
             if self._state_ledger is not None:
                 key = (
                     "robot_at_pick_region"
