@@ -1645,6 +1645,14 @@ class MultiRobotSessionConfig:
     key (ready bridge + bound SIGINT + orderly shutdown). Controller hold
     commands are recorded separately from skill-operation motion. There is no
     session-side bypass flag.
+
+    ``structure_goal_path``/``structure_start_path`` are the optional explicit
+    structure files forwarded to the scene-mode host bridge as
+    ``--structure-goal``/``--structure-start`` (scene loading only; the
+    bridge binds the internal topology carrier from them and dispatches no
+    operation). The start is optional and ``None`` means EMPTY initial
+    structure - no directory default is ever inferred. They cannot be
+    combined with the legacy ``structure_dir``.
     """
 
     repo_root: Path
@@ -1654,6 +1662,9 @@ class MultiRobotSessionConfig:
     host_instance_id: str
     plan_path: Path
     config_path: Path
+    structure_dir: Path | None = None
+    structure_goal_path: Path | None = None
+    structure_start_path: Path | None = None
     ros_image: str = "roco-piper-ros:humble"
     collision_filter_robot_id: str | None = None
     collision_filter_instance_ids: tuple[str, ...] = ()
@@ -1696,6 +1707,24 @@ class MultiRobotSessionConfig:
         ):
             if not isinstance(getattr(self, name), Path):
                 raise ValueError(f"{name} must be a Path")
+        for name in ("structure_goal_path", "structure_start_path"):
+            value = getattr(self, name)
+            if value is not None and not isinstance(value, Path):
+                raise ValueError(f"{name} must be a Path or None")
+        if (
+            self.structure_start_path is not None
+            and self.structure_goal_path is None
+        ):
+            raise ValueError(
+                "structure_start_path requires structure_goal_path"
+            )
+        if (
+            self.structure_goal_path is not None
+            and self.structure_dir is not None
+        ):
+            raise ValueError(
+                "structure_goal_path cannot be combined with structure_dir"
+            )
         if not isinstance(self.host_instance_id, str) or not self.host_instance_id:
             raise ValueError("host_instance_id must be a non-empty string")
         if not isinstance(self.ros_image, str) or not self.ros_image:
@@ -2065,9 +2094,13 @@ class MultiRobotIsaacMoveItSession:
         self.status = RuntimeSessionStatus.STARTING
         self.session_dir.mkdir(parents=True, exist_ok=True)
         try:
-            self._observation_instance_ids = (
-                self.config.resolved_observation_instance_ids()
-            )
+            if (
+                self.config.scene_manifest.is_file()
+                or self.config.observation_physical_instance_ids
+            ):
+                self._observation_instance_ids = (
+                    self.config.resolved_observation_instance_ids()
+                )
             self._verify_plan_robots()
             self._verify_p1a_prerequisite()
             self._verify_session_assets()
@@ -2075,6 +2108,10 @@ class MultiRobotIsaacMoveItSession:
             self._generate_profiles()
             self._launch_host()
             self._wait_for_marker()
+            if not self._observation_instance_ids:
+                self._observation_instance_ids = (
+                    self.config.resolved_observation_instance_ids()
+                )
             self._launch_container()
             self.generated_configs = self._collect_generated_configs()
             evidence = self._run_readiness_session()
@@ -2095,8 +2132,15 @@ class MultiRobotIsaacMoveItSession:
         The A4 host bridge binds one endpoint per validated plan robot, so a
         session whose robot list disagreed with the plan could collect
         readiness from a robot the plan does not contain (or miss one of its
-        robots). The frozen STAP contract is the only parser used here, and
-        the check happens BEFORE any process starts.
+        robots). An ``assembly-plan/v2`` document is validated by the frozen
+        STAP contract; a ``robot-operation-plan/v1`` document is validated by
+        the strict structure-only robot-operation contract with
+        ``source_plan=None`` (the external plan is immutable input that is
+        never bound, reordered, or repaired here). Any other schema falls to
+        the STAP parser and fails closed. The check happens BEFORE any
+        process starts, and the plan contract module is imported lazily so
+        the runtime session import graph stays free of it until verification
+        actually runs.
         """
         if not self.config.verify_plan_robots:
             self.plan_check = {"verified": False, "reason": "disabled by config"}
@@ -2107,6 +2151,38 @@ class MultiRobotIsaacMoveItSession:
             )
         except (OSError, ValueError) as error:
             raise self._fail("plan_robots", f"plan unreadable: {error}")
+        from rocobrick.robot_operation_plan import (
+            ROBOT_OPERATION_PLAN_SCHEMA,
+            parse_robot_operation_plan,
+        )
+
+        if (
+            isinstance(document, dict)
+            and document.get("schema") == ROBOT_OPERATION_PLAN_SCHEMA
+        ):
+            try:
+                operation_plan = parse_robot_operation_plan(
+                    document, source_plan=None
+                )
+            except ValueError as error:
+                raise self._fail(
+                    "plan_robots", f"{type(error).__name__}: {error}"
+                )
+            if set(operation_plan.robots) != set(self.config.robot_ids):
+                raise self._fail(
+                    "plan_robots",
+                    f"the plan robots {sorted(operation_plan.robots)} are not "
+                    f"the session robots {sorted(self.config.robot_ids)}",
+                )
+            self.plan_check = {
+                "verified": True,
+                "schema": operation_plan.schema,
+                "plan_id": operation_plan.plan_id,
+                "source_plan_id": operation_plan.source_plan_id,
+                "plan_robots": list(operation_plan.robots),
+                "session_robots": list(self.config.robot_ids),
+            }
+            return
         try:
             plan = parse_stap_plan(document)
         except ValueError as error:
@@ -2259,7 +2335,10 @@ class MultiRobotIsaacMoveItSession:
         The A4 bridge derives its robot set (one namespaced endpoint pair per
         robot) from the validated STAP plan and the user config; the session
         never passes a robot list of its own, so it cannot disagree with the
-        plan it verified in :meth:`_verify_plan_robots`.
+        plan it verified in :meth:`_verify_plan_robots`. Explicit structure
+        files are forwarded verbatim as ``--structure-goal`` (whenever set)
+        and ``--structure-start`` (only when not ``None``); the start flag is
+        never inferred.
         """
         repo = self.config.repo_root
         argv = [
@@ -2290,6 +2369,16 @@ class MultiRobotIsaacMoveItSession:
             "--config",
             str(self.config.config_path),
         ]
+        if self.config.structure_dir is not None:
+            argv.extend(("--structure-dir", str(self.config.structure_dir)))
+        if self.config.structure_goal_path is not None:
+            argv.extend(
+                ("--structure-goal", str(self.config.structure_goal_path))
+            )
+        if self.config.structure_start_path is not None:
+            argv.extend(
+                ("--structure-start", str(self.config.structure_start_path))
+            )
         if self.config.collision_filter_robot_id is not None:
             argv.extend(
                 ("--physics-filter-robot-id", self.config.collision_filter_robot_id)
@@ -2643,6 +2732,88 @@ class MultiRobotIsaacMoveItSession:
                 f"of {list(self.config.robot_ids)}; {result.error}",
             )
         return evidence
+
+    # ------------------------------------------------------ motion dispatch
+
+    def run_motion_operation(
+        self, robot_id: str, operation: RuntimeOperation
+    ) -> Mapping[str, object]:
+        """Dispatch one validated motion operation to its robot runtime.
+
+        The child session performs the final target admission and action
+        execution. This wrapper only enforces session readiness, robot
+        ownership, request/result identity and fail-closed session state.
+        Cancellation remains owned by the child action runtime; a returned
+        operation record is not treated as safe unless its execution evidence
+        says so.
+        """
+        target = self._require_robot(robot_id)
+        if not isinstance(operation, RuntimeOperation):
+            raise MultiRobotSessionError("operation must be a RuntimeOperation")
+        allowed = frozenset(
+            {
+                OperationKind.JOINT_TARGET,
+                OperationKind.LINK6_POSE,
+                OperationKind.TCP_POSE,
+                OperationKind.GRIPPER_TARGET,
+                OperationKind.APPLY_PLANNING_SCENE,
+            }
+        )
+        if operation.kind not in allowed:
+            raise MultiRobotSessionError(
+                f"{operation.kind.value} is not a motion operation accepted by "
+                f"this session (allowed: {sorted(kind.value for kind in allowed)})"
+            )
+        self._require_ready("run_motion_operation")
+        request = RosSessionRequest(
+            request_id=f"session-{uuid4().hex[:12]}",
+            robots=self.config.robot_ids,
+            timeout_s=self.config.operation_timeout_s,
+            operations=(RobotOperationRequest(robot_id=target, operation=operation),),
+        )
+        directory = self.session_dir / "operations"
+        request_path = directory / f"{target}-{operation.request_id}-request.json"
+        result_path = directory / f"{target}-{operation.request_id}-result.json"
+        try:
+            result = self._dispatch_session(
+                request,
+                request_path,
+                result_path,
+                timeout_s=self.config.operation_timeout_s + CHILD_EXEC_MARGIN_S,
+            )
+            matches = [
+                record
+                for record in result.operations
+                if str(record.get("robot_id")) == target
+                and str(record.get("operation_id")) == operation.request_id
+            ]
+            if len(matches) != 1:
+                raise self._fail(
+                    "motion_operation",
+                    f"the session answer carries {len(matches)} records for "
+                    f"{target}/{operation.request_id}; exactly one is required",
+                )
+            record = matches[0]
+            if str(record.get("kind")) != operation.kind.value:
+                raise self._fail(
+                    "motion_operation",
+                    f"the record kind {record.get('kind')!r} does not answer "
+                    f"{operation.kind.value!r}",
+                )
+            inner = RuntimeOperationResult.parse(record.get("result"))
+            if inner.request_id != operation.request_id or inner.kind is not operation.kind:
+                raise self._fail(
+                    "motion_operation",
+                    "the operation result does not answer the request",
+                )
+            self.last_result = inner
+            if not inner.passed:
+                self.status = RuntimeSessionStatus.FAILED
+            return record
+        except MultiRobotSessionError:
+            self.status = RuntimeSessionStatus.FAILED
+            self._write_evidence()
+            raise
 
     # ---------------------------------------------------- read-only dispatch
 

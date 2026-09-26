@@ -75,6 +75,9 @@ ALLOWED_ROCOBRICK = {
     # executor are imported lazily, only after every immutable gate and the
     # TCP authorization have passed, and only for explicit dispatch.
     "rocobrick.multi_robot_runtime",
+    "rocobrick.adapters.moveit.transit",
+    "rocobrick.execution.operation_state_ledger",
+    "rocobrick.plan.structure_scene",
     "rocobrick.robot_operation_executor",
     "rocobrick.robot_operation_runner",
 }
@@ -938,6 +941,53 @@ def test_piper_run_imports_only_accepted_libraries():
     rocobrick = {name for name in imported if name.startswith("rocobrick")}
     assert rocobrick <= ALLOWED_ROCOBRICK
     assert "rocobrick.contracts" not in imported
+
+
+def test_operation_phase_imports_its_owned_dependencies():
+    """The deferred production imports must resolve without compatibility exports."""
+    tree = ast.parse(PIPER_RUN_SOURCE.read_text(encoding="utf-8"))
+    phase = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef)
+        and node.name == "_robot_operation_plan_phase"
+    )
+    sources = {
+        alias.name: node.module
+        for node in ast.walk(phase)
+        if isinstance(node, ast.ImportFrom)
+        for alias in node.names
+    }
+    expected = {
+        "OperationStateLedger": "rocobrick.execution.operation_state_ledger",
+        "SessionTcpMotionAdapter": "rocobrick.adapters.moveit.transit",
+        "load_transit_contexts": "rocobrick.adapters.moveit.transit",
+        "SkillOperationExecutor": "rocobrick.robot_operation_executor",
+    }
+    for name, module in expected.items():
+        assert sources[name] == module
+
+    env = dict(os.environ)
+    env["PYTHONPATH"] = os.pathsep.join([
+        str(ROOT / "src"), str(ROOT), env.get("PYTHONPATH", "")
+    ])
+    proc = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "from rocobrick.adapters.moveit.transit import "
+            "SessionTcpMotionAdapter, load_transit_contexts; "
+            "from rocobrick.execution.operation_state_ledger import "
+            "OperationStateLedger; "
+            "from rocobrick.robot_operation_executor import SkillOperationExecutor",
+        ],
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=15,
+        check=False,
+    )
+    assert proc.returncode == 0, proc.stderr
 
 
 def test_piper_run_never_calls_the_metric_parser():

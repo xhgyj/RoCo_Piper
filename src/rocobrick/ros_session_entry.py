@@ -449,6 +449,11 @@ def execution_record(outcome: ExecutionResult) -> dict[str, object]:
             for name, value in outcome.final_errors.items()
         },
         "is_success": is_success(outcome),
+        "goal_accepted": outcome.goal_accepted,
+        "terminal": outcome.terminal,
+        "safe_to_release": outcome.safe_to_release,
+        "action_status": outcome.action_status,
+        "cancel_evidence": _jsonable(dict(outcome.cancel_evidence)),
         "details": _jsonable(dict(outcome.details)),
     }
 

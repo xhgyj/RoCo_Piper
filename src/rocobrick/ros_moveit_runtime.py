@@ -740,6 +740,10 @@ class RosMoveItRuntime:
         self._move_group_client: Any = None
         self._gripper_client: Any = None
         self._active_handle: Any = None
+        # Keep both futures so a timeout can handle late goal acceptance and
+        # wait for the action result after cancel_goal_async().
+        self._active_goal_future: Any = None
+        self._active_result_future: Any = None
         self._resolved_factories: RosMoveItFactories | None = None
         self.shutdown_errors: list[str] = []
 
@@ -1869,6 +1873,7 @@ class RosMoveItRuntime:
         client = self._gripper_client
         try:
             future = client.send_goal_async(goal)
+            self._active_goal_future = future
         except Exception as exc:
             details["error"] = f"send_goal_async failed: {type(exc).__name__}: {exc}"
             return ExecutionResult(
@@ -1879,8 +1884,15 @@ class RosMoveItRuntime:
             details["error"] = (
                 "gripper goal response not received before the acceptance deadline"
             )
+            details["cancel"] = self.cancel_active()
+            lifecycle = details["cancel"]
+            self._active_goal_future = None
             return ExecutionResult(
-                status=ExecutionStatus.TIMED_OUT, details=details, command_messages=1
+                status=ExecutionStatus.TIMED_OUT, details=details, command_messages=1,
+                goal_accepted=lifecycle.get("goal_accepted"),
+                terminal=bool(lifecycle.get("terminal", False)),
+                safe_to_release=bool(lifecycle.get("safe", False)),
+                cancel_evidence=lifecycle,
             )
         handle = future.result()
         if handle is None or not getattr(handle, "accepted", False):
@@ -1892,10 +1904,14 @@ class RosMoveItRuntime:
             )
         self._active_handle = handle
         details["accepted"] = True
-        result_future = handle.get_result_async()
+        self._active_result_future = handle.get_result_async()
+        result_future = self._active_result_future
         if not self._wait_future(result_future, deadline):
             details["cancel"] = self.cancel_active()
+            lifecycle = details["cancel"]
             self._active_handle = None
+            self._active_goal_future = None
+            self._active_result_future = None
             details["phase"] = "execution"
             details["error"] = (
                 f"gripper action exceeded the {timeout_s}s wall deadline "
@@ -1905,6 +1921,8 @@ class RosMoveItRuntime:
                 status=ExecutionStatus.TIMED_OUT, details=details, command_messages=1
             )
         self._active_handle = None
+        self._active_goal_future = None
+        self._active_result_future = None
         wrapper = result_future.result()
         details["goal_status"] = int(wrapper.status)
         details["action_status"] = _terminal_status_name(
@@ -2188,6 +2206,7 @@ class RosMoveItRuntime:
         client = self._move_group_client
         try:
             future = client.send_goal_async(goal)
+            self._active_goal_future = future
         except Exception as exc:
             details["error"] = f"send_goal_async failed: {type(exc).__name__}: {exc}"
             return ExecutionResult(
@@ -2198,10 +2217,17 @@ class RosMoveItRuntime:
             details["error"] = (
                 "move_group goal response not received before the acceptance deadline"
             )
+            details["cancel"] = self.cancel_active()
+            lifecycle = details["cancel"]
+            self._active_goal_future = None
             return ExecutionResult(
                 status=ExecutionStatus.TIMED_OUT,
                 details=details,
                 command_messages=self._command_count - send_commands,
+                goal_accepted=lifecycle.get("goal_accepted"),
+                terminal=bool(lifecycle.get("terminal", False)),
+                safe_to_release=bool(lifecycle.get("safe", False)),
+                cancel_evidence=lifecycle,
             )
         handle = future.result()
         if handle is None or not getattr(handle, "accepted", False):
@@ -2215,10 +2241,14 @@ class RosMoveItRuntime:
             )
         self._active_handle = handle
         details["accepted"] = True
-        result_future = handle.get_result_async()
+        self._active_result_future = handle.get_result_async()
+        result_future = self._active_result_future
         if not self._wait_future(result_future, deadline):
             details["cancel"] = self.cancel_active()
+            lifecycle = details["cancel"]
             self._active_handle = None
+            self._active_goal_future = None
+            self._active_result_future = None
             details["phase"] = "execution"
             details["error"] = (
                 f"move_group action exceeded the {timeout_s}s wall deadline "
@@ -2228,14 +2258,23 @@ class RosMoveItRuntime:
                 status=ExecutionStatus.TIMED_OUT,
                 details=details,
                 command_messages=self._command_count - send_commands,
+                goal_accepted=True,
+                terminal=bool(lifecycle.get("terminal", False)),
+                safe_to_release=bool(lifecycle.get("safe", False)),
+                cancel_evidence=lifecycle,
             )
         self._active_handle = None
+        self._active_goal_future = None
+        self._active_result_future = None
         wrapper = result_future.result()
         action_result = wrapper.result
         status = _map_goal_status(wrapper.status, factories.goal_status_type())
         error_code = int(getattr(action_result.error_code, "val"))
         planned_waypoints, trajectory_decision = self._inspect_trajectory(action_result)
         details["goal_status"] = int(wrapper.status)
+        details["action_status"] = _terminal_status_name(
+            wrapper.status, factories.goal_status_type()
+        )
         details["trajectory_accepted"] = trajectory_decision.accepted
         if not trajectory_decision.accepted:
             details["trajectory"] = dict(trajectory_decision.details)
@@ -2243,6 +2282,10 @@ class RosMoveItRuntime:
             moveit_error_code=error_code,
             planned_waypoints=planned_waypoints,
             command_messages=self._command_count - send_commands,
+            goal_accepted=True,
+            terminal=True,
+            safe_to_release=True,
+            action_status=details["action_status"],
         )
         if status is not ExecutionStatus.SUCCEEDED:
             details["error"] = "move_group terminal status did not report success"
@@ -2445,6 +2488,17 @@ class RosMoveItRuntime:
             "position_error_m": position_error,
             "orientation_error_rad": orientation_error,
         }
+        details["final_fk_position_m"] = [float(value) for value in position]
+        details["final_fk_orientation_xyzw"] = [float(value) for value in quaternion]
+        details["target_position_m"] = [float(value) for value in target.position]
+        details["target_orientation_xyzw"] = [float(value) for value in target.orientation_xyzw]
+        details["position_residual_m"] = [
+            float(actual) - float(goal)
+            for actual, goal in zip(position, target.position)
+        ]
+        details["final_arm_joint_positions_rad"] = {
+            name: float(final[name]) for name in ARM_JOINT_NAMES if name in final
+        }
         details["position_tolerance_m"] = MAX_POSITION_TOLERANCE_M
         details["orientation_tolerance_rad"] = MAX_ORIENTATION_TOLERANCE_RAD
         if (
@@ -2476,26 +2530,69 @@ class RosMoveItRuntime:
     # ---------------------------------------------------------------- control
 
     def cancel_active(self) -> dict[str, object]:
-        """Best-effort bounded cancellation of the active MoveGroup goal."""
-        handle = self._active_handle
-        if handle is None:
-            return {"attempted": False}
-        info: dict[str, object] = {"attempted": True}
+        """Cancel the active goal and wait for its final action result.
+
+        A cancel request acknowledgement alone is not terminal evidence. This
+        method also settles a late goal acceptance and then waits for the
+        accepted goal's result future.
+        """
+        info: dict[str, object] = {
+            "attempted": True,
+            "goal_accepted": None,
+            "terminal": False,
+            "safe": False,
+        }
+        deadline = self._clock_fn() + CANCEL_TIMEOUT_S
         try:
-            future = handle.cancel_goal_async()
-            deadline = self._clock_fn() + CANCEL_TIMEOUT_S
-            while not future.done():
+            handle = self._active_handle
+            goal_future = self._active_goal_future
+            if handle is None and goal_future is not None:
+                while not goal_future.done():
+                    self._spin_fn()
+                    if self._clock_fn() >= deadline:
+                        info["error"] = "goal acceptance did not settle before cancel deadline"
+                        return info
+                    self._sleep_fn(self._wait_step_s)
+                handle = goal_future.result()
+                if handle is None or not getattr(handle, "accepted", False):
+                    info["goal_accepted"] = False
+                    info["terminal"] = True
+                    info["safe"] = True
+                    info["final_action_status"] = "REJECTED"
+                    return info
+                self._active_handle = handle
+                self._active_result_future = handle.get_result_async()
+            if handle is None:
+                return {"attempted": False}
+            info["goal_accepted"] = True
+            cancel_future = handle.cancel_goal_async()
+            while not cancel_future.done():
                 self._spin_fn()
-                if future.done():
-                    break
                 if self._clock_fn() >= deadline:
                     info["error"] = "cancel did not complete before its deadline"
                     return info
                 self._sleep_fn(self._wait_step_s)
-            info["return_code"] = int(future.result().return_code)
+            cancel_response = cancel_future.result()
+            info["return_code"] = int(getattr(cancel_response, "return_code"))
+            result_future = self._active_result_future
+            if result_future is None:
+                info["error"] = "accepted goal has no result future"
+                return info
+            while not result_future.done():
+                self._spin_fn()
+                if self._clock_fn() >= deadline:
+                    info["error"] = "action result did not settle after cancel"
+                    return info
+                self._sleep_fn(self._wait_step_s)
+            wrapper = result_future.result()
+            status = int(getattr(wrapper, "status"))
+            info["final_action_status"] = status
+            info["terminal"] = True
+            info["safe"] = True
+            return info
         except Exception as exc:
             info["error"] = f"{type(exc).__name__}: {exc}"
-        return info
+            return info
 
     def shutdown(self) -> None:
         """Best-effort teardown of every registered handle; errors recorded."""

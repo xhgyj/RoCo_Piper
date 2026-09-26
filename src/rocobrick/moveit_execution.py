@@ -42,6 +42,12 @@ class ExecutionResult:
     command_messages: int = 0
     final_errors: Mapping[str, float] = field(default_factory=dict)
     details: Mapping[str, object] = field(default_factory=dict)
+    # Additive action lifecycle evidence. Existing callers remain compatible.
+    goal_accepted: bool | None = None
+    terminal: bool = False
+    safe_to_release: bool = False
+    action_status: str | None = None
+    cancel_evidence: Mapping[str, object] = field(default_factory=dict)
 
 
 @runtime_checkable

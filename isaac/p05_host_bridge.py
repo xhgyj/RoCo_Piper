@@ -216,6 +216,9 @@ def _argv_from_args(args: argparse.Namespace) -> list[str]:
         ("--host-instance-id", args.host_instance_id),
         ("--plan", args.plan),
         ("--config", args.config),
+        ("--structure-dir", args.structure_dir),
+        ("--structure-goal", args.structure_goal),
+        ("--structure-start", args.structure_start),
         ("--physics-filter-robot-id", args.physics_filter_robot_id),
     ):
         if value is not None:
@@ -1109,6 +1112,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--host-instance-id", type=str, default=None)
     parser.add_argument("--plan", type=Path, default=None)
     parser.add_argument("--config", type=Path, default=None)
+    parser.add_argument("--structure-dir", type=Path, default=None)
+    parser.add_argument("--structure-goal", type=Path, default=None)
+    parser.add_argument("--structure-start", type=Path, default=None)
     parser.add_argument("--physics-filter-robot-id", type=str, default=None)
     parser.add_argument("--physics-filter-instance-id", action="append", default=[])
     parser.add_argument(
@@ -1132,6 +1138,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         parser.error("scene snapshot mode requires --plan and --config")
     if args.scene_manifest is None and (args.plan is not None or args.config is not None):
         parser.error("--plan and --config require scene snapshot mode")
+    if args.structure_start is not None and args.structure_goal is None:
+        parser.error("--structure-start requires --structure-goal")
+    if args.structure_goal is not None and args.structure_dir is not None:
+        parser.error("--structure-goal cannot be combined with --structure-dir")
+    if (
+        args.structure_goal is not None or args.structure_start is not None
+    ) and args.scene_manifest is None:
+        parser.error(
+            "--structure-goal/--structure-start require scene snapshot mode"
+        )
     if any(type(item) is not str or not item for item in args.physics_filter_instance_id):
         parser.error("--physics-filter-instance-id values must be non-empty strings")
     if len(set(args.physics_filter_instance_id)) != len(args.physics_filter_instance_id):
@@ -1599,16 +1615,47 @@ async def run_bridge(args: argparse.Namespace, state: BridgeState, evidence: dic
     else:
         from rocobrick.isaac_snapshot_host_adapter import (
             build_host_binding, collect_stage_snapshot, load_scene_snapshot_manifest,
+            build_scene_manifest_from_runtime_host, write_scene_manifest_atomic,
             write_snapshot_artifact_atomic,
         )
+        from rocobrick.robot_operation_plan import parse_robot_operation_plan
         from rocobrick.runtime_host import bootstrap_runtime_host
         from rocobrick.runtime_host_inputs import build_runtime_host_inputs
         from rocobrick.stap_contract import parse_stap_plan
+        from rocobrick.structure_scene import (
+            build_structure_scene_plan, build_structure_scene_plan_from_files,
+        )
 
         try:
             plan_bytes = args.plan.read_bytes()
             evidence["scene_runtime"]["plan_sha256"] = hashlib.sha256(plan_bytes).hexdigest()
-            plan = parse_stap_plan(json.loads(plan_bytes))
+            plan_document = json.loads(plan_bytes)
+            if args.structure_dir is not None:
+                plan, structure_evidence = build_structure_scene_plan(args.structure_dir, plan_document)
+                evidence["scene_runtime"]["structure"] = structure_evidence
+            elif args.structure_goal is not None:
+                # Additive explicit-files mode (scene loading only): the
+                # external robot-operation-plan/v1 is parsed strictly first,
+                # then the explicit goal (and optional start; None means EMPTY
+                # initial structure - no directory default) build the internal
+                # topology carrier. This dispatches no operation and
+                # authorizes no motion; any parse or binding failure raises
+                # here, before bootstrap_runtime_host runs.
+                parse_robot_operation_plan(plan_document)
+                plan, structure_evidence = build_structure_scene_plan_from_files(
+                    args.structure_start,
+                    args.structure_goal,
+                    plan_document,
+                    manifest=(
+                        args.scene_manifest
+                        if args.scene_manifest is not None
+                        and args.scene_manifest.is_file()
+                        else None
+                    ),
+                )
+                evidence["scene_runtime"]["structure"] = structure_evidence
+            else:
+                plan = parse_stap_plan(plan_document)
             config = json.loads(args.config.read_text(encoding="utf-8"))
             inputs = build_runtime_host_inputs(
                 plan,
@@ -1694,7 +1741,24 @@ async def run_bridge(args: argparse.Namespace, state: BridgeState, evidence: dic
                 ),
             })
 
-            manifest = load_scene_snapshot_manifest(args.scene_manifest)
+            manifest_generated = False
+            if args.scene_manifest.is_file():
+                manifest = load_scene_snapshot_manifest(args.scene_manifest)
+            else:
+                manifest = build_scene_manifest_from_runtime_host(
+                    runtime_host,
+                    scene_id=args.host_instance_id,
+                    runtime_usd_sha256=evidence["usd"]["sha256"],
+                )
+                write_scene_manifest_atomic(manifest, args.scene_manifest)
+                manifest_generated = True
+            evidence["scene_runtime"]["scene_manifest"] = {
+                "path": str(args.scene_manifest),
+                "source": (
+                    "isaac_runtime_stage" if manifest_generated else "provided"
+                ),
+                "manifest_sha256": manifest.manifest_sha256,
+            }
             manifest_map = {
                 item.physical_instance_id: item.prim_path
                 for item in manifest.objects

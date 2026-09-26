@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import tempfile
+import hashlib
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -20,6 +21,7 @@ from rocobrick.scene_snapshot_collector import (
 
 __all__ = [
     "SceneSnapshotHostAdapterError", "load_scene_snapshot_manifest",
+    "build_scene_manifest_from_runtime_host", "write_scene_manifest_atomic",
     "build_host_binding", "make_world_aabb_reader", "collect_stage_snapshot",
     "snapshot_artifact_payload", "write_snapshot_artifact_atomic",
 ]
@@ -57,6 +59,81 @@ def load_scene_snapshot_manifest(path: str | os.PathLike[str]) -> SceneSnapshotM
     except Exception as exc:
         _fail("manifest", "invalid JSON or schema", exc)
 
+
+
+def build_scene_manifest_from_runtime_host(
+    runtime_host: Any,
+    *,
+    scene_id: str,
+    runtime_usd_sha256: str,
+) -> SceneSnapshotManifest:
+    """Build a manifest from the objects actually loaded into Isaac."""
+    paths = getattr(runtime_host, "physical_instance_paths", None)
+    bricks = getattr(runtime_host, "physical_instance_brick_ids", None)
+    if not isinstance(paths, dict) and not hasattr(paths, "items"):
+        _fail("manifest", "runtime host has no physical instance paths")
+    if not isinstance(bricks, dict) and not hasattr(bricks, "items"):
+        _fail("manifest", "runtime host has no physical instance brick ids")
+    if set(paths) != set(bricks) or not paths:
+        _fail("manifest", "runtime host instance mappings are incomplete")
+    try:
+        revision = str(runtime_usd_sha256)
+        if len(revision) != 64:
+            revision = hashlib.sha256(revision.encode("utf-8")).hexdigest()
+        objects = tuple(
+            SceneObjectManifest(
+                physical_instance_id=str(instance_id),
+                brick_id=int(bricks[instance_id]),
+                prim_path=str(paths[instance_id]),
+                asset_revision_sha256=revision,
+                provenance={"source": "isaac_runtime_stage"},
+            )
+            for instance_id in sorted(paths)
+        )
+        return SceneSnapshotManifest(
+            schema=
+                "rocobrick-scene-snapshot-manifest/v1",
+            scene_id=str(scene_id),
+            frame_id="world",
+            objects=objects,
+        )
+    except SceneSnapshotHostAdapterError:
+        raise
+    except Exception as exc:
+        _fail("manifest", "failed to build from runtime host", exc)
+
+
+def write_scene_manifest_atomic(
+    manifest: SceneSnapshotManifest, path: str | os.PathLike[str]
+) -> None:
+    """Write an automatically generated manifest atomically."""
+    if not isinstance(manifest, SceneSnapshotManifest):
+        _fail("manifest", "invalid manifest")
+    target = Path(path)
+    tmp = None
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        fd, tmpname = tempfile.mkstemp(
+            prefix=f".{target.name}.", dir=str(target.parent)
+        )
+        tmp = Path(tmpname)
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            json.dump(
+                manifest.to_canonical_payload(),
+                fh, sort_keys=True, separators=(",", ":"),
+            )
+            fh.write("\n")
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, target)
+        tmp = None
+    except Exception as exc:
+        if tmp is not None:
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
+        _fail("manifest", "atomic write failed", exc)
 
 def build_host_binding(*, host_instance_id: str, ros_domain_id: int,
                        host_profile_sha256: str, host_bridge_schema: str,
