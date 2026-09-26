@@ -767,13 +767,6 @@ class SkillOperationExecutor:
         execute = getattr(adapter, "execute", None)
         if not callable(execute):
             return self._failed(operation, "TRANSIT_ADAPTER_INVALID")
-        try:
-            result = await asyncio.to_thread(execute, operation, target)
-        except Exception as error:
-            return self._failed(operation, f"TRANSIT_ADAPTER_FAILED: {error}")
-        if not isinstance(result, MotionExecution):
-            return self._failed(operation, "TRANSIT_RESULT_INVALID")
-        evidence: dict[str, JSONValue] = dict(result.evidence)
         target_values = operation.target.values if operation.target is not None else {}
         destination = target_values.get("to")
         destination_kind = (
@@ -801,6 +794,20 @@ class SkillOperationExecutor:
             ]
             if active_holding:
                 return self._failed(operation, "CARRYING_INSTANCE_REQUIRED")
+        try:
+            result = await asyncio.to_thread(execute, operation, target)
+        except Exception as error:
+            return self._failed(operation, f"TRANSIT_ADAPTER_FAILED: {error}")
+        if not isinstance(result, MotionExecution):
+            return self._failed(operation, "TRANSIT_RESULT_INVALID")
+        evidence: dict[str, JSONValue] = dict(result.evidence)
+        target_values = operation.target.values if operation.target is not None else {}
+        destination = target_values.get("to")
+        destination_kind = (
+            destination.get("kind")
+            if isinstance(destination, Mapping)
+            else None
+        )
         if result.passed and result.terminal and result.safe_to_release:
             final_scene = await self._observe_or_cancel(robot_id, asyncio.Event())
             if final_scene is None or not isinstance(final_scene.get("bricks"), Mapping):
