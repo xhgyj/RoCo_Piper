@@ -46,6 +46,7 @@ Boundaries recorded for later phases (deliberately NOT implemented here):
 from __future__ import annotations
 
 import asyncio
+import inspect
 import math
 import time
 from collections.abc import Mapping, Sequence
@@ -635,9 +636,13 @@ class SkillOperationExecutor:
                     "the frozen shape",
                 )
             if skill == TRANSIT and robot_id in self._transit_adapters:
-                return await self._transit(operation, robot_id)
+                return await self._run_motion_operation(
+                    operation, lambda: self._transit(operation, robot_id)
+                )
             if skill == PICK and robot_id in self._pick_backends:
-                return await self._pick(operation, robot_id)
+                return await self._run_motion_operation(
+                    operation, lambda: self._pick(operation, robot_id)
+                )
             return self._failed(operation, REASON_CAPABILITY_UNAVAILABLE)
         if skill != WAIT:
             return self._failed(operation, REASON_CAPABILITY_UNAVAILABLE)
@@ -663,6 +668,29 @@ class SkillOperationExecutor:
                 f"{REASON_WAIT_PARAMETERS_INVALID}: {error}",
             )
         return await self._wait(operation, robot_id, parameters)
+
+    async def _run_motion_operation(
+        self, operation: RobotOperation, callback: object
+    ) -> OperationExecution:
+        """Track one motion operation independently from other robots."""
+        record = _ActiveOperation(
+            operation_id=operation.operation_id,
+            robot_id=operation.executor_robot_id,
+            skill=operation.skill,
+            cancel_event=asyncio.Event(),
+            finished=asyncio.get_running_loop().create_future(),
+        )
+        self._active[operation.operation_id] = record
+        try:
+            result = callback()
+            if not inspect.isawaitable(result):
+                raise TypeError("motion callback must return an awaitable")
+            return await result
+        finally:
+            self._active.pop(operation.operation_id, None)
+            self._finished[operation.operation_id] = record.motion_sent
+            if not record.finished.done():
+                record.finished.set_result(None)
 
     async def cancel(self, operation_id: str) -> CancelEvidence:
         """Request cancellation and report terminal safety explicitly.
@@ -711,18 +739,43 @@ class SkillOperationExecutor:
             )
         record.cancel_event.set()
         if record.motion_sent:
+            adapter = self._transit_adapters.get(record.robot_id)
+            cancel = getattr(adapter, "cancel", None)
+            if not callable(cancel):
+                return CancelEvidence(
+                    operation_id=operation_id,
+                    acknowledged=True,
+                    terminal=False,
+                    safe=False,
+                    evidence={
+                        "cancel_error": "motion adapter has no cancel boundary",
+                        "motion_sent": True,
+                    },
+                )
+            try:
+                raw = await asyncio.to_thread(cancel, operation_id)
+            except Exception as exc:
+                return CancelEvidence(
+                    operation_id=operation_id,
+                    acknowledged=False,
+                    terminal=False,
+                    safe=False,
+                    evidence={"cancel_error": repr(exc), "motion_sent": True},
+                )
+            if not isinstance(raw, Mapping):
+                return CancelEvidence(
+                    operation_id=operation_id,
+                    acknowledged=False,
+                    terminal=False,
+                    safe=False,
+                    evidence={"cancel_error": "invalid motion cancel evidence"},
+                )
             return CancelEvidence(
                 operation_id=operation_id,
-                acknowledged=True,
-                terminal=False,
-                safe=False,
-                evidence={
-                    "cancel_error": (
-                        "motion may be in flight and no safe stop is "
-                        "implemented"
-                    ),
-                    "motion_sent": True,
-                },
+                acknowledged=raw.get("attempted") is True,
+                terminal=raw.get("terminal") is True,
+                safe=raw.get("safe") is True,
+                evidence=dict(raw),
             )
         try:
             await asyncio.wait_for(
@@ -758,7 +811,12 @@ class SkillOperationExecutor:
         if adapter is None or context is None:
             return self._failed(operation, REASON_CAPABILITY_UNAVAILABLE)
         try:
-            scene = await self._observe_or_cancel(robot_id, asyncio.Event())
+            scene = await self._observe_or_cancel(
+                robot_id,
+                self._active[operation.operation_id].cancel_event
+                if operation.operation_id in self._active
+                else asyncio.Event(),
+            )
             if scene is None:
                 return self._failed(operation, "STALE_WORLD")
             target = resolve_transit_target(scene, operation, context)
@@ -794,6 +852,9 @@ class SkillOperationExecutor:
             ]
             if active_holding:
                 return self._failed(operation, "CARRYING_INSTANCE_REQUIRED")
+        record = self._active.get(operation.operation_id)
+        if record is not None:
+            record.motion_sent = True
         try:
             result = await asyncio.to_thread(execute, operation, target)
         except Exception as error:

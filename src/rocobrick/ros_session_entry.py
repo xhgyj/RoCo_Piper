@@ -42,6 +42,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import signal
 import threading
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import asdict, dataclass
@@ -1133,7 +1134,20 @@ def _main_session(args: argparse.Namespace, robots: tuple[str, ...]) -> int:
         session, background, thread, node = _spin_up_session(
             args.node_name, robots, min(FK_TIMEOUT_S, request.timeout_s)
         )
-        result = perform_session(session, request)
+        previous_sigint = signal.getsignal(signal.SIGINT)
+
+        def _cancel_active_runtime(_signum: int, _frame: object) -> None:
+            for item in request.operations:
+                runtime = session.runtime_for(item.robot_id)
+                cancel = getattr(runtime, "cancel_active", None)
+                if callable(cancel):
+                    cancel()
+
+        signal.signal(signal.SIGINT, _cancel_active_runtime)
+        try:
+            result = perform_session(session, request)
+        finally:
+            signal.signal(signal.SIGINT, previous_sigint)
     except Exception as error:  # noqa: BLE001 - the child must always answer
         result = RosSessionResult(
             request_id=request.request_id,

@@ -2006,6 +2006,8 @@ class MultiRobotIsaacMoveItSession:
         self._dds_dir = self.session_dir / "dds"
         self._host_log = self.session_dir / "host-bridge.log"
         self._container_log = self.session_dir / "dual-launch.log"
+        self._active_motion_children: dict[str, tuple[ProcessHandle, Path]] = {}
+        self._active_motion_lock = threading.Lock()
         self._config_output_dir = (
             self.session_dir / config.config_output_subdir
         )
@@ -2630,6 +2632,7 @@ class MultiRobotIsaacMoveItSession:
         result_path: Path,
         *,
         timeout_s: float,
+        cancellable: bool = False,
     ) -> RosSessionResult:
         """Run one session envelope through the container and validate it.
 
@@ -2642,21 +2645,57 @@ class MultiRobotIsaacMoveItSession:
         if self.container_name is None:
             raise self._fail("session_dispatch", "no container is running")
         _write_json_atomic(request_path, request.serialize())
-        outcome = self.runner.run(
-            self._session_child_argv(request_path, result_path),
-            timeout_s=timeout_s,
-        )
-        if outcome.timed_out:
-            raise self._fail(
-                "session_dispatch",
-                f"the child session entry exceeded its {timeout_s}s bound",
+        if not cancellable:
+            outcome = self.runner.run(
+                self._session_child_argv(request_path, result_path),
+                timeout_s=timeout_s,
             )
-        if not result_path.is_file():
-            raise self._fail(
-                "session_dispatch",
-                f"the child session entry wrote no result "
-                f"(exit={outcome.returncode}): {outcome.stderr.strip()[-400:]}",
+            if outcome.timed_out:
+                raise self._fail(
+                    "session_dispatch",
+                    f"the child session entry exceeded its {timeout_s}s bound",
+                )
+            if not result_path.is_file():
+                raise self._fail(
+                    "session_dispatch",
+                    f"the child session entry wrote no result "
+                    f"(exit={outcome.returncode}): {outcome.stderr.strip()[-400:]}",
+                )
+        else:
+            output_path = result_path.with_suffix(result_path.suffix + ".stdout.log")
+            error_path = result_path.with_suffix(result_path.suffix + ".stderr.log")
+            handle = self.runner.launch(
+                self._session_child_argv(request_path, result_path),
+                env=dict(self._base_env),
+                stdout_path=output_path,
+                stderr_path=error_path,
             )
+            with self._active_motion_lock:
+                self._active_motion_children[request.request_id] = (handle, result_path)
+            deadline = self._clock() + timeout_s
+            try:
+                while handle.poll() is None:
+                    if self._clock() >= deadline:
+                        try:
+                            handle.send_signal(signal.SIGINT)
+                        except Exception:
+                            pass
+                        raise self._fail(
+                            "session_dispatch",
+                            f"the child session entry exceeded its {timeout_s}s bound",
+                        )
+                    self._sleep(0.05)
+                handle.wait(timeout_s=0.0)
+            finally:
+                with self._active_motion_lock:
+                    self._active_motion_children.pop(request.request_id, None)
+            if not result_path.is_file():
+                error_text = error_path.read_text(encoding="utf-8")[-400:]
+                raise self._fail(
+                    "session_dispatch",
+                    f"the child session entry wrote no result "
+                    f"(exit={handle.poll()}): {error_text}",
+                )
         try:
             document = json.loads(result_path.read_text(encoding="utf-8"))
         except (OSError, ValueError) as error:
@@ -2780,6 +2819,7 @@ class MultiRobotIsaacMoveItSession:
                 request_path,
                 result_path,
                 timeout_s=self.config.operation_timeout_s + CHILD_EXEC_MARGIN_S,
+                cancellable=True,
             )
             matches = [
                 record
@@ -2814,6 +2854,43 @@ class MultiRobotIsaacMoveItSession:
             self.status = RuntimeSessionStatus.FAILED
             self._write_evidence()
             raise
+
+    # ------------------------------------------------------ motion cancellation
+
+    def cancel_motion_operation(self, operation_id: str) -> Mapping[str, object]:
+        """Signal one running motion child and wait for its strict result."""
+        if not isinstance(operation_id, str) or not operation_id:
+            raise ValueError("operation_id must be a non-empty string")
+        with self._active_motion_lock:
+            entry = self._active_motion_children.get(operation_id)
+        if entry is None:
+            return {"attempted": False, "terminal": False, "safe": False,
+                    "error": "motion child is not active"}
+        handle, result_path = entry
+        try:
+            handle.send_signal(signal.SIGINT)
+        except Exception as exc:
+            return {"attempted": True, "terminal": False, "safe": False,
+                    "error": f"failed to signal motion child: {type(exc).__name__}: {exc}"}
+        deadline = self._clock() + CANCEL_TIMEOUT_S
+        while handle.poll() is None and self._clock() < deadline:
+            self._sleep(0.05)
+        if handle.poll() is None:
+            return {"attempted": True, "terminal": False, "safe": False,
+                    "error": "motion child did not exit after SIGINT"}
+        terminal = False
+        safe = False
+        try:
+            document = json.loads(result_path.read_text(encoding="utf-8"))
+            records = document.get("operations", [])
+            if isinstance(records, list) and len(records) == 1:
+                execution = records[0].get("result", {}).get("execution", {})
+                terminal = execution.get("terminal") is True
+                safe = execution.get("safe_to_release") is True
+        except (OSError, ValueError, AttributeError):
+            pass
+        return {"attempted": True, "terminal": terminal, "safe": safe,
+                "process_exit": handle.poll(), "result_path": str(result_path)}
 
     # ---------------------------------------------------- read-only dispatch
 

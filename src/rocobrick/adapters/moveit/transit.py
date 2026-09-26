@@ -35,6 +35,9 @@ class MotionSession(Protocol):
     ) -> Mapping[str, object]:
         """Dispatch one validated runtime motion operation."""
 
+    def cancel_motion_operation(self, operation_id: str) -> Mapping[str, object]:
+        """Cancel one running operation and return lifecycle evidence."""
+
 
 @dataclass(frozen=True)
 class MotionExecution:
@@ -185,6 +188,18 @@ class SessionTcpMotionAdapter:
             raise ValueError("robot_id must be a non-empty string")
         self._session = session
         self._robot_id = robot_id
+
+    def cancel(self, operation_id: str) -> Mapping[str, object]:
+        """Delegate cancellation to the owning multi-robot session."""
+        cancel = getattr(self._session, "cancel_motion_operation", None)
+        if not callable(cancel):
+            return {
+                "attempted": False,
+                "terminal": False,
+                "safe": False,
+                "error": "session has no operation cancellation boundary",
+            }
+        return cancel(operation_id)
 
     def execute(
         self, operation: RobotOperation, target: TcpPoseTarget
