@@ -10,7 +10,11 @@ from pathlib import Path
 from typing import Protocol
 
 from rocobrick.isaac_backend import tcp_pose_operation
-from rocobrick.moveit_contract import TcpPoseTarget
+from rocobrick.moveit_contract import (
+    MAX_ORIENTATION_TOLERANCE_RAD,
+    MAX_POSITION_TOLERANCE_M,
+    TcpPoseTarget,
+)
 from rocobrick.multi_robot_scheduler import JSONValue
 from rocobrick.robot_operation_plan import RobotOperation
 from rocobrick.skill_targets import (
@@ -222,15 +226,20 @@ class SessionTcpMotionAdapter:
         ):
             position_error = final_errors.get("position_error_m")
             orientation_error = final_errors.get("orientation_error_rad")
+            # The final FK feedback is confirmed against the frozen global
+            # execution gates (the same bounds the runtime already applied to
+            # this result). The target's tighter position/orientation
+            # tolerances scope the MoveIt planning region only and must never
+            # reject an already-accepted terminal result.
             pose_ok = (
                 isinstance(position_error, (int, float))
                 and not isinstance(position_error, bool)
                 and math.isfinite(float(position_error))
-                and float(position_error) <= target.position_tolerance_m
+                and float(position_error) <= MAX_POSITION_TOLERANCE_M
                 and isinstance(orientation_error, (int, float))
                 and not isinstance(orientation_error, bool)
                 and math.isfinite(float(orientation_error))
-                and float(orientation_error) <= target.orientation_tolerance_rad
+                and float(orientation_error) <= MAX_ORIENTATION_TOLERANCE_RAD
             )
         evidence["final_pose_feedback_confirmed"] = pose_ok
         sent_value = execution.get("command_messages", 0)

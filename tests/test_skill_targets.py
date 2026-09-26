@@ -294,8 +294,8 @@ def test_skill_params_defaults_match_the_pinned_values() -> None:
     assert params.gripper_duration_s == 2.5
     assert params.gripper_goal_tolerance == 0.01
     assert params.wait_duration_s == 2.0
-    assert params.position_tolerance_m == 0.01
-    assert params.orientation_tolerance_rad == 0.03
+    assert params.position_tolerance_m == 0.005
+    assert params.orientation_tolerance_rad == 0.015
     assert params.still_tolerance_m == 0.01
     assert params.hold_follow_tolerance_m == 0.02
     assert params.scene_query_poll_s == 0.2

@@ -7,7 +7,11 @@ from collections.abc import Mapping
 import pytest
 
 from rocobrick.isaac_backend import RuntimeOperation
-from rocobrick.moveit_contract import TcpPoseTarget
+from rocobrick.moveit_contract import (
+    MAX_ORIENTATION_TOLERANCE_RAD,
+    MAX_POSITION_TOLERANCE_M,
+    TcpPoseTarget,
+)
 from rocobrick.robot_operation_plan import RobotOperation
 from rocobrick.tcp_contract import EXPECTED_RUNTIME_MODEL_SHA256
 from rocobrick.transit_adapter import SessionTcpMotionAdapter
@@ -143,3 +147,154 @@ def test_confirmed_fk_succeeds_with_one_dispatch(
     assert result.motion_sent is True
     assert result.reason is None
     assert result.evidence["final_pose_feedback_confirmed"] is True
+
+
+def test_final_gate_wins_over_tighter_planning_tolerances(
+    operation: RobotOperation,
+) -> None:
+    """Errors inside the global gates pass even beyond the planning tolerances.
+
+    The target-level position/orientation tolerances (from
+    config/skill_params.json) only shape the MoveIt planning region; the final
+    live-FK confirmation must use the frozen global execution gates
+    (MAX_POSITION_TOLERANCE_M / MAX_ORIENTATION_TOLERANCE_RAD).
+    """
+    target = TcpPoseTarget(
+        frame_id="base_link",
+        position=(0.28, 0.318, 0.186),
+        orientation_xyzw=(0.0, 0.0, 0.0, 1.0),
+        position_tolerance_m=0.005,
+        orientation_tolerance_rad=0.015,
+        runtime_model_sha256=EXPECTED_RUNTIME_MODEL_SHA256,
+        source_sha256="a" * 64,
+    )
+    assert target.position_tolerance_m < MAX_POSITION_TOLERANCE_M
+    assert target.orientation_tolerance_rad < MAX_ORIENTATION_TOLERANCE_RAD
+    # Both errors exceed the target-level planning tolerances while staying
+    # inside the global final gates.
+    final_errors = {
+        "position_error_m": 0.008,
+        "orientation_error_rad": 0.019285,
+    }
+    assert final_errors["position_error_m"] > target.position_tolerance_m
+    assert final_errors["orientation_error_rad"] > target.orientation_tolerance_rad
+    execution = {
+        "goal_accepted": True,
+        "action_status": "SUCCEEDED",
+        "is_success": True,
+        "terminal": True,
+        "safe_to_release": True,
+        "command_messages": 12,
+        "final_errors": final_errors,
+        "details": {"settled_at_rest": True},
+    }
+    session = RecordingMotionSession({
+        "result": {
+            "passed": True,
+            "error": None,
+            "execution": execution,
+            "evidence": {},
+        }
+    })
+
+    result = SessionTcpMotionAdapter(session, "piper_0").execute(operation, target)
+
+    assert len(session.calls) == 1
+    assert result.passed is True
+    assert result.terminal is True
+    assert result.safe_to_release is True
+    assert result.motion_sent is True
+    assert result.reason is None
+    assert result.evidence["execution"] == execution
+    assert result.evidence["final_pose_feedback_confirmed"] is True
+
+
+def test_final_gate_rejects_errors_beyond_global_maxima(
+    operation: RobotOperation,
+) -> None:
+    """A terminal success claim beyond the global gates fails closed."""
+    target = TcpPoseTarget(
+        frame_id="base_link",
+        position=(0.28, 0.318, 0.186),
+        orientation_xyzw=(0.0, 0.0, 0.0, 1.0),
+        position_tolerance_m=0.005,
+        orientation_tolerance_rad=0.015,
+        runtime_model_sha256=EXPECTED_RUNTIME_MODEL_SHA256,
+        source_sha256="a" * 64,
+    )
+    final_errors = {
+        "position_error_m": 0.004108,
+        "orientation_error_rad": 0.0354,
+    }
+    assert final_errors["orientation_error_rad"] > MAX_ORIENTATION_TOLERANCE_RAD
+    execution = {
+        "goal_accepted": True,
+        "action_status": "SUCCEEDED",
+        "is_success": True,
+        "terminal": True,
+        "safe_to_release": True,
+        "command_messages": 12,
+        "final_errors": final_errors,
+        "details": {"settled_at_rest": True},
+    }
+    session = RecordingMotionSession({
+        "result": {
+            "passed": True,
+            "error": None,
+            "execution": execution,
+            "evidence": {},
+        }
+    })
+
+    result = SessionTcpMotionAdapter(session, "piper_0").execute(operation, target)
+
+    assert len(session.calls) == 1
+    assert result.passed is False
+    assert result.terminal is True
+    assert result.safe_to_release is True
+    assert result.motion_sent is True
+    assert result.reason == "TRANSIT_FINAL_FEEDBACK_UNCONFIRMED"
+    assert result.evidence["final_pose_feedback_confirmed"] is False
+
+
+def test_final_gate_rejects_position_error_beyond_global_maximum(
+    operation: RobotOperation,
+) -> None:
+    """A position error beyond the global gate fails even if it was planned."""
+    target = TcpPoseTarget(
+        frame_id="base_link",
+        position=(0.28, 0.318, 0.186),
+        orientation_xyzw=(0.0, 0.0, 0.0, 1.0),
+        position_tolerance_m=0.005,
+        orientation_tolerance_rad=0.015,
+        runtime_model_sha256=EXPECTED_RUNTIME_MODEL_SHA256,
+        source_sha256="a" * 64,
+    )
+    session = RecordingMotionSession({
+        "result": {
+            "passed": True,
+            "error": None,
+            "execution": {
+                "goal_accepted": True,
+                "action_status": "SUCCEEDED",
+                "is_success": True,
+                "terminal": True,
+                "safe_to_release": True,
+                "command_messages": 12,
+                "final_errors": {
+                    "position_error_m": 0.011,
+                    "orientation_error_rad": 0.001,
+                },
+                "details": {"settled_at_rest": True},
+            },
+            "evidence": {},
+        }
+    })
+
+    result = SessionTcpMotionAdapter(session, "piper_0").execute(operation, target)
+
+    assert result.passed is False
+    assert result.terminal is True
+    assert result.safe_to_release is True
+    assert result.reason == "TRANSIT_FINAL_FEEDBACK_UNCONFIRMED"
+    assert result.evidence["final_pose_feedback_confirmed"] is False

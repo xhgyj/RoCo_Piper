@@ -68,8 +68,8 @@ class SkillParams:
     gripper_duration_s: float = 2.5  # > 0
     gripper_goal_tolerance: float = 0.01  # > 0
     wait_duration_s: float = 2.0  # > 0
-    position_tolerance_m: float = 0.01  # in (0, 0.01]
-    orientation_tolerance_rad: float = 0.03  # in (0, 0.03]
+    position_tolerance_m: float = 0.005  # in (0, 0.01]
+    orientation_tolerance_rad: float = 0.015  # in (0, 0.03]
     still_tolerance_m: float = 0.01  # > 0
     hold_follow_tolerance_m: float = 0.02  # > 0
     scene_query_poll_s: float = 0.2  # > 0
