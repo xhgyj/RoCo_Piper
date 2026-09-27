@@ -207,8 +207,20 @@ class PickHandler:
         raw_result = record.get("result") if isinstance(record, Mapping) else None
         execution = raw_result.get("execution") if isinstance(raw_result, Mapping) else None
         passed = raw_result.get("passed") is True if isinstance(raw_result, Mapping) else False
-        terminal = execution.get("terminal") is True if isinstance(execution, Mapping) else False
-        safe = execution.get("safe_to_release") is True if isinstance(execution, Mapping) else False
+        non_motion_phase = getattr(runtime_operation.kind, "value", str(runtime_operation.kind)) in {
+            "APPLY_PLANNING_SCENE",
+            "ATTACH_PLANNING_SCENE",
+        }
+        if non_motion_phase:
+            # Planning-scene updates have no action goal and therefore no
+            # safe_to_release field.  A returned result is a terminal, safe
+            # boundary; success still requires the runtime's passed/readback
+            # evidence below.
+            terminal = isinstance(raw_result, Mapping)
+            safe = terminal
+        else:
+            terminal = execution.get("terminal") is True if isinstance(execution, Mapping) else False
+            safe = execution.get("safe_to_release") is True if isinstance(execution, Mapping) else False
         sent = record.get("motion_sent") is True if isinstance(record, Mapping) else True
         evidence: dict[str, JSONValue] = {
             "phase": phase,

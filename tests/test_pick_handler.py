@@ -7,6 +7,7 @@ import asyncio
 import pytest
 
 from rocobrick.execution.operation_state_ledger import OperationStateLedger
+from rocobrick.isaac_backend import OperationKind, RuntimeOperation
 from rocobrick.multi_robot_scheduler import OperationStatus
 from rocobrick.robot_operation_plan import OperationTarget, RobotOperation
 from rocobrick.skills.pick import PickHandler
@@ -71,6 +72,46 @@ def document() -> dict:
                          "orientation_xyzw": [0.0, 0.0, 0.0, 1.0]},
         }},
     }
+
+
+
+class Motion:
+    """Minimal runtime transport for phase normalization tests."""
+
+    def run_motion_operation(self, robot_id: str, operation: RuntimeOperation) -> dict:
+        return {
+            "motion_sent": False,
+            "result": {
+                "passed": True,
+                "execution": {
+                    "readback_confirmed": True,
+                },
+                "kind": operation.kind.value,
+            },
+        }
+
+    def cancel_motion_operation(self, operation_id: str) -> dict:
+        return {"attempted": False, "terminal": False, "safe": False}
+
+
+def test_planning_scene_phase_does_not_require_motion_safe_to_release() -> None:
+    handler = PickHandler(
+        Observer(document()),
+        OperationStateLedger(("piper_0",)),
+        session_id="session-1",
+        manifest_sha256="a" * 64,
+        motion_transport=Motion(),
+    )
+    runtime_operation = RuntimeOperation(
+        kind=OperationKind.APPLY_PLANNING_SCENE,
+        payload={},
+        timeout_s=1.0,
+        request_id="pick-1:plan_grasp",
+    )
+    result = asyncio.run(handler._dispatch(operation(), "plan_grasp", runtime_operation))
+    assert result.passed is True
+    assert result.terminal is True and result.safe is True
+    assert result.motion_sent is False
 
 
 def test_pick_handler_checks_identity_then_fails_before_motion() -> None:
