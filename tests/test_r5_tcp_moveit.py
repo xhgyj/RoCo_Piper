@@ -844,6 +844,7 @@ class FakeApplyPlanningSceneRequest:
 
 class FakeCollisionObject:
     ADD = 0
+    REMOVE = 1
 
     def __init__(self) -> None:
         self.header = SimpleNamespace(frame_id="")
@@ -1370,8 +1371,11 @@ def test_apply_planning_scene_default_adapter_sends_exact_collision_objects() ->
     request = client.requests[0]
     assert request.scene.is_diff is True
     objects = request.scene.world.collision_objects
-    assert len(objects) == 1
-    collision_object = objects[0]
+    assert len(objects) == 2
+    removal = objects[0]
+    assert removal.id == "brick-44"
+    assert removal.operation == FakeCollisionObject.REMOVE
+    collision_object = objects[1]
     assert collision_object.id == "brick-44"
     assert collision_object.header.frame_id == "base_link"
     assert collision_object.operation == FakeCollisionObject.ADD
