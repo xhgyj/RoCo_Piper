@@ -236,7 +236,7 @@ def _kit_launch_argv(args: argparse.Namespace) -> list[str]:
     target with the identical bridge arguments.
     """
     exec_args = [str(BRIDGE_FILE), *_argv_from_args(args)]
-    return [
+    argv = [
         KIT_EXPERIENCE,
         "--disable", "isaacsim.ros2.bridge",
         # exp.full points isaac.startup at the ros2 bridge; an empty override
@@ -251,6 +251,11 @@ def _kit_launch_argv(args: argparse.Namespace) -> list[str]:
         "--exec",
         " ".join(shlex.quote(part) for part in exec_args),
     ]
+    if os.environ.get("ROCOBRICK_HEADED") == "1":
+        # Headless remains the default. This opt-in is for an operator
+        # observing one bounded run from an Isaac desktop session.
+        argv.insert(-2, "--/app/window/enabled=true")
+    return argv
 
 
 def evaluate_passed(evidence: dict) -> bool:
