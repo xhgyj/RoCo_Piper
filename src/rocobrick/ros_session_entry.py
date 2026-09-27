@@ -55,6 +55,7 @@ from rocobrick.isaac_backend import (
     OperationRejected,
     RuntimeOperation,
     RuntimeOperationResult,
+    attached_planning_scene_operation,
     planning_scene_update_from_payload,
     scene_query_from_payload,
     target_for_operation,
@@ -517,6 +518,11 @@ def filter_scene_state(document: Mapping, query: Mapping) -> dict[str, object]:
     # attributable; the canonical single-robot document carries no robot id.
     if "robot_id" in document:
         filtered["robot_id"] = document["robot_id"]
+    for key in (
+        "session_id", "manifest_sha256", "sequence", "robot_sequence", "tcp_pose"
+    ):
+        if key in document:
+            filtered[key] = document[key]
     if query["include_gripper"]:
         filtered["gripper"] = document.get("gripper")
         filtered["opening_m"] = document.get("opening_m")
@@ -665,6 +671,41 @@ def perform_operation(
                     f"{record['details'].get('error', 'the applier reported failure')}"
                 ),
             )
+        if operation.kind is OperationKind.ATTACH_PLANNING_SCENE:
+            try:
+                attached_operation = attached_planning_scene_operation(
+                    operation.payload, operation.timeout_s, operation.request_id
+                )
+                outcome = runtime.apply_attached_planning_scene(
+                    attached_operation.payload, timeout_s=attached_operation.timeout_s
+                )
+                passed = outcome.get("passed") is True
+                record = {
+                    "motion_sent": False,
+                    "goals_sent": 0,
+                    "passed": passed,
+                    "attached_object_id": outcome.get("attached_object_id"),
+                    "attached_link": outcome.get("attached_link"),
+                    "readback_confirmed": outcome.get("readback_confirmed") is True,
+                    "details": _jsonable(dict(outcome)),
+                }
+                return RuntimeOperationResult(
+                    request_id=operation.request_id,
+                    kind=operation.kind,
+                    passed=passed,
+                    execution=record,
+                    evidence={**evidence, "motion_sent": False},
+                    error=None if passed else str(outcome.get("error")),
+                )
+            except (OperationContractError, AttributeError, ValueError) as error:
+                return RuntimeOperationResult(
+                    request_id=operation.request_id,
+                    kind=operation.kind,
+                    passed=False,
+                    execution={"motion_sent": False, "goals_sent": 0},
+                    evidence={**evidence, "motion_sent": False},
+                    error=f"attached planning-scene rejected: {error}",
+                )
         if operation.kind is OperationKind.SCENE_QUERY:
             query = scene_query_from_payload(operation.payload)
             try:

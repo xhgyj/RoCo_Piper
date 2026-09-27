@@ -60,13 +60,10 @@ from rocobrick.multi_robot_scheduler import (
     OperationStatus,
 )
 from rocobrick.operation_state_ledger import OperationStateLedger
-from rocobrick.skills import PhaseStatus, SkillPhase, program_for
 from rocobrick.robot_operation_plan import RobotOperation
 from rocobrick.transit_adapter import (
     MotionExecution,
-    SessionTcpMotionAdapter,
     TransitContext,
-    load_transit_contexts,
     resolve_transit_target,
 )
 
@@ -892,7 +889,12 @@ class SkillOperationExecutor:
                     if destination_kind == "part"
                     else "robot_at_place_region"
                 )
-                self._state_ledger.confirm(robot_id, key, evidence)
+                ledger_evidence: dict[str, JSONValue] = dict(evidence)
+                if destination_kind == "part" and isinstance(destination, Mapping):
+                    ledger_evidence["physical_instance_id"] = destination.get(
+                        "physical_instance_id"
+                    )
+                self._state_ledger.confirm(robot_id, key, ledger_evidence)
             return OperationExecution(
                 operation_id=operation.operation_id,
                 robot_id=robot_id,
@@ -915,49 +917,22 @@ class SkillOperationExecutor:
         )
 
     async def _pick(self, operation: RobotOperation, robot_id: str) -> OperationExecution:
-        """Run the complete PICK phase program through the real session backend."""
-        backend = self._pick_backends.get(robot_id)
-        execute_phase = getattr(backend, "execute_phase", None)
-        if not callable(execute_phase):
-            return self._failed(operation, "PICK_BACKEND_INVALID")
-        phase_evidence: list[dict[str, JSONValue]] = []
-        motion_sent = False
-        for phase in program_for(SkillType.PICK).phases:
-            try:
-                result = await execute_phase(
-                    operation, phase, operation.operation_id, operation.operation_id
-                )
-            except Exception as error:
-                return OperationExecution(operation.operation_id, robot_id, OperationStatus.FAILED,
-                    False, True, motion_sent, {"phases": phase_evidence},
-                    f"PICK_BACKEND_FAILED: {error}")
-            status = getattr(result, "status", None)
-            reason = getattr(result, "reason", None)
-            phase_evidence.append({
-                "phase": phase.phase_id,
-                "status": str(getattr(status, "value", status)),
-                "reason": None if reason is None else str(getattr(reason, "value", reason)),
-            })
-            if phase.phase_id in {"reach_pregrasp", "approach", "close_gripper", "lift"}:
-                motion_sent = True
-            if status is not PhaseStatus.CONFIRMED:
-                return OperationExecution(operation.operation_id, robot_id, OperationStatus.FAILED,
-                    False, True, motion_sent, {"phases": phase_evidence},
-                    str(getattr(reason, "value", reason) or "PICK_PHASE_FAILED"))
-        evidence: dict[str, JSONValue] = {
-            "phases": phase_evidence,
-            "pregrasp_confirmed": True,
-            "approach_confirmed": True,
-            "gripper_feedback_confirmed": True,
-            "grasp_confirmed": True,
-            "lift_confirmed": True,
-            "holding_confirmed": True,
-        }
-        instance_id = operation.target.values.get("physical_instance_id") if operation.target else None
-        if self._state_ledger is not None and isinstance(instance_id, str):
-            self._state_ledger.confirm(robot_id, f"holding:{instance_id}", evidence)
-        return OperationExecution(operation.operation_id, robot_id, OperationStatus.CONFIRMED,
-            True, True, motion_sent, evidence, "PICK_CONFIRMED")
+        """Delegate PICK to its independent, operation-scoped handler."""
+        handler = self._pick_backends.get(robot_id)
+        execute = getattr(handler, "execute", None)
+        if not callable(execute):
+            return self._failed(operation, "PICK_HANDLER_INVALID")
+        try:
+            result = await execute(operation)
+        except Exception as error:
+            return self._failed(operation, f"PICK_HANDLER_FAILED: {error}")
+        if (
+            not isinstance(result, OperationExecution)
+            or result.operation_id != operation.operation_id
+            or result.robot_id != robot_id
+        ):
+            return self._failed(operation, "PICK_RESULT_INVALID")
+        return result
 
     async def _wait(
         self,

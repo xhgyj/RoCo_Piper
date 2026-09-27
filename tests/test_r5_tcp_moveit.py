@@ -47,7 +47,6 @@ from rocobrick.moveit_contract import (
     TOPIC_ISAAC_JOINT_COMMAND,
     TOPIC_ISAAC_JOINT_STATES,
     TOPIC_JOINT_STATES,
-    JointTarget,
     Link6PoseTarget,
     TcpPoseTarget,
 )
@@ -69,6 +68,8 @@ from rocobrick.planning_scene import (
 )
 from rocobrick.ros_moveit_executor import RosMoveItExecutor, TcpMoveItExecutor
 from rocobrick.ros_moveit_runtime import (
+    PLANNING_SCENE_ROBOT_STATE_ATTACHED_OBJECTS,
+    PLANNING_SCENE_WORLD_OBJECT_GEOMETRY,
     SERVICE_APPLY_PLANNING_SCENE,
     SERVICE_CALL_TIMEOUT_S,
     RosMoveItFactories,
@@ -825,11 +826,19 @@ class FakeMoveGroupGoal:
 FAKE_GOAL_STATUS = SimpleNamespace(STATUS_SUCCEEDED=4, STATUS_CANCELED=5)
 
 
+class FakeAttachedCollisionObject:
+    def __init__(self) -> None:
+        self.link_name = ""
+        self.object = FakeCollisionObject()
+        self.touch_links: list[str] = []
+
+
 class FakeApplyPlanningSceneRequest:
     def __init__(self) -> None:
         self.scene = SimpleNamespace(
             is_diff=False,
             world=SimpleNamespace(collision_objects=[]),
+            robot_state=SimpleNamespace(attached_collision_objects=[]),
         )
 
 
@@ -869,6 +878,11 @@ def fake_factories() -> RosMoveItFactories:
         apply_planning_scene_type=lambda: SimpleNamespace,
         apply_planning_scene_request_factory=FakeApplyPlanningSceneRequest,
         collision_object_factory=FakeCollisionObject,
+        attached_collision_object_factory=FakeAttachedCollisionObject,
+        get_planning_scene_type=lambda: SimpleNamespace,
+        get_planning_scene_request_factory=lambda: SimpleNamespace(
+            components=SimpleNamespace(components=0)
+        ),
     )
 
 
@@ -1326,10 +1340,31 @@ def test_apply_planning_scene_default_adapter_sends_exact_collision_objects() ->
     world.runtime._ensure_planning_scene_client().response = SimpleNamespace(
         success=True
     )
+    readback = FakeCollisionObject()
+    readback.id = box.object_id
+    readback.header.frame_id = box.frame_id
+    primitive = FakeSolidPrimitive()
+    primitive.type = FakeSolidPrimitive.BOX
+    primitive.dimensions = list(box.dimensions_m)
+    readback.primitives.append(primitive)
+    pose = FakePose()
+    pose.position.x, pose.position.y, pose.position.z = box.center_m
+    pose.orientation.w = 1.0
+    readback.primitive_poses.append(pose)
+    world.runtime._ensure_get_planning_scene_client().response = SimpleNamespace(
+        scene=SimpleNamespace(
+            world=SimpleNamespace(collision_objects=[readback])
+        )
+    )
     result = world.runtime.apply_planning_scene(update, 5.0)
     assert result.passed is True
     assert result.applied_object_ids == ("brick-44",)
     assert result.scene_digest == update.expected_scene_digest
+    assert result.details["readback_confirmed"] is True
+    assert PLANNING_SCENE_WORLD_OBJECT_GEOMETRY == 16
+    readback_requests = world.runtime._ensure_get_planning_scene_client().requests
+    assert len(readback_requests) == 1
+    assert readback_requests[0].components.components == 24
     assert SERVICE_APPLY_PLANNING_SCENE in world.node.service_clients
     client = world.node.service_clients[SERVICE_APPLY_PLANNING_SCENE]
     request = client.requests[0]
@@ -1348,6 +1383,66 @@ def test_apply_planning_scene_default_adapter_sends_exact_collision_objects() ->
         (0.15, 0.0, 0.03)
     )
     assert pose.orientation.w == 1.0
+
+
+def test_read_attached_collision_object_requires_exact_identity_and_geometry():
+    """Attached readback uses object.id/link_name and fails closed."""
+    world = make_world()
+    client = world.runtime._ensure_get_planning_scene_client()
+    attached = SimpleNamespace(
+        link_name="piper_0_gripper_link1",
+        object=SimpleNamespace(
+            id="brick-44", primitives=[SimpleNamespace()], meshes=[], planes=[]
+        ),
+    )
+    client.response = SimpleNamespace(
+        scene=SimpleNamespace(
+            robot_state=SimpleNamespace(attached_collision_objects=[attached])
+        )
+    )
+    ok, error = world.runtime._read_attached_collision_object(
+        5.0, fake_factories(), object_id="brick-44", link_name="piper_0_gripper_link1"
+    )
+    assert ok is True and error is None
+    assert client.requests[-1].components.components == (
+        PLANNING_SCENE_ROBOT_STATE_ATTACHED_OBJECTS
+    )
+    ok, error = world.runtime._read_attached_collision_object(
+        5.0, fake_factories(), object_id="other", link_name="piper_0_gripper_link1"
+    )
+    assert ok is False and "matching attached objects" in error
+
+
+def test_read_attached_collision_object_fails_without_response():
+    """No attached-object response cannot be treated as attachment."""
+    world = make_world()
+    ok, error = world.runtime._read_attached_collision_object(
+        0.1, fake_factories(), object_id="brick-44", link_name="piper_0_gripper_link1"
+    )
+    assert ok is False
+    assert "timed out" in error
+
+
+def test_apply_planning_scene_service_success_without_readback_fails() -> None:
+    """An acknowledged update cannot prove a world collision object exists."""
+    box = box_from_aabb(
+        object_id="brick-44", frame_id="base_link",
+        minimum_m=(0.1, -0.05, 0.01), maximum_m=(0.2, 0.05, 0.05),
+    )
+    placeholder = PlanningSceneUpdate(
+        scene_id="scene-1", boxes=(box,), expected_scene_digest="0" * 64
+    )
+    update = PlanningSceneUpdate(
+        scene_id="scene-1", boxes=(box,),
+        expected_scene_digest=scene_digest(placeholder),
+    )
+    world = make_world()
+    world.runtime._ensure_planning_scene_client().response = SimpleNamespace(
+        success=True
+    )
+    result = world.runtime.apply_planning_scene(update, 0.1)
+    assert result.passed is False
+    assert "world geometry timed out" in result.details["error"]
 
 
 @pytest.mark.parametrize(

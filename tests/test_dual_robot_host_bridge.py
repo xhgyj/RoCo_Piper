@@ -863,6 +863,19 @@ def _stub_scene_bridge(bridge_module, robot_grippers, articulations=None):
     bridge._channels = tuple(channels)
     bridge._brick_aabbs = lambda: {BRICK_ID_A: AABBS_A, BRICK_ID_B: AABBS_B}
     bridge._brick_connections = lambda: {PAIR_KEY: True}
+    bridge._scene_sequence = 0
+    bridge._state.scene_session_id = "test-session"
+    bridge._state.scene_manifest_sha256 = "a" * 64
+    bridge._live_rigid_poses = lambda: (
+        {instance_id: {
+            "position_xyz": [0.0, 0.0, 0.0],
+            "orientation_xyzw": [0.0, 0.0, 0.0, 1.0],
+        } for instance_id in (BRICK_ID_A, BRICK_ID_B)},
+        {robot_id: {
+            "position_xyz": [0.0, 0.0, 0.1],
+            "orientation_xyzw": [0.0, 0.0, 0.0, 1.0],
+        } for robot_id in robot_grippers},
+    )
     return bridge
 
 
@@ -911,14 +924,13 @@ def test_callback_single_robot_keeps_legacy_top_level(bridge_module) -> None:
     document = json.loads(response.message)
     assert document["gripper"] == FINGERS_A
     assert document["opening_m"] == pytest.approx(0.02)
-    assert document["robots"] == {
-        ROBOT_A: {
-            "robot_id": ROBOT_A,
-            "sim_time_s": 4.5,
-            "gripper": FINGERS_A,
-            "opening_m": pytest.approx(0.02),
-        }
-    }
+    block = document["robots"][ROBOT_A]
+    assert block["robot_id"] == ROBOT_A
+    assert block["sim_time_s"] == 4.5
+    assert block["gripper"] == FINGERS_A
+    assert block["opening_m"] == pytest.approx(0.02)
+    assert block["sequence"] == document["sequence"]
+    assert block["tcp_pose"]["position_xyz"] == [0.0, 0.0, 0.1]
 
 
 def test_callback_fails_closed_when_a_robot_loses_its_gripper(bridge_module) -> None:

@@ -1334,6 +1334,7 @@ def _robot_operation_plan_phase(
         load_transit_contexts,
     )
     from rocobrick.execution.operation_state_ledger import OperationStateLedger
+    from rocobrick.skills.pick import PickHandler
     from rocobrick.robot_operation_executor import SkillOperationExecutor
     from rocobrick.tcp_contract import EXPECTED_RUNTIME_MODEL_SHA256
     from rocobrick.robot_operation_runner import (
@@ -1598,11 +1599,35 @@ def _robot_operation_plan_phase(
                         for robot_id in operation_plan.robots
                     }
                     state_ledger = OperationStateLedger(operation_plan.robots)
+                    pick_backends = {}
+                    if any(
+                        item.skill == "PICK"
+                        for item in operation_plan.operations.values()
+                    ):
+                        from rocobrick.isaac_snapshot_host_adapter import (
+                            load_scene_snapshot_manifest,
+                        )
+
+                        if args.scene_manifest is None:
+                            raise RuntimeError("PICK requires a scene manifest")
+                        manifest = load_scene_snapshot_manifest(args.scene_manifest)
+                        pick_backends = {
+                            robot_id: PickHandler(
+                                session,
+                                state_ledger,
+                                session_id=args.host_instance_id,
+                                manifest_sha256=manifest.manifest_sha256,
+                                motion_transport=session,
+                                context=transit_contexts[robot_id],
+                            )
+                            for robot_id in operation_plan.robots
+                        }
                     executor = SkillOperationExecutor(
                         operation_plan.robots,
                         session,
                         transit_adapters=transit_adapters,
                         transit_contexts=transit_contexts,
+                        pick_backends=pick_backends,
                         state_ledger=state_ledger,
                     )
                 else:

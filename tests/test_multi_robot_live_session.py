@@ -20,6 +20,8 @@ import asyncio
 import dataclasses
 import json
 import re
+import signal
+import threading
 from pathlib import Path
 
 import pytest
@@ -33,6 +35,7 @@ from rocobrick.isaac_backend import (
 )
 from rocobrick.moveit_contract import JOINT_NAMES
 from rocobrick.ros_moveit_runtime import RobotCapabilityReadiness, robot_scene_view
+from rocobrick.skills.observation import parse_pick_observation
 from rocobrick.ros_session_entry import (
     SCENE_STATE_SCHEMA,
     SESSION_REQUEST_KEYS,
@@ -1140,6 +1143,76 @@ def test_a_host_death_before_the_marker_fails_fast(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# Per-operation motion child cancellation
+# ---------------------------------------------------------------------------
+
+
+def test_cancel_motion_child_is_operation_scoped_and_requires_matching_result(tmp_path):
+    """Only the named child can be signaled and its result must match."""
+    runner = make_runner(tmp_path)
+    session = make_session(tmp_path, runner)
+    session._active_motion_lock = threading.Lock()
+    first = FakeHandle(9101, runner)
+    second = FakeHandle(9102, runner)
+    first_result = tmp_path / "first-result.json"
+    first_result.write_text(json.dumps({
+        "request_id": "session-first",
+        "operations": [{
+            "robot_id": "piper_0", "operation_id": "first", "kind": "TCP_POSE",
+            "result": {
+                "request_id": "first", "kind": "TCP_POSE",
+                "execution": {"terminal": True, "safe_to_release": True},
+            },
+        }]
+    }), encoding="utf-8")
+    session._active_motion_children = {
+        "first": (first, first_result, "piper_0", OperationKind.TCP_POSE,
+                  "session-first"),
+        "second": (second, tmp_path / "second-result.json", "piper_1",
+                   OperationKind.TCP_POSE, "session-second"),
+    }
+
+    unknown = session.cancel_motion_operation("missing")
+    assert unknown["safe"] is False
+    assert first.signals == second.signals == []
+    confirmed = session.cancel_motion_operation("first")
+    assert confirmed["terminal"] is True and confirmed["safe"] is True
+    assert first.signals == [signal.SIGINT]
+    assert second.signals == []
+
+    first.exit_code = None
+    first.signals.clear()
+    first_result.write_text(json.dumps({
+        "request_id": "session-first",
+        "operations": [{
+            "robot_id": "piper_1", "operation_id": "first", "kind": "TCP_POSE",
+            "result": {
+                "request_id": "first", "kind": "TCP_POSE",
+                "execution": {"terminal": True, "safe_to_release": True},
+            },
+        }]
+    }), encoding="utf-8")
+    mismatched = session.cancel_motion_operation("first")
+    assert mismatched["terminal"] is False and mismatched["safe"] is False
+
+
+def test_cancel_motion_child_timeout_retains_unsafe_state(tmp_path):
+    """An unresponsive child never gains terminal safety from SIGINT alone."""
+    runner = make_runner(tmp_path, host_ignores_int=True)
+    session = make_session(tmp_path, runner)
+    session._active_motion_lock = threading.Lock()
+    handle = FakeHandle(9103, runner)
+    session._active_motion_children = {
+        "motion": (handle, tmp_path / "missing-result.json", "piper_0",
+                   OperationKind.TCP_POSE, "session-motion")
+    }
+    outcome = session.cancel_motion_operation("motion")
+    assert outcome["attempted"] is True
+    assert outcome["terminal"] is False and outcome["safe"] is False
+    assert handle.signals == [signal.SIGINT]
+
+
+# ---------------------------------------------------------------------------
 # Read-only dispatch: no motion, robot-scoped observation
 # ---------------------------------------------------------------------------
 
@@ -1403,6 +1476,41 @@ def test_build_global_scene_document_round_trips_one_robot_view():
     assert rebuilt["robots"]["piper_1"]["gripper"] == GRIPPER_READINGS["piper_1"]
     assert rebuilt["bricks"] == document["bricks"]
     assert rebuilt["connections"] == document["connections"]
+
+
+def test_pick_pose_observation_survives_robot_scoped_scene_query() -> None:
+    """The sliced answer keeps co-sampled poses and no sibling TCP."""
+    document = global_scene_document()
+    document.update({
+        "session_id": "session-1",
+        "manifest_sha256": "a" * 64,
+        "sequence": 7,
+    })
+    document["bricks"]["brick-alpha"]["pose"] = {
+        "position_xyz": [0.0, 0.0, 0.01],
+        "orientation_xyzw": [0.0, 0.0, 0.0, 1.0],
+    }
+    for robot_id, x in (("piper_0", 0.0), ("piper_1", 0.5)):
+        document["robots"][robot_id]["sequence"] = 7
+        document["robots"][robot_id]["tcp_pose"] = {
+            "position_xyz": [x, 0.0, 0.03],
+            "orientation_xyzw": [0.0, 0.0, 0.0, 1.0],
+        }
+    view = robot_scene_view(document, "piper_0")
+    filtered = filter_scene_state(view, {
+        "brick_physical_instance_ids": ["brick-alpha"],
+        "connection_pairs": [],
+        "include_gripper": True,
+    })
+    rebuilt = build_global_scene_document("piper_0", filtered)
+    sample = parse_pick_observation(
+        rebuilt, robot_id="piper_0", physical_instance_id="brick-alpha",
+        session_id="session-1", manifest_sha256="a" * 64,
+    )
+    assert sample.sequence == 7
+    assert sample.tcp_pose.position_xyz == (0.0, 0.0, 0.03)
+    assert "piper_1" not in rebuilt["robots"]
+    assert set(rebuilt["bricks"]) == {"brick-alpha"}
 
 
 @pytest.mark.parametrize(
@@ -1811,6 +1919,7 @@ def test_the_read_only_whitelist_covers_every_operation_kind():
         "TCP_POSE",
         "GRIPPER_TARGET",
         "APPLY_PLANNING_SCENE",
+        "ATTACH_PLANNING_SCENE",
     }
 
 

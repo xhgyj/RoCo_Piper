@@ -90,6 +90,7 @@ from rocobrick.moveit_contract import (
 )
 from rocobrick.moveit_execution import ExecutionResult, ExecutionStatus
 from rocobrick.planning_scene import (
+    AxisAlignedBox,
     PlanningSceneResult,
     PlanningSceneUpdate,
     scene_digest,
@@ -116,6 +117,12 @@ MAX_SCALING_FACTOR = 0.1
 SERVICE_APPLY_PLANNING_SCENE = "/apply_planning_scene"
 SERVICE_GET_PLANNING_SCENE = "/get_planning_scene"
 PLANNING_SCENE_ALLOWED_COLLISION_MATRIX = 128
+PLANNING_SCENE_ROBOT_STATE_ATTACHED_OBJECTS = 4
+PLANNING_SCENE_WORLD_OBJECT_NAMES = 8
+PLANNING_SCENE_WORLD_OBJECT_GEOMETRY = 16
+PLANNING_SCENE_WORLD_OBJECT_READBACK = (
+    PLANNING_SCENE_WORLD_OBJECT_NAMES | PLANNING_SCENE_WORLD_OBJECT_GEOMETRY
+)
 # Live host-bridge scene-state service (std_srvs/srv/Trigger) answering the
 # canonical JSON scene-state document of schema rocobrick-scene-state/v1.
 SERVICE_SCENE_STATE = "/p05_host_bridge/scene_state"
@@ -429,6 +436,16 @@ def robot_scene_view(
         view["opening_error"] = block["opening_error"]
     if bound_joint_names is not None:
         view["joint_names"] = [str(name) for name in bound_joint_names]
+    if "session_id" in document:
+        view["session_id"] = document["session_id"]
+    if "manifest_sha256" in document:
+        view["manifest_sha256"] = document["manifest_sha256"]
+    if "sequence" in document:
+        view["sequence"] = document["sequence"]
+    if "sequence" in block:
+        view["robot_sequence"] = block["sequence"]
+    if "tcp_pose" in block:
+        view["tcp_pose"] = block["tcp_pose"]
     return view
 
 
@@ -495,6 +512,7 @@ class RosMoveItFactories:
     apply_planning_scene_type: Callable[[], Any] | None = None
     apply_planning_scene_request_factory: Callable[[], Any] | None = None
     collision_object_factory: Callable[[], Any] | None = None
+    attached_collision_object_factory: Callable[[], Any] | None = None
     allowed_collision_entry_factory: Callable[[], Any] | None = None
     get_planning_scene_type: Callable[[], Any] | None = None
     get_planning_scene_request_factory: Callable[[], Any] | None = None
@@ -543,6 +561,56 @@ def _terminal_status_name(status: Any, goal_status: Any) -> str:
     if aborted is not None and value == int(aborted):
         return "ABORTED"
     return f"UNKNOWN({value})"
+
+
+def _collision_box_matches(item: object, box: AxisAlignedBox) -> bool:
+    """Check the read-back MoveIt box against the submitted geometry.
+
+    Returns:
+        True only for the same frame, shape, dimensions and center.
+    """
+    try:
+        if item.header.frame_id != box.frame_id:
+            return False
+        if len(item.primitives) != 1 or len(item.primitive_poses) != 1:
+            return False
+        primitive = item.primitives[0]
+        pose = item.primitive_poses[0]
+        if primitive.type != 1 or len(primitive.dimensions) != 3:
+            return False
+        dimensions = tuple(float(value) for value in primitive.dimensions)
+        center = (float(pose.position.x), float(pose.position.y), float(pose.position.z))
+        quaternion = (
+            float(pose.orientation.x), float(pose.orientation.y),
+            float(pose.orientation.z), float(pose.orientation.w),
+        )
+    except (AttributeError, IndexError, TypeError, ValueError):
+        return False
+    return (
+        all(math.isfinite(value) for value in (*dimensions, *center, *quaternion))
+        and all(abs(a - b) <= 1e-5 for a, b in zip(dimensions, box.dimensions_m))
+        and all(abs(a - b) <= 1e-5 for a, b in zip(center, box.center_m))
+        and all(abs(a - b) <= 1e-5 for a, b in zip(quaternion, (0.0, 0.0, 0.0, 1.0)))
+    )
+
+
+def _attached_object_matches(
+    item: object, *, object_id: str, link_name: str
+) -> bool:
+    """Require one attached object to carry exact object/link identity.
+
+    Returns:
+        True only when the attached-object identity and collision geometry are
+        present; missing fields never fall back to a positive result.
+    """
+    try:
+        attached = item
+        collision = attached.object
+        if collision.id != object_id or attached.link_name != link_name:
+            return False
+        return bool(collision.primitives or collision.meshes or collision.planes)
+    except (AttributeError, TypeError, ValueError):
+        return False
 
 
 def _merge_allowed_collision_pairs(
@@ -885,6 +953,9 @@ class RosMoveItRuntime:
             apply_planning_scene_type=lambda: ApplyPlanningScene,
             apply_planning_scene_request_factory=ApplyPlanningScene.Request,
             collision_object_factory=CollisionObject,
+            attached_collision_object_factory=lambda: __import__(
+                "moveit_msgs.msg", fromlist=["AttachedCollisionObject"]
+            ).AttachedCollisionObject,
             allowed_collision_entry_factory=AllowedCollisionEntry,
             get_planning_scene_type=lambda: GetPlanningScene,
             get_planning_scene_request_factory=GetPlanningScene.Request,
@@ -1468,6 +1539,141 @@ class RosMoveItRuntime:
             )
         return matrix, None
 
+    def _read_world_collision_objects(
+        self, timeout_s: float, factories: RosMoveItFactories
+    ) -> tuple[Mapping[str, object] | None, str | None]:
+        """Read the MoveIt world geometry after a scene application.
+
+        Returns:
+            Object IDs mapped to read-back collision objects, or a failure.
+        """
+        client = self._ensure_get_planning_scene_client()
+        request_factory = factories.get_planning_scene_request_factory
+        if client is None or not self._service_ready(client) or request_factory is None:
+            return None, "GetPlanningScene world geometry is unavailable"
+        request = request_factory()
+        if getattr(request, "components", None) is None:
+            return None, "GetPlanningScene components are unavailable"
+        request.components.components = PLANNING_SCENE_WORLD_OBJECT_READBACK
+        future = client.call_async(request)
+        if not self._wait_future(future, self._clock_fn() + timeout_s):
+            return None, "GetPlanningScene world geometry timed out"
+        try:
+            objects = future.result().scene.world.collision_objects
+            by_id = {item.id: item for item in objects}
+            if len(by_id) != len(objects):
+                raise ValueError("duplicate collision object ids")
+        except (AttributeError, TypeError, ValueError) as error:
+            return None, f"GetPlanningScene world geometry is malformed: {error}"
+        return by_id, None
+
+    def _read_attached_collision_object(
+        self,
+        timeout_s: float,
+        factories: RosMoveItFactories,
+        *,
+        object_id: str,
+        link_name: str,
+    ) -> tuple[bool, str | None]:
+        """Read back one exact robot-attached collision object.
+
+        Returns:
+            ``(True, None)`` only for exactly one matching attached object.
+        """
+        client = self._ensure_get_planning_scene_client()
+        request_factory = factories.get_planning_scene_request_factory
+        if client is None or not self._service_ready(client) or request_factory is None:
+            return False, "GetPlanningScene attached objects are unavailable"
+        request = request_factory()
+        if getattr(request, "components", None) is None:
+            return False, "GetPlanningScene components are unavailable"
+        request.components.components = PLANNING_SCENE_ROBOT_STATE_ATTACHED_OBJECTS
+        future = client.call_async(request)
+        if not self._wait_future(future, self._clock_fn() + timeout_s):
+            return False, "GetPlanningScene attached objects timed out"
+        try:
+            attached = future.result().scene.robot_state.attached_collision_objects
+            matches = [
+                item for item in attached
+                if _attached_object_matches(
+                    item, object_id=object_id, link_name=link_name
+                )
+            ]
+        except (AttributeError, TypeError, ValueError) as error:
+            return False, f"GetPlanningScene attached objects malformed: {error}"
+        if len(matches) != 1:
+            return False, (
+                f"GetPlanningScene returned {len(matches)} matching attached objects "
+                f"for {object_id!r}/{link_name!r}"
+            )
+        return True, None
+
+    def apply_attached_planning_scene(
+        self, payload: Mapping[str, object], timeout_s: float
+    ) -> Mapping[str, object]:
+        """Apply and read back one exact robot-attached collision object."""
+        factories = self._resolve_factories()
+        required = (
+            factories.apply_planning_scene_type,
+            factories.apply_planning_scene_request_factory,
+            factories.collision_object_factory,
+            factories.attached_collision_object_factory,
+            factories.solid_primitive_factory,
+            factories.pose_factory,
+        )
+        if any(item is None for item in required):
+            return {"passed": False, "readback_confirmed": False,
+                    "error": "attached-scene factories are unavailable"}
+        client = self._ensure_planning_scene_client()
+        if client is None or not self._service_ready(client):
+            return {"passed": False, "readback_confirmed": False,
+                    "error": "apply planning-scene client is unavailable"}
+        try:
+            request = factories.apply_planning_scene_request_factory()
+            request.scene.is_diff = True
+            collision = factories.collision_object_factory()
+            collision.id = str(payload["object_id"])
+            collision.header.frame_id = str(payload["frame_id"])
+            collision.operation = getattr(type(collision), "ADD")
+            primitive = factories.solid_primitive_factory()
+            primitive.type = getattr(type(primitive), "BOX")
+            minimum = tuple(float(value) for value in payload["minimum_m"])
+            maximum = tuple(float(value) for value in payload["maximum_m"])
+            primitive.dimensions = [high - low for low, high in zip(minimum, maximum)]
+            pose = factories.pose_factory()
+            center = [(low + high) / 2.0 for low, high in zip(minimum, maximum)]
+            pose.position.x, pose.position.y, pose.position.z = center
+            pose.orientation.w = 1.0
+            collision.primitives.append(primitive)
+            collision.primitive_poses.append(pose)
+            attached = request.scene.robot_state.attached_collision_objects
+            attached_object = factories.attached_collision_object_factory()
+            attached_object.link_name = str(payload["link_name"])
+            attached_object.object = collision
+            attached_object.touch_links = list(payload["touch_links"])
+            attached.append(attached_object)
+            future = client.call_async(request)
+            if not self._wait_future(future, self._clock_fn() + float(timeout_s)):
+                return {"passed": False, "readback_confirmed": False,
+                        "error": "apply planning-scene timed out"}
+            if future.result().success is not True:
+                return {"passed": False, "readback_confirmed": False,
+                        "error": "apply planning-scene reported failure"}
+        except (AttributeError, TypeError, ValueError) as error:
+            return {"passed": False, "readback_confirmed": False,
+                    "error": f"attached-scene request malformed: {error}"}
+        ok, error = self._read_attached_collision_object(
+            float(timeout_s), factories,
+            object_id=str(payload["object_id"]), link_name=str(payload["link_name"]),
+        )
+        return {
+            "passed": ok,
+            "readback_confirmed": ok,
+            "attached_object_id": str(payload["object_id"]),
+            "attached_link": str(payload["link_name"]),
+            "error": error,
+        }
+
     def _default_planning_scene_applier(
         self, update: PlanningSceneUpdate, timeout_s: float
     ) -> PlanningSceneResult:
@@ -1602,6 +1808,76 @@ class RosMoveItRuntime:
             return PlanningSceneResult(
                 passed=False, applied_object_ids=applied, details=details
             )
+        observed: Mapping[str, object] | None = None
+        readback_error: str | None = None
+        matched = False
+        for attempt in range(3):
+            observed, readback_error = self._read_world_collision_objects(
+                timeout_s, factories
+            )
+            if observed is None:
+                break
+            matched = True
+            for box in update.boxes:
+                item = observed.get(box.object_id)
+                if item is None:
+                    matched = False
+                    details["error"] = (
+                        f"GetPlanningScene did not return box {box.object_id!r}; "
+                        f"observed_ids={sorted(str(value) for value in observed)}"
+                    )
+                    break
+                if not _collision_box_matches(item, box):
+                    matched = False
+                    details["error"] = (
+                        f"GetPlanningScene returned mismatched box {box.object_id!r}; "
+                        f"frame={getattr(getattr(item, 'header', None), 'frame_id', None)!r} "
+                        f"primitives={len(getattr(item, 'primitives', ()))!r} "
+                        f"dimensions={getattr(getattr(item, 'primitives', [None])[0], 'dimensions', None)!r} "
+                        f"center={getattr(getattr(getattr(item, 'primitive_poses', [None])[0], 'position', None), 'x', None)!r},"
+                        f"{getattr(getattr(getattr(item, 'primitive_poses', [None])[0], 'position', None), 'y', None)!r},"
+                        f"{getattr(getattr(getattr(item, 'primitive_poses', [None])[0], 'position', None), 'z', None)!r}"
+                    )
+                    break
+            if matched:
+                break
+            if attempt < 2:
+                self._sleep_fn(min(self._poll_interval_s, float(timeout_s)))
+        if observed is None:
+            details["error"] = readback_error
+            return PlanningSceneResult(
+                passed=False, applied_object_ids=applied, details=details
+            )
+        if not matched:
+            return PlanningSceneResult(
+                passed=False, applied_object_ids=applied, details=details
+            )
+        if update.allowed_collision_pairs:
+            matrix, matrix_error = self._read_current_allowed_collision_matrix(
+                timeout_s, factories
+            )
+            if matrix is None:
+                details["error"] = matrix_error
+                return PlanningSceneResult(
+                    passed=False, applied_object_ids=applied, details=details
+                )
+            names = list(matrix.entry_names)
+            rows = list(matrix.entry_values)
+            for first, second in update.allowed_collision_pairs:
+                if (
+                    first not in names
+                    or second not in names
+                    or rows[names.index(first)].enabled[names.index(second)] is not True
+                    or rows[names.index(second)].enabled[names.index(first)] is not True
+                ):
+                    details["error"] = (
+                        f"GetPlanningScene did not confirm contact {first!r}/{second!r}"
+                    )
+                    return PlanningSceneResult(
+                        passed=False, applied_object_ids=applied, details=details
+                    )
+            details["allowed_collision_pairs_confirmed"] = True
+        details["readback_confirmed"] = True
         return PlanningSceneResult(
             passed=True,
             applied_object_ids=applied,
@@ -1866,7 +2142,7 @@ class RosMoveItRuntime:
         timeout_s: float,
         factories: RosMoveItFactories,
     ) -> ExecutionResult:
-        """Bounded gripper send; the measured opening decides, not the status."""
+        """Bounded gripper action with terminal and fresh measured feedback."""
         details: dict[str, object] = {"kind": "gripper"}
         now = self._clock_fn()
         deadline = now + timeout_s
@@ -1900,7 +2176,9 @@ class RosMoveItRuntime:
             details["accepted"] = False
             details["error"] = "gripper_controller did not accept the goal"
             return ExecutionResult(
-                status=ExecutionStatus.REJECTED, details=details, command_messages=0
+                status=ExecutionStatus.REJECTED, details=details, command_messages=0,
+                goal_accepted=False, terminal=True, safe_to_release=True,
+                action_status="REJECTED",
             )
         self._active_handle = handle
         details["accepted"] = True
@@ -1918,7 +2196,14 @@ class RosMoveItRuntime:
                 "(cancel attempted)"
             )
             return ExecutionResult(
-                status=ExecutionStatus.TIMED_OUT, details=details, command_messages=1
+                status=ExecutionStatus.TIMED_OUT, details=details, command_messages=1,
+                goal_accepted=True,
+                terminal=lifecycle.get("terminal") is True,
+                safe_to_release=(
+                    lifecycle.get("terminal") is True
+                    and lifecycle.get("safe") is True
+                ),
+                cancel_evidence=lifecycle,
             )
         self._active_handle = None
         self._active_goal_future = None
@@ -1928,6 +2213,19 @@ class RosMoveItRuntime:
         details["action_status"] = _terminal_status_name(
             wrapper.status, factories.goal_status_type()
         )
+        result_states = self._isaac_state_count
+        while self._isaac_state_count <= result_states and self._clock_fn() < deadline:
+            self._spin_fn()
+            if self._isaac_state_count > result_states:
+                break
+            self._sleep_fn(self._wait_step_s)
+        details["post_result_state_messages"] = self._isaac_state_count - result_states
+        common = {
+            "goal_accepted": True,
+            "terminal": True,
+            "safe_to_release": True,
+            "action_status": details["action_status"],
+        }
         commanded = float(target.opening_m)
         final = self.latest_isaac_state()
         measured: float | None = None
@@ -1959,10 +2257,14 @@ class RosMoveItRuntime:
                 None if measured is None else abs(measured - commanded)
             )
         }
-        if measured is None:
+        if (
+            measured is None
+            or self._isaac_state_count <= result_states
+            or not self._state_fresh()
+        ):
             details["error"] = (
-                "the gripper opening could not be measured; refusing to fake "
-                "success"
+                "no fresh post-action gripper opening was measured; refusing "
+                "to claim success"
             )
             return ExecutionResult(
                 status=ExecutionStatus.FAILED,
@@ -1970,6 +2272,7 @@ class RosMoveItRuntime:
                 command_messages=1,
                 final_errors=final_errors,
                 details=details,
+                **common,
             )
         if not (window_low <= measured <= window_high):
             details["error"] = (
@@ -1981,6 +2284,17 @@ class RosMoveItRuntime:
                 command_messages=1,
                 final_errors=final_errors,
                 details=details,
+                **common,
+            )
+        if details["action_status"] != "SUCCEEDED":
+            details["error"] = "gripper action did not report SUCCEEDED"
+            return ExecutionResult(
+                status=ExecutionStatus.FAILED,
+                planned_waypoints=2,
+                command_messages=1,
+                final_errors=final_errors,
+                details=details,
+                **common,
             )
         return ExecutionResult(
             status=ExecutionStatus.SUCCEEDED,
@@ -1989,6 +2303,7 @@ class RosMoveItRuntime:
             command_messages=1,
             final_errors=final_errors,
             details=details,
+            **common,
         )
 
     def _send_goal(

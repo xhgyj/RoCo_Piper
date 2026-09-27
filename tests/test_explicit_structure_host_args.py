@@ -273,7 +273,9 @@ def test_explicit_branch_strict_parse_and_carrier_build_precede_bootstrap(
     assert "args.structure_start," in call
     assert "args.structure_goal," in call
     assert "plan_document," in call
-    assert "manifest=args.scene_manifest," in call
+    assert "manifest=(" in call
+    assert "args.scene_manifest.is_file()" in call
+    assert "else None" in call
     assert 'evidence["scene_runtime"]["structure"] = structure_evidence' in call
 
 

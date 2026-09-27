@@ -144,6 +144,20 @@ def _stub_bridge(
         }
         channels.append(channel)
     bridge._channels = tuple(channels)
+    bridge._scene_sequence = 0
+    bridge._state.scene_session_id = "test-session"
+    bridge._state.scene_manifest_sha256 = "a" * 64
+    bridge._live_rigid_poses = lambda: (
+        {instance_id: {
+            "position_xyz": [0.0, 0.0, 0.0],
+            "orientation_xyzw": [0.0, 0.0, 0.0, 1.0],
+        } for instance_id in runtime_host.physical_instance_paths}
+        if runtime_host is not None else {},
+        {robot_id: {
+            "position_xyz": [0.0, 0.0, 0.1],
+            "orientation_xyzw": [0.0, 0.0, 0.0, 1.0],
+        } for robot_id in robot_grippers if robot_id is not None},
+    )
     return bridge
 
 
@@ -152,6 +166,26 @@ def test_module_import_is_offline_safe(bridge_module) -> None:
     assert bridge_module.SCHEMA.startswith("rocobrick-host-bridge")
     for heavy in ("isaacsim", "omni", "rclpy", "pxr"):
         assert heavy not in sys.modules, heavy
+
+
+def test_physx_pose_requires_a_live_rigidbody(bridge_module) -> None:
+    """No USD or guessed-pose fallback is allowed on a PhysX miss."""
+    bridge = _stub_bridge(bridge_module)
+    physics = types.SimpleNamespace(
+        get_rigidbody_transformation=lambda path: {"ret_val": False}
+    )
+    with pytest.raises(RuntimeError, match="no live PhysX rigid transform"):
+        bridge._physx_pose("/World/brick_a", physics)
+    physics = types.SimpleNamespace(
+        get_rigidbody_transformation=lambda path: {
+            "ret_val": True,
+            "position": (0.1, 0.2, 0.3),
+            "rotation": (0.0, 0.0, 0.0, 1.0),
+        }
+    )
+    assert bridge._physx_pose("/World/brick_a", physics)["position_xyz"] == [
+        0.1, 0.2, 0.3
+    ]
 
 
 def test_service_contract_constants(bridge_module) -> None:

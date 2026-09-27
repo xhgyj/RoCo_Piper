@@ -37,6 +37,7 @@ class OperationStateLedger:
         self._states: dict[str, dict[str, ConfirmedState]] = {
             robot_id: {} for robot_id in self._robot_ids
         }
+        self._object_owners: dict[str, str] = {}
 
     @property
     def robot_ids(self) -> tuple[str, ...]:
@@ -57,18 +58,65 @@ class OperationStateLedger:
         self._validate_key(key)
         if not isinstance(evidence, Mapping) or not is_json_safe(evidence):
             raise ValueError("evidence must be a JSON-safe mapping")
+        instance_id = self._holding_instance_id(key)
+        if instance_id is not None:
+            owner = self._object_owners.get(instance_id)
+            if owner is not None and owner != robot_id:
+                raise ValueError(
+                    f"object {instance_id!r} is already owned by {owner!r}"
+                )
         confirmed = ConfirmedState(
             robot_id=robot_id, key=key, evidence=to_json_value(evidence)
         )
         self._states[robot_id][key] = confirmed
+        if instance_id is not None:
+            self._object_owners[instance_id] = robot_id
         return confirmed
+
+    def confirm_holding(
+        self,
+        robot_id: str,
+        physical_instance_id: str,
+        evidence: Mapping[str, JSONValue],
+    ) -> ConfirmedState:
+        """Confirm exclusive holding for one physical instance.
+
+        Returns:
+            The robot-scoped confirmed holding fact.
+        """
+        self._validate_instance_id(physical_instance_id)
+        return self.confirm(robot_id, f"holding:{physical_instance_id}", evidence)
+
+    def owner_of_object(self, physical_instance_id: str) -> str | None:
+        """Return the protective owner, including an uncertain holding state."""
+        self._validate_instance_id(physical_instance_id)
+        return self._object_owners.get(physical_instance_id)
+
+    def invalidate_if_stale(
+        self, robot_id: str, physical_instance_id: str, reason: str
+    ) -> bool:
+        """Remove stale holding confirmation without freeing its object.
+
+        Returns:
+            Whether a confirmed holding fact was removed.
+        """
+        self._validate_robot(robot_id)
+        self._validate_instance_id(physical_instance_id)
+        self._validate_reason(reason)
+        if self._object_owners.get(physical_instance_id) != robot_id:
+            return False
+        return self._states[robot_id].pop(
+            f"holding:{physical_instance_id}", None
+        ) is not None
 
     def revoke(self, robot_id: str, key: str, reason: str) -> bool:
         """Remove a fact and return whether a confirmed fact existed."""
         self._validate_robot(robot_id)
         self._validate_key(key)
-        if not isinstance(reason, str) or not reason:
-            raise ValueError("reason must be a non-empty string")
+        self._validate_reason(reason)
+        instance_id = self._holding_instance_id(key)
+        if instance_id is not None and self._object_owners.get(instance_id) == robot_id:
+            del self._object_owners[instance_id]
         return self._states[robot_id].pop(key, None) is not None
 
     def snapshot(self, robot_id: str) -> Mapping[str, ConfirmedState]:
@@ -84,6 +132,22 @@ class OperationStateLedger:
     def _validate_key(key: str) -> None:
         if not isinstance(key, str) or not key:
             raise ValueError("state key must be a non-empty string")
+        if key == "holding:":
+            raise ValueError("holding state requires a physical instance id")
+
+    @staticmethod
+    def _validate_instance_id(physical_instance_id: str) -> None:
+        if not isinstance(physical_instance_id, str) or not physical_instance_id:
+            raise ValueError("physical_instance_id must be a non-empty string")
+
+    @staticmethod
+    def _validate_reason(reason: str) -> None:
+        if not isinstance(reason, str) or not reason:
+            raise ValueError("reason must be a non-empty string")
+
+    @staticmethod
+    def _holding_instance_id(key: str) -> str | None:
+        return key.removeprefix("holding:") if key.startswith("holding:") else None
 
 
 __all__ = ["ConfirmedState", "OperationStateLedger"]

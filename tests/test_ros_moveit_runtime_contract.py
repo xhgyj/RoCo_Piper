@@ -1242,17 +1242,17 @@ def script_gripper_terminal(
 ) -> FakeGoalHandle:
     handle = FakeGoalHandle()
     world.events.append(lambda: world.gripper.pending.set(handle))
+    world.events.append(
+        lambda: handle.result_future.set(
+            SimpleNamespace(status=status, result=SimpleNamespace())
+        )
+    )
     if final_state is not None:
         world.events.append(
             lambda: publish(
                 world.node, TOPIC_ISAAC_JOINT_STATES, FakeJointStateMsg(final_state)
             )
         )
-    world.events.append(
-        lambda: handle.result_future.set(
-            SimpleNamespace(status=status, result=SimpleNamespace())
-        )
-    )
     return handle
 
 
@@ -1267,6 +1267,10 @@ def test_send_gripper_builds_the_exact_two_point_goal():
     target = gripper_target()
     result = world.runtime.send_gripper(target, 20.0)
     assert result.status is ExecutionStatus.SUCCEEDED
+    assert result.goal_accepted is True
+    assert result.terminal is True and result.safe_to_release is True
+    assert result.action_status == "SUCCEEDED"
+    assert result.details["post_result_state_messages"] >= 1
     assert len(world.gripper.goals) == 1
     goal = world.gripper.goals[0]
     assert goal.trajectory.joint_names == list(GRIPPER_JOINT_NAMES)
@@ -1287,8 +1291,8 @@ def test_send_gripper_builds_the_exact_two_point_goal():
     ]
 
 
-def test_send_gripper_succeeds_on_an_aborted_contact_stall_within_window():
-    """A brick stall legitimately ABORTS; the measured window still passes."""
+def test_send_gripper_rejects_an_aborted_contact_stall_within_window():
+    """An in-window opening cannot override an ABORTED action terminal."""
     world = make_world()
     prime_ready(world)
     script_gripper_terminal(
@@ -1297,8 +1301,10 @@ def test_send_gripper_succeeds_on_an_aborted_contact_stall_within_window():
         final_state={**BASELINE, "gripper_joint1": 0.01, "gripper_joint2": -0.01},
     )
     result = world.runtime.send_gripper(gripper_target(), 20.0)
-    assert result.status is ExecutionStatus.SUCCEEDED
-    assert is_success(result) is True
+    assert result.status is ExecutionStatus.FAILED
+    assert is_success(result) is False
+    assert result.terminal is True and result.safe_to_release is True
+    assert result.action_status == "ABORTED"
     assert result.details["action_status"] == "ABORTED"
     assert result.details["measured_opening_m"] == pytest.approx(0.02)
     assert result.details["commanded_opening_m"] == pytest.approx(0.02)
@@ -1306,6 +1312,18 @@ def test_send_gripper_succeeds_on_an_aborted_contact_stall_within_window():
     assert result.final_errors["gripper_opening_m"] == pytest.approx(0.0, abs=1e-12)
     assert result.planned_waypoints == 2
     assert result.command_messages == 1
+
+
+def test_send_gripper_requires_post_action_finger_sample():
+    """A pre-command opening in range is not final gripper feedback."""
+    world = make_world()
+    prime_ready(world)
+    script_gripper_terminal(world, status=FAKE_GOAL_STATUS.STATUS_SUCCEEDED)
+    result = world.runtime.send_gripper(gripper_target(), 20.0)
+    assert result.status is ExecutionStatus.FAILED
+    assert result.goal_accepted is True
+    assert result.terminal is True and result.safe_to_release is True
+    assert result.details["post_result_state_messages"] == 0
 
 
 def test_send_gripper_fails_when_the_measurement_leaves_the_window():
@@ -1338,7 +1356,7 @@ def test_send_gripper_fails_on_a_mimic_violation_without_faking():
     assert result.details["measured_opening_m"] is None
     assert result.final_errors["gripper_opening_m"] is None
     assert "mimic relation" in result.details["measured_opening_error"]
-    assert "refusing to fake" in result.details["error"]
+    assert "refusing to claim success" in result.details["error"]
 
 
 def test_send_gripper_times_out_cancels_and_never_succeeds():

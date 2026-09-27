@@ -42,6 +42,7 @@ import math
 import os
 import re
 import shlex
+import signal
 import subprocess  # noqa: S404 - the default runner boundary only
 import sys
 import threading
@@ -121,6 +122,7 @@ AUDIT_TIMEOUT_S = 120.0
 PROFILE_TIMEOUT_S = 60.0
 MARKER_POLL_INTERVAL_S = 0.5
 STOP_POLL_INTERVAL_S = 1.0
+CANCEL_TIMEOUT_S = 10.0
 HOST_INT_GRACE_S = 90.0
 DOCKER_STOP_GRACE_S = 30.0
 CHILD_EXEC_MARGIN_S = 30.0
@@ -1560,6 +1562,8 @@ def build_global_scene_document(
         if any(low > high for low, high in zip(minimum, maximum)):
             raise ValueError(f"scene answer brick {brick_id!r} min exceeds max")
         bricks[brick_id] = {"aabb_min": minimum, "aabb_max": maximum}
+        if "pose" in entry:
+            bricks[brick_id]["pose"] = entry["pose"]
     connections_document = view.get("connections")
     if not isinstance(connections_document, Mapping):
         raise ValueError(
@@ -1610,8 +1614,15 @@ def build_global_scene_document(
                 "sim_time_s": sim_time,
                 "gripper": gripper,
                 "opening_m": opening,
+                **({"tcp_pose": view["tcp_pose"]} if "tcp_pose" in view else {}),
+                **({"sequence": view["robot_sequence"]}
+                   if "robot_sequence" in view else {}),
             }
         },
+        **({"session_id": view["session_id"]} if "session_id" in view else {}),
+        **({"manifest_sha256": view["manifest_sha256"]}
+           if "manifest_sha256" in view else {}),
+        **({"sequence": view["sequence"]} if "sequence" in view else {}),
     }
 
 
@@ -2006,7 +2017,9 @@ class MultiRobotIsaacMoveItSession:
         self._dds_dir = self.session_dir / "dds"
         self._host_log = self.session_dir / "host-bridge.log"
         self._container_log = self.session_dir / "dual-launch.log"
-        self._active_motion_children: dict[str, tuple[ProcessHandle, Path]] = {}
+        self._active_motion_children: dict[
+            str, tuple[ProcessHandle, Path, str, OperationKind, str]
+        ] = {}
         self._active_motion_lock = threading.Lock()
         self._config_output_dir = (
             self.session_dir / config.config_output_subdir
@@ -2633,6 +2646,7 @@ class MultiRobotIsaacMoveItSession:
         *,
         timeout_s: float,
         cancellable: bool = False,
+        cancellable_operation_id: str | None = None,
     ) -> RosSessionResult:
         """Run one session envelope through the container and validate it.
 
@@ -2644,6 +2658,15 @@ class MultiRobotIsaacMoveItSession:
         """
         if self.container_name is None:
             raise self._fail("session_dispatch", "no container is running")
+        if cancellable and (
+            not isinstance(cancellable_operation_id, str)
+            or not cancellable_operation_id
+            or len(request.operations) != 1
+            or request.operations[0].operation.request_id != cancellable_operation_id
+        ):
+            raise self._fail(
+                "session_dispatch", "cancellable operation identity mismatch"
+            )
         _write_json_atomic(request_path, request.serialize())
         if not cancellable:
             outcome = self.runner.run(
@@ -2664,14 +2687,24 @@ class MultiRobotIsaacMoveItSession:
         else:
             output_path = result_path.with_suffix(result_path.suffix + ".stdout.log")
             error_path = result_path.with_suffix(result_path.suffix + ".stderr.log")
-            handle = self.runner.launch(
-                self._session_child_argv(request_path, result_path),
-                env=dict(self._base_env),
-                stdout_path=output_path,
-                stderr_path=error_path,
-            )
             with self._active_motion_lock:
-                self._active_motion_children[request.request_id] = (handle, result_path)
+                if cancellable_operation_id in self._active_motion_children:
+                    raise self._fail(
+                        "session_dispatch", "motion operation is already active"
+                    )
+                handle = self.runner.launch(
+                    self._session_child_argv(request_path, result_path),
+                    env=dict(self._base_env),
+                    stdout_path=output_path,
+                    stderr_path=error_path,
+                )
+                self._active_motion_children[cancellable_operation_id] = (
+                    handle,
+                    result_path,
+                    request.operations[0].robot_id,
+                    request.operations[0].operation.kind,
+                    request.request_id,
+                )
             deadline = self._clock() + timeout_s
             try:
                 while handle.poll() is None:
@@ -2688,7 +2721,7 @@ class MultiRobotIsaacMoveItSession:
                 handle.wait(timeout_s=0.0)
             finally:
                 with self._active_motion_lock:
-                    self._active_motion_children.pop(request.request_id, None)
+                    self._active_motion_children.pop(cancellable_operation_id, None)
             if not result_path.is_file():
                 error_text = error_path.read_text(encoding="utf-8")[-400:]
                 raise self._fail(
@@ -2796,6 +2829,7 @@ class MultiRobotIsaacMoveItSession:
                 OperationKind.TCP_POSE,
                 OperationKind.GRIPPER_TARGET,
                 OperationKind.APPLY_PLANNING_SCENE,
+                OperationKind.ATTACH_PLANNING_SCENE,
             }
         )
         if operation.kind not in allowed:
@@ -2820,6 +2854,7 @@ class MultiRobotIsaacMoveItSession:
                 result_path,
                 timeout_s=self.config.operation_timeout_s + CHILD_EXEC_MARGIN_S,
                 cancellable=True,
+                cancellable_operation_id=operation.request_id,
             )
             matches = [
                 record
@@ -2866,7 +2901,7 @@ class MultiRobotIsaacMoveItSession:
         if entry is None:
             return {"attempted": False, "terminal": False, "safe": False,
                     "error": "motion child is not active"}
-        handle, result_path = entry
+        handle, result_path, robot_id, kind, session_request_id = entry
         try:
             handle.send_signal(signal.SIGINT)
         except Exception as exc:
@@ -2884,9 +2919,22 @@ class MultiRobotIsaacMoveItSession:
             document = json.loads(result_path.read_text(encoding="utf-8"))
             records = document.get("operations", [])
             if isinstance(records, list) and len(records) == 1:
-                execution = records[0].get("result", {}).get("execution", {})
-                terminal = execution.get("terminal") is True
-                safe = execution.get("safe_to_release") is True
+                record = records[0]
+                result = record.get("result") if isinstance(record, dict) else None
+                execution = result.get("execution") if isinstance(result, dict) else None
+                if (
+                    isinstance(record, dict)
+                    and document.get("request_id") == session_request_id
+                    and record.get("operation_id") == operation_id
+                    and record.get("robot_id") == robot_id
+                    and record.get("kind") == kind.value
+                    and isinstance(result, dict)
+                    and result.get("request_id") == operation_id
+                    and result.get("kind") == kind.value
+                    and isinstance(execution, dict)
+                ):
+                    terminal = execution.get("terminal") is True
+                    safe = terminal and execution.get("safe_to_release") is True
         except (OSError, ValueError, AttributeError):
             pass
         return {"attempted": True, "terminal": terminal, "safe": safe,

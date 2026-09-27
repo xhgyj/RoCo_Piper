@@ -418,6 +418,71 @@ def _gripper_observation(gripper_positions: Mapping[str, float]) -> dict:
     return observation
 
 
+def _scene_rigid_pose(raw: Mapping[str, Sequence[float]]) -> dict:
+    if not isinstance(raw, Mapping) or set(raw) != {
+        "position_xyz", "orientation_xyzw"
+    }:
+        raise ValueError("scene rigid pose must carry position and orientation")
+    try:
+        position = tuple(raw["position_xyz"])
+    except (TypeError, KeyError) as exc:
+        raise ValueError("scene rigid pose position must be a 3-vector") from exc
+    if (
+        len(position) != 3
+        or any(type(value) not in (int, float) or not math.isfinite(value)
+               for value in position)
+    ):
+        raise ValueError("scene rigid pose position must be finite")
+    position = [float(value) for value in position]
+    try:
+        orientation = tuple(raw["orientation_xyzw"])
+    except (TypeError, KeyError) as exc:
+        raise ValueError("scene rigid pose orientation must be unit xyzw") from exc
+    if (
+        len(orientation) != 4
+        or any(type(value) not in (int, float) or not math.isfinite(value)
+               for value in orientation)
+        or abs(math.sqrt(sum(float(value) ** 2 for value in orientation)) - 1.0)
+        > 1e-3
+    ):
+        raise ValueError("scene rigid pose orientation must be unit xyzw")
+    return {
+        "position_xyz": position,
+        "orientation_xyzw": [float(value) for value in orientation],
+    }
+
+
+def _scene_quaternion_multiply(
+    left: Sequence[float], right: Sequence[float]
+) -> list[float]:
+    x, y, z, w = left
+    a, b, c, d = right
+    return [
+        w * a + x * d + y * c - z * b,
+        w * b - x * c + y * d + z * a,
+        w * c + x * b - y * a + z * d,
+        w * d - x * a - y * b - z * c,
+    ]
+
+
+def _compose_scene_poses(parent: Mapping, child: Mapping) -> dict:
+    parent_q = parent["orientation_xyzw"]
+    child_position = child["position_xyz"]
+    inverse = [-parent_q[0], -parent_q[1], -parent_q[2], parent_q[3]]
+    rotated = _scene_quaternion_multiply(
+        _scene_quaternion_multiply(parent_q, [*child_position, 0.0]), inverse
+    )
+    return _scene_rigid_pose({
+        "position_xyz": [
+            parent["position_xyz"][index] + rotated[index]
+            for index in range(3)
+        ],
+        "orientation_xyzw": _scene_quaternion_multiply(
+            parent_q, child["orientation_xyzw"]
+        ),
+    })
+
+
 def build_scene_state_document(
     sim_time_s: float,
     brick_aabbs: Mapping[str, tuple[Sequence[float], Sequence[float]]],
@@ -425,6 +490,11 @@ def build_scene_state_document(
     gripper_positions: Mapping[str, float] | None = None,
     *,
     robot_grippers: Mapping[str, Mapping[str, float]] | None = None,
+    brick_poses: Mapping[str, Mapping[str, Sequence[float]]] | None = None,
+    robot_tcp_poses: Mapping[str, Mapping[str, Sequence[float]]] | None = None,
+    session_id: str | None = None,
+    manifest_sha256: str | None = None,
+    sequence: int | None = None,
 ) -> dict:
     """Assemble the scene-state response document with strict input checks.
 
@@ -444,6 +514,11 @@ def build_scene_state_document(
             ``robot_id``, the shared ``sim_time_s`` and its own gripper
             observation. The bricks/connections/clock stay top-level and
             shared, so no observation can be attributed to the wrong robot.
+        brick_poses: Optional measured world poses by physical instance id.
+        robot_tcp_poses: Optional measured world TCP poses by robot id.
+        session_id: Scene host identity when live poses are supplied.
+        manifest_sha256: Bound scene-manifest digest for pose evidence.
+        sequence: Monotonic query sequence for pose evidence.
 
     Returns:
         The plain scene-state document dict (not serialized).
@@ -511,6 +586,30 @@ def build_scene_state_document(
                 "sim_time_s": sim_time,
                 **_gripper_observation(fingers),
             }
+    if brick_poses is not None or robot_tcp_poses is not None:
+        if (
+            brick_poses is None
+            or robot_tcp_poses is None
+            or set(brick_poses) != set(bricks)
+            or set(robot_tcp_poses) != set(robots_document)
+            or not isinstance(session_id, str)
+            or not session_id
+            or not isinstance(manifest_sha256, str)
+            or not re.fullmatch(r"[0-9a-f]{64}", manifest_sha256)
+            or type(sequence) is not int
+            or sequence < 0
+        ):
+            raise ValueError("scene pose provenance or instance set is invalid")
+        document.update({
+            "session_id": session_id,
+            "manifest_sha256": manifest_sha256,
+            "sequence": sequence,
+        })
+        for instance_id, raw in brick_poses.items():
+            bricks[instance_id]["pose"] = _scene_rigid_pose(raw)
+        for robot_id, raw in robot_tcp_poses.items():
+            robots_document[robot_id]["tcp_pose"] = _scene_rigid_pose(raw)
+            robots_document[robot_id]["sequence"] = sequence
     if robots_document:
         document["robots"] = robots_document
     if gripper_positions is None and not robots_document:
@@ -1023,6 +1122,9 @@ class BridgeState:
         # robot-only path, which keeps the scene-state service fail-closed.
         self.runtime_host = None
         self.scene_manifest_ids = None
+        self.scene_session_id = None
+        self.scene_manifest_sha256 = None
+        self.tcp_transform = None
 
     def _flush(self, status: dict) -> None:
         """Persist cleanup progress so a hang in app.close() keeps evidence."""
@@ -1330,6 +1432,7 @@ class InProcessBridge:
         state.ros_node = self.node
         self._state = state
         self._channels = tuple(channels)
+        self._scene_sequence = 0
         for channel in self._channels:
             channel.joint_state_type = JointState
         self.clock_publisher = self.node.create_publisher(Clock, TOPIC_CLOCK, QOS_DEPTH)
@@ -1454,6 +1557,45 @@ class InProcessBridge:
             )
         return aabbs
 
+    def _physx_pose(self, path: str, physics: object) -> dict:
+        """Read one current rigid-body transform; missing physics fails closed.
+
+        Returns:
+            The validated world-frame rigid pose.
+        """
+        result = physics.get_rigidbody_transformation(path)
+        if not isinstance(result, Mapping) or result.get("ret_val") is not True:
+            raise RuntimeError(f"no live PhysX rigid transform at {path}")
+        return _scene_rigid_pose({
+            "position_xyz": result.get("position"),
+            "orientation_xyzw": result.get("rotation"),
+        })
+
+    def _live_rigid_poses(self) -> tuple[dict, dict]:
+        """Sample mapped bricks and calibrated TCPs in one service callback.
+
+        Returns:
+            Per-instance brick and per-robot TCP pose mappings.
+        """
+        import omni.physx
+
+        physics = omni.physx.get_physx_interface()
+        bricks = {
+            instance_id: self._physx_pose(path, physics)
+            for instance_id, path in
+            self._state.runtime_host.physical_instance_paths.items()
+        }
+        transform = self._state.tcp_transform
+        if transform is None:
+            raise RuntimeError("calibrated TCP transform is unavailable")
+        tcp_poses = {}
+        for channel in self._channels:
+            if channel.robot_id is None:
+                continue
+            link6 = self._physx_pose(channel.prim_path + "/link6", physics)
+            tcp_poses[channel.robot_id] = _compose_scene_poses(link6, transform)
+        return bricks, tcp_poses
+
     def _brick_connections(self) -> dict[str, bool]:
         """Query bricksim for every unordered manifest brick pair.
 
@@ -1508,6 +1650,8 @@ class InProcessBridge:
             sim_time_s = float(self._state.world.current_time)
             brick_aabbs = self._brick_aabbs()
             connections = self._brick_connections()
+            brick_poses, robot_tcp_poses = self._live_rigid_poses()
+            self._scene_sequence += 1
             if identified:
                 document = build_scene_state_document(
                     sim_time_s,
@@ -1519,6 +1663,11 @@ class InProcessBridge:
                         else None
                     ),
                     robot_grippers=identified,
+                    brick_poses=brick_poses,
+                    robot_tcp_poses=robot_tcp_poses,
+                    session_id=self._state.scene_session_id,
+                    manifest_sha256=self._state.scene_manifest_sha256,
+                    sequence=self._scene_sequence,
                 )
             else:
                 document = build_scene_state_document(
@@ -1777,6 +1926,24 @@ async def run_bridge(args: argparse.Namespace, state: BridgeState, evidence: dic
                     )
             # Ascending manifest order drives the scene-state pair keys.
             state.scene_manifest_ids = sorted(manifest_map)
+            state.scene_session_id = args.host_instance_id
+            state.scene_manifest_sha256 = manifest.manifest_sha256
+            calibration_path = (
+                ROOT / "artifacts/model-audit/piper_l_tcp_calibration.json"
+            )
+            calibration = json.loads(calibration_path.read_text(encoding="utf-8"))
+            transform = calibration.get("transform")
+            if (
+                calibration.get("passed") is not True
+                or not isinstance(transform, dict)
+                or transform.get("parent_frame") != "link6"
+                or transform.get("child_frame") != "rocobrick_tcp"
+            ):
+                raise RuntimeError("project TCP calibration is not resolved")
+            state.tcp_transform = _scene_rigid_pose({
+                "position_xyz": transform.get("translation_m"),
+                "orientation_xyzw": transform.get("rotation_xyzw"),
+            })
 
             profile_path = Path(evidence["dds_profile"])
             profile_sha = hashlib.sha256(profile_path.read_bytes()).hexdigest()

@@ -40,6 +40,7 @@ from rocobrick.planning_scene import (
 from rocobrick.planning_scene import (
     PlanningSceneUpdate,
     box_from_aabb,
+    box_geometry_digest,
     scene_digest,
 )
 
@@ -103,6 +104,12 @@ PLANNING_SCENE_BOX_KEYS = frozenset({
 })
 
 
+ATTACHED_SCENE_PAYLOAD_KEYS = frozenset({
+    "scene_id", "object_id", "link_name", "frame_id",
+    "minimum_m", "maximum_m", "geometry_digest", "touch_links",
+})
+
+
 class OperationKind(StrEnum):
     """Exact operation vocabulary exchanged across the container boundary."""
 
@@ -112,6 +119,7 @@ class OperationKind(StrEnum):
     TCP_POSE = "TCP_POSE"
     GRIPPER_TARGET = "GRIPPER_TARGET"
     APPLY_PLANNING_SCENE = "APPLY_PLANNING_SCENE"
+    ATTACH_PLANNING_SCENE = "ATTACH_PLANNING_SCENE"
     SCENE_QUERY = "SCENE_QUERY"
 
 
@@ -442,6 +450,44 @@ def gripper_operation(
         payload=payload,
         timeout_s=float(timeout_s),
         request_id=request_id,
+    )
+
+
+def attached_planning_scene_operation(
+    payload: Mapping[str, object], timeout_s: float, request_id: str
+) -> RuntimeOperation:
+    """Build one strict robot-attached collision-scene operation."""
+    if not _is_finite(timeout_s) or float(timeout_s) <= 0.0:
+        raise OperationContractError("timeout_s must be finite and positive")
+    if not isinstance(request_id, str) or not request_id:
+        raise OperationContractError("request_id must be a non-empty string")
+    _require_exact_keys(payload, ATTACHED_SCENE_PAYLOAD_KEYS, "attached scene payload")
+    for key in ("scene_id", "object_id", "link_name", "frame_id"):
+        if not isinstance(payload[key], str) or not payload[key]:
+            raise OperationContractError(f"attached scene {key} must be non-empty")
+    if not _is_sha256_digest(payload["geometry_digest"]):
+        raise OperationContractError("attached scene geometry_digest is invalid")
+    minimum = _require_finite_sequence(payload["minimum_m"], 3, "minimum_m")
+    maximum = _require_finite_sequence(payload["maximum_m"], 3, "maximum_m")
+    if any(low >= high for low, high in zip(minimum, maximum)):
+        raise OperationContractError("attached scene maximum_m must exceed minimum_m")
+    links = payload["touch_links"]
+    if (
+        not isinstance(links, (list, tuple))
+        or not links
+        or any(not isinstance(link, str) or not link for link in links)
+        or len(set(links)) != len(links)
+    ):
+        raise OperationContractError("attached scene touch_links must be unique strings")
+    expected = box_geometry_digest(
+        object_id=str(payload["object_id"]), frame_id=str(payload["frame_id"]),
+        minimum_m=minimum, maximum_m=maximum,
+    )
+    if expected != payload["geometry_digest"]:
+        raise OperationContractError("attached scene geometry_digest does not match")
+    return RuntimeOperation(
+        kind=OperationKind.ATTACH_PLANNING_SCENE,
+        payload=dict(payload), timeout_s=float(timeout_s), request_id=request_id,
     )
 
 
@@ -905,11 +951,13 @@ __all__ = [
     "PLANNING_SCENE_PAYLOAD_KEYS",
     "SCENE_QUERY_PAYLOAD_KEYS",
     "TCP_PAYLOAD_KEYS",
+    "ATTACHED_SCENE_PAYLOAD_KEYS",
     "OperationContractError",
     "OperationKind",
     "OperationRejected",
     "RuntimeOperation",
     "RuntimeOperationResult",
+    "attached_planning_scene_operation",
     "gripper_operation",
     "gripper_target_from_payload",
     "joint_operation",

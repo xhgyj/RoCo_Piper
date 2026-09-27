@@ -77,6 +77,8 @@ ALLOWED_ROCOBRICK = {
     "rocobrick.multi_robot_runtime",
     "rocobrick.adapters.moveit.transit",
     "rocobrick.execution.operation_state_ledger",
+    "rocobrick.isaac_snapshot_host_adapter",
+    "rocobrick.skills.pick",
     "rocobrick.plan.structure_scene",
     "rocobrick.robot_operation_executor",
     "rocobrick.robot_operation_runner",
