@@ -2661,6 +2661,16 @@ class RosMoveItRuntime:
                 details["planned_final_joint_positions_rad"] = dict(
                     zip(raw_names, final_point)
                 )
+                first_time = getattr(trajectory.points[0], "time_from_start", None)
+                final_time = getattr(trajectory.points[-1], "time_from_start", None)
+                if first_time is not None and final_time is not None:
+                    details["planned_trajectory_time_s"] = {
+                        "first": float(getattr(first_time, "sec", 0))
+                        + float(getattr(first_time, "nanosec", 0)) * 1e-9,
+                        "final": float(getattr(final_time, "sec", 0))
+                        + float(getattr(final_time, "nanosec", 0)) * 1e-9,
+                        "points": len(raw_points),
+                    }
         except (AttributeError, TypeError, ValueError):
             # Waypoint admission remains authoritative; diagnostics must not
             # change whether a trajectory is accepted.
