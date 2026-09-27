@@ -148,11 +148,15 @@ class PickHandler:
         )
 
     def _planning_payload(
-        self, admission: PickAdmission, context: TransitContext
+        self,
+        admission: PickAdmission,
+        context: TransitContext,
+        sample: PickObservation | None = None,
     ) -> dict[str, object]:
-        """Build one strict base-frame box and explicit gripper contact pairs."""
-        minimum = tuple(float(value) for value in admission.sample.aabb_min)
-        maximum = tuple(float(value) for value in admission.sample.aabb_max)
+        """Build one strict base-frame box from the selected live sample."""
+        sample = sample or admission.sample
+        minimum = tuple(float(value) for value in sample.aabb_min)
+        maximum = tuple(float(value) for value in sample.aabb_max)
         object_id = admission.physical_instance_id
         frame_id = f"{admission.robot_id}_world"
         links = tuple(sorted(
@@ -277,6 +281,8 @@ class PickHandler:
                 terminal=True,
                 motion_sent=False,
             )
+        motion_sent = False
+        evidence: dict[str, JSONValue] = {}
         try:
             context = self._context
             targets = pick_targets(
@@ -286,7 +292,7 @@ class PickHandler:
                 context.provenance,
                 context.params,
             )
-            evidence: dict[str, JSONValue] = {
+            evidence.update({
                 "target_identity_checked": {
                     "operation_id": admission.operation_id,
                     "robot_id": admission.robot_id,
@@ -296,9 +302,10 @@ class PickHandler:
                     "sequence": admission.sample.sequence,
                     "sim_time_s": admission.sample.sim_time_s,
                 }
-            }
+            })
+            planning_sample = admission.sample
             planning = planning_scene_operation(
-                self._planning_payload(admission, context),
+                self._planning_payload(admission, context, planning_sample),
                 60.0,
                 f"{operation.operation_id}:plan_grasp",
             )
@@ -320,7 +327,6 @@ class PickHandler:
                         expected_opening_m=targets.close_expected_window_m,
                     ), 60.0, f"{operation.operation_id}:close_gripper")),
             )
-            motion_sent = False
             for phase, runtime_operation in phases:
                 result = await self._dispatch(operation, phase, runtime_operation)
                 evidence.update(result.evidence)
@@ -328,15 +334,24 @@ class PickHandler:
                 if not result.passed:
                     return self._failed(operation, result.reason or f"{phase} failed", evidence,
                                         terminal=result.terminal, motion_sent=motion_sent)
+            grasp_sample = parse_pick_observation(
+                await self._observations.observe(admission.robot_id),
+                robot_id=admission.robot_id,
+                physical_instance_id=admission.physical_instance_id,
+                session_id=self._session_id,
+                manifest_sha256=self._manifest_sha256,
+            )
+            evidence["grasp_observation"] = asdict(grasp_sample)
+            attach_payload = self._planning_payload(admission, context, grasp_sample)
             attach = attached_planning_scene_operation(
                 {
                     "scene_id": f"{operation.operation_id}-attach",
                     "object_id": admission.physical_instance_id,
                     "link_name": f"{admission.robot_id}_rocobrick_tcp",
                     "frame_id": f"{admission.robot_id}_world",
-                    "minimum_m": list(admission.sample.aabb_min),
-                    "maximum_m": list(admission.sample.aabb_max),
-                    "geometry_digest": self._planning_payload(admission, context)["boxes"][0]["geometry_digest"],
+                    "minimum_m": list(grasp_sample.aabb_min),
+                    "maximum_m": list(grasp_sample.aabb_max),
+                    "geometry_digest": attach_payload["boxes"][0]["geometry_digest"],
                     "touch_links": [
                         f"{admission.robot_id}_gripper_link1",
                         f"{admission.robot_id}_gripper_link2",
@@ -355,7 +370,15 @@ class PickHandler:
             if not result.passed:
                 return self._failed(operation, result.reason or "lift failed", evidence,
                                     terminal=result.terminal, motion_sent=motion_sent)
-            samples = [admission.sample]
+            lift_start = parse_pick_observation(
+                await self._observations.observe(admission.robot_id),
+                robot_id=admission.robot_id,
+                physical_instance_id=admission.physical_instance_id,
+                session_id=self._session_id,
+                manifest_sha256=self._manifest_sha256,
+            )
+            evidence["lift_start_observation"] = asdict(lift_start)
+            samples = [lift_start]
             for _ in range(2):
                 await asyncio.sleep(self._poll_interval_s)
                 sample = parse_pick_observation(
@@ -392,7 +415,7 @@ class PickHandler:
             return self._failed(
                 operation,
                 f"PICK_FAILED: {error}",
-                {},
-                terminal=True,
-                motion_sent=False,
+                evidence,
+                terminal=not motion_sent,
+                motion_sent=motion_sent,
             )
