@@ -1746,17 +1746,6 @@ class RosMoveItRuntime:
                     details={"scene_id": update.scene_id, "error": str(error)},
                 )
         for box in update.boxes:
-            # Explicitly remove a previous object with the same id before ADD.
-            # Some MoveIt/warehouse combinations update the primitive dimensions
-            # but retain the previous primitive pose on an ADD with a reused id.
-            # REMOVE is harmless when the object is absent and makes the pose
-            # replacement deterministic without weakening readback validation.
-            removal = factories.collision_object_factory()
-            removal.header.frame_id = box.frame_id
-            removal.id = box.object_id
-            removal.operation = getattr(type(removal), "REMOVE")
-            request.scene.world.collision_objects.append(removal)
-
             collision_object = factories.collision_object_factory()
             collision_object.header.frame_id = box.frame_id
             collision_object.id = box.object_id
