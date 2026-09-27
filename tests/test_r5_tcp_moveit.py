@@ -73,6 +73,7 @@ from rocobrick.ros_moveit_runtime import (
     SERVICE_APPLY_PLANNING_SCENE,
     SERVICE_CALL_TIMEOUT_S,
     RosMoveItFactories,
+    _collision_box_matches,
     RosMoveItRuntime,
     RuntimeServices,
 )
@@ -1278,6 +1279,26 @@ def test_planning_scene_update_schema_digest_and_validation() -> None:
         )
     with pytest.raises(ValueError):
         PlanningSceneUpdate(scene_id="scene-1", boxes=(box,), expected_scene_digest="zz")
+
+
+def test_collision_box_matches_composes_moveit_object_and_shape_poses() -> None:
+    box = box_from_aabb(
+        object_id="brick-44",
+        frame_id="piper_0_world",
+        minimum_m=(0.1, -0.05, 0.01),
+        maximum_m=(0.2, 0.05, 0.05),
+    )
+    item = FakeCollisionObject()
+    item.header.frame_id = box.frame_id
+    item.primitives = [SimpleNamespace(type=FakeSolidPrimitive.BOX, dimensions=list(box.dimensions_m))]
+    item.pose = FakePose()
+    item.pose.position.x, item.pose.position.y, item.pose.position.z = box.center_m
+    item.pose.orientation.w = 1.0
+    shape_pose = FakePose()
+    shape_pose.orientation.w = 1.0
+    item.primitive_poses = [shape_pose]
+    assert _collision_box_matches(item, box) is True
+
 
 
 def test_apply_planning_scene_delegates_to_the_injected_applier_once() -> None:

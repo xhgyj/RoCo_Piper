@@ -563,11 +563,45 @@ def _terminal_status_name(status: Any, goal_status: Any) -> str:
     return f"UNKNOWN({value})"
 
 
-def _collision_box_matches(item: object, box: AxisAlignedBox) -> bool:
-    """Check the read-back MoveIt box against the submitted geometry.
+def _quaternion_multiply(
+    left: tuple[float, float, float, float],
+    right: tuple[float, float, float, float],
+) -> tuple[float, float, float, float]:
+    """Compose xyzw quaternions without relying on ROS/tf2 imports."""
+    x, y, z, w = left
+    a, b, c, d = right
+    return (
+        w * a + x * d + y * c - z * b,
+        w * b - x * c + y * d + z * a,
+        w * c + x * b - y * a + z * d,
+        w * d - x * a - y * b - z * c,
+    )
 
-    Returns:
-        True only for the same frame, shape, dimensions and center.
+
+def _rotate_vector(
+    quaternion: tuple[float, float, float, float],
+    vector: tuple[float, float, float],
+) -> tuple[float, float, float]:
+    """Rotate one vector by an xyzw quaternion."""
+    qx, qy, qz, qw = quaternion
+    vx, vy, vz = vector
+    tx = 2.0 * (qy * vz - qz * vy)
+    ty = 2.0 * (qz * vx - qx * vz)
+    tz = 2.0 * (qx * vy - qy * vx)
+    return (
+        vx + qw * tx + qy * tz - qz * ty,
+        vy + qw * ty + qz * tx - qx * tz,
+        vz + qw * tz + qx * ty - qy * tx,
+    )
+
+
+def _collision_box_matches(item: object, box: AxisAlignedBox) -> bool:
+    """Check readback geometry using MoveIt's object/shape pose semantics.
+
+    MoveIt may serialize the object origin in ``CollisionObject.pose`` and the
+    primitive pose relative to that origin. Older message fixtures omit
+    ``pose`` and use the primitive pose directly, so both representations are
+    handled strictly and composed when the object pose is present.
     """
     try:
         if item.header.frame_id != box.frame_id:
@@ -575,19 +609,49 @@ def _collision_box_matches(item: object, box: AxisAlignedBox) -> bool:
         if len(item.primitives) != 1 or len(item.primitive_poses) != 1:
             return False
         primitive = item.primitives[0]
-        pose = item.primitive_poses[0]
+        shape_pose = item.primitive_poses[0]
         if primitive.type != 1 or len(primitive.dimensions) != 3:
             return False
         dimensions = tuple(float(value) for value in primitive.dimensions)
-        center = (float(pose.position.x), float(pose.position.y), float(pose.position.z))
-        quaternion = (
-            float(pose.orientation.x), float(pose.orientation.y),
-            float(pose.orientation.z), float(pose.orientation.w),
+        local_center = (
+            float(shape_pose.position.x),
+            float(shape_pose.position.y),
+            float(shape_pose.position.z),
         )
+        local_quaternion = (
+            float(shape_pose.orientation.x),
+            float(shape_pose.orientation.y),
+            float(shape_pose.orientation.z),
+            float(shape_pose.orientation.w),
+        )
+        object_pose = getattr(item, "pose", None)
+        if object_pose is None:
+            center = local_center
+            quaternion = local_quaternion
+        else:
+            object_center = (
+                float(object_pose.position.x),
+                float(object_pose.position.y),
+                float(object_pose.position.z),
+            )
+            object_quaternion = (
+                float(object_pose.orientation.x),
+                float(object_pose.orientation.y),
+                float(object_pose.orientation.z),
+                float(object_pose.orientation.w),
+            )
+            center = tuple(
+                origin + offset
+                for origin, offset in zip(
+                    object_center, _rotate_vector(object_quaternion, local_center)
+                )
+            )
+            quaternion = _quaternion_multiply(object_quaternion, local_quaternion)
     except (AttributeError, IndexError, TypeError, ValueError):
         return False
+    values = (*dimensions, *center, *quaternion)
     return (
-        all(math.isfinite(value) for value in (*dimensions, *center, *quaternion))
+        all(math.isfinite(value) for value in values)
         and all(abs(a - b) <= 1e-5 for a, b in zip(dimensions, box.dimensions_m))
         and all(abs(a - b) <= 1e-5 for a, b in zip(center, box.center_m))
         and all(abs(a - b) <= 1e-5 for a, b in zip(quaternion, (0.0, 0.0, 0.0, 1.0)))
@@ -1834,9 +1898,8 @@ class RosMoveItRuntime:
                         f"frame={getattr(getattr(item, 'header', None), 'frame_id', None)!r} "
                         f"primitives={len(getattr(item, 'primitives', ()))!r} "
                         f"dimensions={getattr(getattr(item, 'primitives', [None])[0], 'dimensions', None)!r} "
-                        f"center={getattr(getattr(getattr(item, 'primitive_poses', [None])[0], 'position', None), 'x', None)!r},"
-                        f"{getattr(getattr(getattr(item, 'primitive_poses', [None])[0], 'position', None), 'y', None)!r},"
-                        f"{getattr(getattr(getattr(item, 'primitive_poses', [None])[0], 'position', None), 'z', None)!r}"
+                        f"object_pose={getattr(item, 'pose', None)!r} "
+                        f"primitive_pose={getattr(getattr(item, 'primitive_poses', [None])[0], 'position', None)!r}"
                     )
                     break
             if matched:
