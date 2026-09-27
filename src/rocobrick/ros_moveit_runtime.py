@@ -2649,6 +2649,22 @@ class RosMoveItRuntime:
         status = _map_goal_status(wrapper.status, factories.goal_status_type())
         error_code = int(getattr(action_result.error_code, "val"))
         planned_waypoints, trajectory_decision = self._inspect_trajectory(action_result)
+        trajectory = action_result.planned_trajectory.joint_trajectory
+        try:
+            raw_names = [str(name) for name in trajectory.joint_names]
+            raw_points = [
+                [float(value) for value in point.positions]
+                for point in trajectory.points
+            ]
+            if raw_points:
+                final_point = raw_points[-1]
+                details["planned_final_joint_positions_rad"] = dict(
+                    zip(raw_names, final_point)
+                )
+        except (AttributeError, TypeError, ValueError):
+            # Waypoint admission remains authoritative; diagnostics must not
+            # change whether a trajectory is accepted.
+            pass
         details["goal_status"] = int(wrapper.status)
         details["action_status"] = _terminal_status_name(
             wrapper.status, factories.goal_status_type()
