@@ -225,7 +225,7 @@ def test_pick_targets_heights_windows_and_provenance() -> None:
         (center_x, center_y, center_z + params.pregrasp_standoff_m)
     )
     assert targets.approach.position == pytest.approx(
-        (center_x, center_y, center_z)
+        (center_x, center_y, center_z + params.approach_clearance_m)
     )
     assert targets.lift.position == pytest.approx(
         (

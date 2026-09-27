@@ -59,6 +59,7 @@ class SkillParams:
     """Every numeric knob of the generic skill programs (all finite floats)."""
 
     pregrasp_standoff_m: float = 0.08  # > 0
+    approach_clearance_m: float = 0.015  # > 0; TCP above brick center for side grasp
     lift_height_m: float = 0.12  # > 0
     transit_extra_height_m: float = 0.10  # > 0
     open_extra_m: float = 0.02  # >= 0
@@ -77,6 +78,7 @@ class SkillParams:
     def __post_init__(self) -> None:
         bounds = {
             "pregrasp_standoff_m": (0.0, math.inf),
+            "approach_clearance_m": (0.0, math.inf),
             "lift_height_m": (0.0, math.inf),
             "transit_extra_height_m": (0.0, math.inf),
             "open_extra_m": (0.0, math.inf),
@@ -361,7 +363,7 @@ def pick_targets(
             params,
         ),
         approach=_tcp_pose_target(
-            (center_xy[0], center_xy[1], center_in_base[2]),
+            (center_xy[0], center_xy[1], center_in_base[2] + params.approach_clearance_m),
             orientation,
             provenance,
             params,

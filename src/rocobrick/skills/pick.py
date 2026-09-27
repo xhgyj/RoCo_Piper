@@ -329,6 +329,13 @@ class PickHandler:
             phases = (
                 ("reach_pregrasp", tcp_pose_operation(targets.pregrasp, 60.0,
                     f"{operation.operation_id}:reach_pregrasp")),
+                ("open_gripper", gripper_operation(
+                    GripperTarget(
+                        opening_m=targets.reach_opening_m,
+                        duration_s=context.params.gripper_duration_s,
+                        goal_tolerance=context.params.gripper_goal_tolerance,
+                        expected_opening_m=targets.reach_expected_window_m,
+                    ), 60.0, f"{operation.operation_id}:open_gripper")),
                 ("approach", tcp_pose_operation(targets.approach, 60.0,
                     f"{operation.operation_id}:approach")),
                 ("close_gripper", gripper_operation(
