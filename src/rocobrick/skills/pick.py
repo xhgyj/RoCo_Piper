@@ -153,12 +153,39 @@ class PickHandler:
         context: TransitContext,
         sample: PickObservation | None = None,
     ) -> dict[str, object]:
-        """Build one strict base-frame box from the selected live sample."""
+        """Build live target and configured ground collision boxes."""
         sample = sample or admission.sample
         minimum = tuple(float(value) for value in sample.aabb_min)
         maximum = tuple(float(value) for value in sample.aabb_max)
         object_id = admission.physical_instance_id
         frame_id = f"{admission.robot_id}_world"
+        boxes = [
+            box_from_aabb(
+                object_id=object_id,
+                frame_id=frame_id,
+                minimum_m=minimum,
+                maximum_m=maximum,
+            )
+        ]
+        if context.ground is not None:
+            ground = context.ground
+            half_x, half_y = (size / 2.0 for size in ground.size_xy_m)
+            boxes.append(
+                box_from_aabb(
+                    object_id=f"{admission.robot_id}_ground",
+                    frame_id=frame_id,
+                    minimum_m=(
+                        ground.center_xy_m[0] - half_x,
+                        ground.center_xy_m[1] - half_y,
+                        ground.top_z_m - ground.thickness_m,
+                    ),
+                    maximum_m=(
+                        ground.center_xy_m[0] + half_x,
+                        ground.center_xy_m[1] + half_y,
+                        ground.top_z_m,
+                    ),
+                )
+            )
         links = tuple(sorted(
             (
                 (object_id, f"{admission.robot_id}_gripper_link1"),
@@ -167,14 +194,7 @@ class PickHandler:
         ))
         update = PlanningSceneUpdate(
             scene_id=f"{admission.operation_id}-pick-scene",
-            boxes=(
-                box_from_aabb(
-                    object_id=object_id,
-                    frame_id=frame_id,
-                    minimum_m=minimum,
-                    maximum_m=maximum,
-                ),
-            ),
+            boxes=tuple(boxes),
             expected_scene_digest="0" * 64,
             allowed_collision_pairs=links,
         )
@@ -235,6 +255,56 @@ class PickHandler:
             evidence,
             None if passed and terminal and safe else f"{phase}: runtime evidence failed",
         )
+
+    @staticmethod
+    def _close_feedback(
+        evidence: Mapping[str, JSONValue],
+    ) -> Mapping[str, JSONValue]:
+        """Validate measured gripper feedback without claiming contact.
+
+        A successful gripper action is only a mechanical feedback gate.
+        Contact/holding is confirmed later by the lifted brick following the
+        TCP, because the current scene contract exposes no force sensor.
+        """
+        runtime = evidence.get("runtime")
+        execution = runtime.get("execution") if isinstance(runtime, Mapping) else None
+        details = (
+            execution.get("details")
+            if isinstance(execution, Mapping)
+            else None
+        )
+        if not isinstance(execution, Mapping) or not isinstance(details, Mapping):
+            raise ValueError("close gripper runtime details are unavailable")
+        measured = details.get("measured_opening_m")
+        window = details.get("expected_opening_m")
+        post_state = details.get("post_result_state_messages")
+        accepted = execution.get("goal_accepted") is True
+        terminal = execution.get("terminal") is True
+        safe = execution.get("safe_to_release") is True
+        status = execution.get("action_status") == "SUCCEEDED"
+        if (
+            isinstance(measured, bool)
+            or not isinstance(measured, (int, float))
+            or not isinstance(window, (list, tuple))
+            or len(window) != 2
+            or not all(isinstance(value, (int, float)) for value in window)
+            or not isinstance(post_state, int)
+            or post_state < 1
+            or not (float(window[0]) <= float(measured) <= float(window[1]))
+            or not all((accepted, terminal, safe, status))
+        ):
+            raise ValueError("close gripper feedback did not prove the commanded opening")
+        return {
+            "goal_accepted": True,
+            "action_status": "SUCCEEDED",
+            "terminal": True,
+            "safe_to_release": True,
+            "measured_opening_m": float(measured),
+            "expected_opening_m": [float(window[0]), float(window[1])],
+            "post_result_state_messages": post_state,
+            "contact_confirmed": False,
+            "contact_confirmation_deferred": "lift_following",
+        }
 
     async def cancel(self, operation_id: str) -> Mapping[str, object]:
         """Cancel the currently active phase request for one operation."""
@@ -327,8 +397,6 @@ class PickHandler:
                 return self._failed(operation, result.reason or "plan_grasp failed", evidence,
                                     terminal=result.terminal, motion_sent=result.motion_sent)
             phases = (
-                ("reach_pregrasp", tcp_pose_operation(targets.pregrasp, 60.0,
-                    f"{operation.operation_id}:reach_pregrasp")),
                 ("open_gripper", gripper_operation(
                     GripperTarget(
                         opening_m=targets.reach_opening_m,
@@ -336,6 +404,8 @@ class PickHandler:
                         goal_tolerance=context.params.gripper_goal_tolerance,
                         expected_opening_m=targets.reach_expected_window_m,
                     ), 60.0, f"{operation.operation_id}:open_gripper")),
+                ("reach_pregrasp", tcp_pose_operation(targets.pregrasp, 60.0,
+                    f"{operation.operation_id}:reach_pregrasp")),
                 ("approach", tcp_pose_operation(targets.approach, 60.0,
                     f"{operation.operation_id}:approach")),
                 ("close_gripper", gripper_operation(
@@ -353,6 +423,29 @@ class PickHandler:
                 if not result.passed:
                     return self._failed(operation, result.reason or f"{phase} failed", evidence,
                                         terminal=result.terminal, motion_sent=motion_sent)
+                if phase == "close_gripper":
+                    try:
+                        evidence["gripper_close_feedback_confirmed"] = (
+                            self._close_feedback(result.evidence)
+                        )
+                    except ValueError as error:
+                        return self._failed(
+                            operation,
+                            f"GRIPPER_FEEDBACK_UNCONFIRMED: {error}",
+                            evidence,
+                            terminal=result.terminal,
+                            motion_sent=motion_sent,
+                        )
+                if phase == "reach_pregrasp":
+                    self._ledger.confirm(
+                        admission.robot_id,
+                        "robot_at_pick_region",
+                        {
+                            "physical_instance_id": admission.physical_instance_id,
+                            "phase": "reach_pregrasp",
+                            "evidence": dict(result.evidence),
+                        },
+                    )
             grasp_sample = parse_pick_observation(
                 await self._observations.observe(admission.robot_id),
                 robot_id=admission.robot_id,

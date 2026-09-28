@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+from types import SimpleNamespace
 
 import pytest
+
+from rocobrick.adapters.moveit.transit import GroundSpec
 
 from rocobrick.execution.operation_state_ledger import OperationStateLedger
 from rocobrick.isaac_backend import OperationKind, RuntimeOperation
@@ -161,3 +164,29 @@ def test_pick_handler_rejects_preflight_without_motion(defect: str) -> None:
     assert result.evidence == {}
     assert result.reason.startswith("PICK_PREFLIGHT_REJECTED")
     assert ledger.observe("piper_0", "holding:brick-a") is None
+
+
+def test_pick_planning_scene_includes_protected_ground_box() -> None:
+    """The target may contact the fingers, but the floor must remain protected."""
+    ledger = OperationStateLedger(("piper_0",))
+    ledger.confirm(
+        "piper_0", "robot_at_pick_region",
+        {"arrival": True, "physical_instance_id": "brick-a"},
+    )
+    handler = PickHandler(
+        Observer(document()), ledger, session_id="session-1",
+        manifest_sha256="a" * 64,
+    )
+    admission = asyncio.run(handler.preflight(operation()))
+    context = SimpleNamespace(ground=GroundSpec(
+        center_xy_m=(0.0, -0.2), size_xy_m=(2.0, 2.0),
+        top_z_m=-0.001, thickness_m=0.02,
+    ))
+    payload = handler._planning_payload(admission, context)
+    boxes = {box["object_id"]: box for box in payload["boxes"]}
+    assert set(boxes) == {"brick-a", "piper_0_ground"}
+    ground = boxes["piper_0_ground"]
+    assert ground["frame_id"] == "piper_0_world"
+    assert ground["minimum_m"] == (-1.0, -1.2, -0.021)
+    assert ground["maximum_m"] == (1.0, 0.8, -0.001)
+    assert all("piper_0_ground" not in pair for pair in payload["allowed_collision_pairs"])
