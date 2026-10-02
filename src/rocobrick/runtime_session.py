@@ -1712,6 +1712,7 @@ class MultiRobotSessionConfig:
     readiness_timeout_s: float = 240.0
     operation_timeout_s: float = 180.0
     host_hold_budget_s: float = 300.0
+    persistent_ros_client: bool = True
     host_teardown_grace_s: float = 120.0
     shutdown_timeout_s: float = 900.0
 
@@ -2047,6 +2048,9 @@ class MultiRobotIsaacMoveItSession:
             str, tuple[ProcessHandle, Path, str, OperationKind, str]
         ] = {}
         self._active_motion_lock = threading.Lock()
+        self._ros_worker = None
+        self._ros_worker_launch_lock = threading.Lock()
+        self._ros_worker_token = uuid4().hex
         self._config_output_dir = (
             self.session_dir / config.config_output_subdir
         )
@@ -2668,6 +2672,36 @@ class MultiRobotIsaacMoveItSession:
             ",".join(self.config.robot_ids),
         ]
 
+    def _persistent_worker(self):
+        from rocobrick.execution.ros_worker_transport import RosWorkerTransport
+
+        with self._ros_worker_launch_lock:
+            if self._ros_worker is not None:
+                return self._ros_worker
+            directory = self.session_dir / "ros-worker"
+            directory.mkdir(parents=True, exist_ok=False)
+            argv = self._session_child_argv(
+                directory / "unused-request.json", directory / "unused-result.json"
+            )
+            argv[-5] = argv[-5].replace(
+                '--request "$1" --result "$2" --robots "$3"',
+                '--serve-dir "$1" --worker-token "$2" --robots "$3"',
+            )
+            argv[-3] = self._container_path(directory)
+            argv[-2] = self._ros_worker_token
+            handle = self.runner.launch(
+                argv, env=dict(self._base_env),
+                stdout_path=directory / "stdout.log",
+                stderr_path=directory / "stderr.log",
+            )
+            self._ros_worker = RosWorkerTransport(
+                directory, self._ros_worker_token, handle, self._clock, self._sleep
+            )
+            self._ros_worker.wait_ready(
+                self.config.robot_ids, self.config.readiness_timeout_s
+            )
+            return self._ros_worker
+
     def _dispatch_session(
         self,
         request: RosSessionRequest,
@@ -2698,6 +2732,13 @@ class MultiRobotIsaacMoveItSession:
                 "session_dispatch", "cancellable operation identity mismatch"
             )
         _write_json_atomic(request_path, request.serialize())
+        if self.config.persistent_ros_client:
+            try:
+                return self._persistent_worker().call(request, result_path, timeout_s)
+            except (OSError, ValueError, RuntimeError, TimeoutError) as error:
+                raise self._fail(
+                    "session_dispatch", f"persistent worker: {error}"
+                ) from error
         if not cancellable:
             outcome = self.runner.run(
                 self._session_child_argv(request_path, result_path),
@@ -2926,6 +2967,9 @@ class MultiRobotIsaacMoveItSession:
         """Signal one running motion child and wait for its strict result."""
         if not isinstance(operation_id, str) or not operation_id:
             raise ValueError("operation_id must be a non-empty string")
+        worker = getattr(self, "_ros_worker", None)
+        if worker is not None:
+            return worker.cancel(operation_id)
         with self._active_motion_lock:
             entry = self._active_motion_children.get(operation_id)
         if entry is None:
@@ -3269,6 +3313,11 @@ class MultiRobotIsaacMoveItSession:
             "leftovers": {},
             "passed": False,
         }
+        worker = self._ros_worker
+        cleanup["ros_worker"] = (
+            worker.stop(self.config.robot_ids) if worker is not None
+            else {"passed": True, "not_started": True}
+        )
         cleanup["container_log"] = self._capture_container_log()
         cleanup["container_stop"] = self._stop_container(cleanup)
         self._stop_host(cleanup)
@@ -3291,7 +3340,8 @@ class MultiRobotIsaacMoveItSession:
                 "an accepted intentional stop with an orderly shutdown"
             )
         cleanup["passed"] = bool(
-            cleanup["container_removed"]
+            cleanup["ros_worker"]["passed"] is True
+            and cleanup["container_removed"]
             and cleanup["host_stopped"]
             and host_evidence_orderly
             and not leftovers.get("session_containers")

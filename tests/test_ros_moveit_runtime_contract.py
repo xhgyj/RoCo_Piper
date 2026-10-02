@@ -53,6 +53,8 @@ from rocobrick.moveit_requests import build_joint_target, build_link6_pose_targe
 from rocobrick.ros_moveit_executor import RosMoveItExecutor
 from rocobrick.ros_moveit_runtime import (
     ARM_COMPLETION_TOLERANCE_RAD,
+    GRIPPER_CONTACT_STALL_DRIFT_M,
+    GRIPPER_CONTACT_STALL_S,
     POSE_GOAL_TOLERANCE_FRACTION,
     SCENE_STATE_SCHEMA,
     SERVICE_CALL_TIMEOUT_S,
@@ -1607,6 +1609,74 @@ def test_send_gripper_waits_for_convergence_after_an_early_success():
     assert result.details["gripper_settled"] is True
     assert result.details["measured_opening_m"] == pytest.approx(0.004)
     assert result.details["commanded_opening_m"] == pytest.approx(0.004)
+
+
+def test_settled_gripper_carries_a_served_stall_window_but_needs_fresh_state():
+    """An in-loop stall anchor shortens the post-result settle honestly.
+
+    The carry is accepted only when one fresh POST-result state stays within
+    the stall drift of the carried reference; without any fresh state the
+    carry alone never settles.
+    """
+    world = make_world()
+    prime_ready(world)
+    anchor = (0.01, -0.01)
+    held = {
+        **BASELINE,
+        "gripper_joint1": anchor[0] + 0.0004,
+        "gripper_joint2": anchor[1] - 0.0004,
+    }
+
+    def publish_held():
+        world.events.append(publish_held)
+        publish(world.node, TOPIC_ISAAC_JOINT_STATES, FakeJointStateMsg(held))
+
+    world.events.append(publish_held)
+    before = world.clock.now
+    result_states = world.runtime._isaac_state_count
+    final, settled = world.runtime._await_settled_gripper(
+        result_states,
+        deadline=world.clock.now + 5.0,
+        anchored=(anchor, world.clock.now - GRIPPER_CONTACT_STALL_S - 0.5),
+    )
+    assert settled is True
+    assert final == held
+    assert world.clock.now - before < 0.5  # one fresh sample, no full re-wait
+
+
+def test_settled_gripper_reanchors_a_moved_carry():
+    """Post-result finger movement beyond the drift bound restarts the window."""
+    world = make_world()
+    prime_ready(world)
+    anchor = (0.01, -0.01)
+    moved = {**BASELINE, "gripper_joint1": 0.0135, "gripper_joint2": -0.0135}
+
+    def publish_moved():
+        world.events.append(publish_moved)
+        publish(world.node, TOPIC_ISAAC_JOINT_STATES, FakeJointStateMsg(moved))
+
+    world.events.append(publish_moved)
+    before = world.clock.now
+    final, settled = world.runtime._await_settled_gripper(
+        world.runtime._isaac_state_count,
+        deadline=world.clock.now + GRIPPER_CONTACT_STALL_S + 1.0,
+        anchored=(anchor, world.clock.now - GRIPPER_CONTACT_STALL_S - 0.5),
+    )
+    assert settled is True
+    assert final == moved
+    assert world.clock.now - before >= GRIPPER_CONTACT_STALL_S
+
+
+def test_settled_gripper_never_accepts_a_carry_without_a_fresh_sample():
+    """A carried window alone, with no new state message, does not settle."""
+    world = make_world()
+    prime_ready(world)
+    final, settled = world.runtime._await_settled_gripper(
+        world.runtime._isaac_state_count,
+        deadline=world.clock.now + 0.3,
+        anchored=((0.01, -0.01), world.clock.now - GRIPPER_CONTACT_STALL_S - 5.0),
+    )
+    assert settled is False
 
 
 def test_send_gripper_rejects_inadmissible_targets_before_any_send():

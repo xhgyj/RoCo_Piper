@@ -699,6 +699,7 @@ def config_kwargs(tmp_path: Path) -> dict:
         "readiness_timeout_s": 10.0,
         "operation_timeout_s": 10.0,
         "host_hold_budget_s": 30.0,
+        "persistent_ros_client": False,
         "shutdown_timeout_s": 200.0,
     }
 

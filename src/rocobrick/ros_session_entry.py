@@ -44,6 +44,7 @@ import json
 import math
 import signal
 import threading
+import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -356,14 +357,14 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--request",
-        required=True,
+        required=False,
         type=Path,
         metavar="PATH",
         help="RuntimeOperation request JSON (mounted session directory)",
     )
     parser.add_argument(
         "--result",
-        required=True,
+        required=False,
         type=Path,
         metavar="PATH",
         help="RuntimeOperationResult destination JSON (always written)",
@@ -384,6 +385,8 @@ def build_parser() -> argparse.ArgumentParser:
             "node). Omit for the single-runtime operation mode."
         ),
     )
+    parser.add_argument("--serve-dir", type=Path)
+    parser.add_argument("--worker-token")
     return parser
 
 
@@ -536,6 +539,7 @@ def perform_operation(
     executor: object,
     fk_timeout_s: float = FK_TIMEOUT_S,
     robot_scoped: bool = False,
+    readiness_report: Mapping[str, object] | None = None,
 ) -> RuntimeOperationResult:
     """Execute one operation against an (already spinning) runtime.
 
@@ -580,26 +584,38 @@ def perform_operation(
             # that state; do not let that arm-state comparison prevent the
             # gripper action itself.  Arm/TCP operations retain the strict gate.
             require_broadcaster_match = operation.kind != "GRIPPER_TARGET"
-            waited_ok = bool(
-                runtime.wait_until_capability_ready(
-                    timeout_s=operation.timeout_s,
+            if readiness_report is not None:
+                if readiness_report.get("robot_id") != robot_id:
+                    raise ValueError("readiness report robot identity mismatch")
+                readiness_passed = readiness_report.get("passed") is True
+                evidence.update(
+                    robot_id=robot_id,
+                    waited_ok=readiness_passed,
+                    passed=readiness_passed,
+                    capability=dict(readiness_report),
+                    snapshot=dict(asdict(runtime.readiness_snapshot())),
+                )
+            else:
+                waited_ok = bool(
+                    runtime.wait_until_capability_ready(
+                        timeout_s=operation.timeout_s,
+                        require_broadcaster_match=require_broadcaster_match,
+                    )
+                )
+                capability = runtime.capability_readiness(
+                    probe_scene=True,
                     require_broadcaster_match=require_broadcaster_match,
                 )
-            )
-            capability = runtime.capability_readiness(
-                probe_scene=True,
-                require_broadcaster_match=require_broadcaster_match,
-            )
-            readiness_passed = bool(waited_ok and capability.passed)
-            evidence.update(
-                {
-                    "robot_id": robot_id,
-                    "waited_ok": waited_ok,
-                    "passed": readiness_passed,
-                    "capability": capability.serialize(),
-                    "snapshot": dict(asdict(runtime.readiness_snapshot())),
-                }
-            )
+                readiness_passed = bool(waited_ok and capability.passed)
+                evidence.update(
+                    {
+                        "robot_id": robot_id,
+                        "waited_ok": waited_ok,
+                        "passed": readiness_passed,
+                        "capability": capability.serialize(),
+                        "snapshot": dict(asdict(runtime.readiness_snapshot())),
+                    }
+                )
         else:
             waited_ok = bool(runtime.wait_until_ready(timeout_s=operation.timeout_s))
             snapshot = runtime.readiness_snapshot()
@@ -844,6 +860,9 @@ def perform_session(
     request: RosSessionRequest,
     *,
     fk_timeout_s: float = FK_TIMEOUT_S,
+    consolidated_readiness: bool = False,
+    admission_lock: threading.Lock | None = None,
+    cancelled: Callable[[], bool] | None = None,
 ) -> RosSessionResult:
     """Execute one robot-session request against an (already built) session.
 
@@ -903,9 +922,29 @@ def perform_session(
                     f"request robots {list(request.robots)}"
                 ),
             )
-        session.register()
-        waited_ok = bool(session.wait_until_ready(timeout_s=request.timeout_s))
-        reports = session.capability_readiness_by_robot(probe_scene=True)
+        if consolidated_readiness:
+            if admission_lock is not None:
+                admission_lock.acquire()
+            try:
+                session.register()
+                deadline = time.monotonic() + request.timeout_s
+                while True:
+                    reports = session.capability_readiness_by_robot(probe_scene=True)
+                    waited_ok = bool(reports) and all(
+                        report.passed is True for report in reports.values()
+                    )
+                    if waited_ok or time.monotonic() >= deadline:
+                        break
+                    if cancelled is not None and cancelled():
+                        break
+                    time.sleep(0.05)
+            finally:
+                if admission_lock is not None:
+                    admission_lock.release()
+        else:
+            session.register()
+            waited_ok = bool(session.wait_until_ready(timeout_s=request.timeout_s))
+            reports = session.capability_readiness_by_robot(probe_scene=True)
         readiness = {
             str(robot_id): dict(report.serialize())
             for robot_id, report in reports.items()
@@ -944,14 +983,28 @@ def perform_session(
                 )
             return answer(all_ready=False, passed=False, error=error)
         for item in request.operations:
+            if cancelled is not None and cancelled():
+                records.append(_operation_record(
+                    item,
+                    _refused_operation_result(
+                        item, "request cancelled before dispatch",
+                        evidence={"all_ready": all_ready},
+                    ),
+                    dispatched=False,
+                ))
+                break
             outcome = perform_operation(
                 item.operation,
                 runtime=session.runtime_for(item.robot_id),
                 executor=session.executor_for(item.robot_id),
                 fk_timeout_s=fk_timeout_s,
                 robot_scoped=True,
+                readiness_report=(readiness[item.robot_id]
+                                  if consolidated_readiness else None),
             )
             records.append(_operation_record(item, outcome, dispatched=True))
+            if consolidated_readiness and not outcome.passed:
+                break
         failed = [
             str(record["operation_id"])
             for record in records
@@ -1108,6 +1161,14 @@ def main(argv: list[str] | None = None) -> int:
             flush=True,
         )
         return 2
+    if args.serve_dir is not None:
+        if not args.worker_token or robots is None or args.request or args.result:
+            raise ValueError("serve mode requires token/robots and no one-shot paths")
+        from rocobrick.execution.ros_session_worker import serve
+
+        return serve(args.serve_dir, args.worker_token, robots, args.node_name)
+    if args.request is None or args.result is None:
+        raise ValueError("one-shot mode requires --request and --result")
     if robots is None:
         return _main_operation(args)
     return _main_session(args, robots)

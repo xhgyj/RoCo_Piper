@@ -54,7 +54,13 @@ planning attachment, lift and following-verification phases.
 - Gripper results require fresh measured feedback. A contact-limited canceled
   close is accepted only with safe terminal cancellation, settled finite
   feedback and an opening inside the expected window. Closing alone never
-  proves holding.
+  proves holding. The post-action settle carries the in-loop no-net-progress
+  anchor: stall time already served while the action ran is not re-waited,
+  but the carry is accepted only after one fresh post-result finger state
+  stays within the stall drift of the anchor, otherwise the full window
+  restarts. The arm's post-action at-rest dwell (8 live samples at 0.2 s
+  cadence) is unchanged: the arm converges at the action result, so that
+  window is the physical proof itself, not paperwork.
 - The planning attachment uses measured brick geometry in the TCP frame. It is
   a MoveIt collision representation, not an Isaac physical attachment.
 - Following verification compares pre-lift grasp evidence with advancing
@@ -76,6 +82,18 @@ are verified for the example1 supply geometry and remain configurable.
 All plan robots share one Isaac bridge, DDS participant and clock, with separate
 namespaced ROS action/state endpoints and per-robot TF topics. The configured
 host hold budget remains active through operation and observation phases.
+
+Since 2026-10-02 the production session keeps ONE persistent container ROS
+worker (`src/rocobrick/execution/ros_session_worker.py` +
+`ros_worker_transport.py`) instead of one `docker exec` child per phase. Every
+phase envelope keeps its own request id, fresh all-robot readiness admission
+(one report reused as gate evidence instead of re-probing), per-robot operation
+ownership, strictly validated atomic mailbox results and operation-targeted
+cancellation; replay, stale results and worker death fail closed, and session
+cleanup additionally requires the worker's own orderly-shutdown attestation
+(`cleanup["ros_worker"]`). One-shot child mode remains available for tests via
+`persistent_ros_client: false`. This removed roughly 3 s of per-phase process
+restart overhead without touching the settling/verification evidence itself.
 
 Kit can handle SIGINT outside the bridge coroutine. To prevent that exit from
 skipping final evidence, the bridge handler records only stop intent. The

@@ -2242,7 +2242,10 @@ class RosMoveItRuntime:
         return goal
 
     def _await_settled_gripper(
-        self, result_states: int, deadline: float
+        self,
+        result_states: int,
+        deadline: float,
+        anchored: tuple[tuple[float, float], float] | None = None,
     ) -> tuple[dict[str, float] | None, bool]:
         """Wait until the fingers stop making net progress after the action.
 
@@ -2254,9 +2257,22 @@ class RosMoveItRuntime:
         GRIPPER_CONTACT_STALL_DRIFT_M from a reference for
         GRIPPER_CONTACT_STALL_S — the same no-net-progress criterion the
         in-loop contact monitor uses — or the bounded wait expires.
+
+        ``anchored`` carries the in-loop monitor's ``(reference, entered_at)``
+        pair so the no-net-progress window already served while the action
+        was running is not restarted from scratch.  The carry is accepted
+        only after one fresh POST-result state message stays within the
+        stall drift of that reference; any larger movement re-anchors from
+        that fresh sample and waits the full window again.
+
+        Returns:
+            ``(final_state, settled)``; settled is True only when the fresh
+            post-result fingers held the no-net-progress window.
         """
         reference: tuple[float, float] | None = None
         reference_at: float | None = None
+        if anchored is not None:
+            reference, reference_at = anchored
         settle_deadline = min(
             float(deadline), self._clock_fn() + GRIPPER_CONVERGENCE_TIMEOUT_S
         )
@@ -2442,7 +2458,15 @@ class RosMoveItRuntime:
             wrapper.status, factories.goal_status_type()
         )
         result_states = self._isaac_state_count
-        final, gripper_settled = self._await_settled_gripper(result_states, deadline)
+        final, gripper_settled = self._await_settled_gripper(
+            result_states,
+            deadline,
+            anchored=(
+                (stall_reference, stall_entered_at)
+                if stall_reference is not None and stall_entered_at is not None
+                else None
+            ),
+        )
         details["post_result_state_messages"] = self._isaac_state_count - result_states
         details["gripper_settled"] = gripper_settled
         common = {
