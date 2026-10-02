@@ -52,6 +52,8 @@ from rocobrick.moveit_execution import (
 from rocobrick.moveit_requests import build_joint_target, build_link6_pose_target
 from rocobrick.ros_moveit_executor import RosMoveItExecutor
 from rocobrick.ros_moveit_runtime import (
+    ARM_COMPLETION_TOLERANCE_RAD,
+    POSE_GOAL_TOLERANCE_FRACTION,
     SCENE_STATE_SCHEMA,
     SERVICE_CALL_TIMEOUT_S,
     SERVICE_SCENE_STATE,
@@ -1112,7 +1114,9 @@ def test_send_link6_pose_builds_the_exact_pose_goal(pose_target):
     assert position.link_name == pose_target.tip_link
     sphere = position.constraint_region.primitives[0]
     assert sphere.type == FakeSolidPrimitive.SPHERE
-    assert sphere.dimensions == [pose_target.position_tolerance_m]
+    assert sphere.dimensions == [
+        pose_target.position_tolerance_m * POSE_GOAL_TOLERANCE_FRACTION
+    ]
     center = position.constraint_region.primitive_poses[0]
     assert (
         center.position.x,
@@ -1135,9 +1139,9 @@ def test_send_link6_pose_builds_the_exact_pose_goal(pose_target):
         orientation.absolute_y_axis_tolerance,
         orientation.absolute_z_axis_tolerance,
     ) == (
-        pose_target.orientation_tolerance_rad,
-        pose_target.orientation_tolerance_rad,
-        pose_target.orientation_tolerance_rad,
+        pose_target.orientation_tolerance_rad * POSE_GOAL_TOLERANCE_FRACTION,
+        pose_target.orientation_tolerance_rad * POSE_GOAL_TOLERANCE_FRACTION,
+        pose_target.orientation_tolerance_rad * POSE_GOAL_TOLERANCE_FRACTION,
     )
 
 
@@ -1177,6 +1181,120 @@ def test_send_link6_pose_fails_when_fk_disagrees(pose_target):
     assert is_success(result) is False
     assert result.final_errors["position_error_m"] == pytest.approx(0.05)
     assert result.final_errors["orientation_error_rad"] == pytest.approx(0.0, abs=1e-12)
+
+
+def test_send_link6_pose_verifies_against_the_targets_own_tolerance(pose_target):
+    """The final FK gate honours the target's tolerances, not the global max."""
+    # 7.5 mm of residual position error is inside the historical global gate
+    # (MAX_POSITION_TOLERANCE_M == 0.01) but outside the target's own
+    # position_tolerance_m == 0.005: the runtime must honour the target.
+    def fk_verifier(state):
+        shifted = (pose_target.position[0] + 0.0075,) + tuple(pose_target.position[1:])
+        return (shifted, tuple(pose_target.orientation_xyzw))
+
+    world = make_world(fk_verifier=fk_verifier)
+    prime_ready(world)
+    script_success(
+        world, action_result=trajectory_action_result(), final_state=BASELINE
+    )
+    result = world.runtime.send_link6_pose(pose_target, 20.0)
+    assert result.status is ExecutionStatus.FAILED
+    assert is_success(result) is False
+    assert result.final_errors["position_error_m"] == pytest.approx(0.0075)
+    assert result.details["position_tolerance_m"] == pytest.approx(
+        pose_target.position_tolerance_m
+    )
+    assert result.details["orientation_tolerance_rad"] == pytest.approx(
+        pose_target.orientation_tolerance_rad
+    )
+
+
+def test_send_tcp_pose_recommands_the_plan_when_the_arm_froze_short():
+    """A frozen-but-SUCCEEDED plan is completed directly, then re-verified.
+
+    Live evidence (headed approach run, 2026-10-01): MoveGroup reported
+    SUCCEEDED while the simulated arm sat 67 mm short of the goal, frozen
+    because the container-side pipeline stopped streaming setpoints at
+    trajectory end.  The runtime must re-send the planned final joints over
+    its own arm action and re-run the same FK gate; success still requires
+    the live state to converge.
+    """
+    from rocobrick.moveit_requests import build_tcp_pose_target
+    from rocobrick.tcp_contract import EXPECTED_RUNTIME_MODEL_SHA256
+
+    # Mirrors the accepted calibration artifact SHA pinned in test_r5_tcp_moveit.
+    accepted_source_sha256 = (
+        "4e342f2cdf6d34970d741a091a46e671aee2e6da67be4189136260068b19645d"
+    )
+    goal_pose = ((0.2, -0.1, 0.35), (0.0, 0.0, 0.0, 1.0))
+    target, decision = build_tcp_pose_target(
+        frame_id="base_link",
+        position=goal_pose[0],
+        orientation_xyzw=goal_pose[1],
+        runtime_model_sha256=EXPECTED_RUNTIME_MODEL_SHA256,
+        source_sha256=accepted_source_sha256,
+    )
+    assert decision.accepted is True and target is not None
+
+    # The frozen joint2 leaves the TCP 40 mm short on x until the completion
+    # goal pulls the joints to the plan; the FK hook then reports the goal.
+    frozen_fk = ((0.16, -0.1, 0.35), (0.0, 0.0, 0.0, 1.0))
+
+    def tcp_fk(state):
+        frozen = state.get("joint2", 0.0) < 1.5
+        return frozen_fk if frozen else goal_pose
+
+    world = make_world(fk_verifier=tcp_fk)
+    world.runtime._tcp_fk_verifier = tcp_fk
+    prime_ready(world)
+    frozen = {**BASELINE, "joint2": 1.2}
+    handle = script_success(
+        world, action_result=trajectory_action_result(), final_state=frozen
+    )
+
+    def complete_on_arm_goal():
+        if world.arm.goals:
+            reached = {**BASELINE, "joint2": 2.0}
+            publish(
+                world.node,
+                TOPIC_ISAAC_JOINT_STATES,
+                FakeJointStateMsg(reached, velocity=[0.0] * len(JOINT_NAMES)),
+            )
+            handle = FakeGoalHandle()
+            handle.result_future.set(
+                SimpleNamespace(
+                    status=FAKE_GOAL_STATUS.STATUS_SUCCEEDED,
+                    result=SimpleNamespace(),
+                )
+            )
+            if world.arm.pending is not None:
+                world.arm.pending.set(handle)
+            else:
+                world.events.append(complete_on_arm_goal)
+        else:
+            world.events.append(complete_on_arm_goal)
+
+    world.events.append(complete_on_arm_goal)
+    result = world.runtime.send_tcp_pose(target, 30.0)
+    assert handle.cancel_calls == 0
+    assert result.status is ExecutionStatus.SUCCEEDED
+    assert is_success(result) is True
+    assert len(world.arm.goals) == 1
+    completion = world.arm.goals[0]
+    assert completion.trajectory.joint_names == list(ARM_JOINT_NAMES)
+    points = completion.trajectory.points
+    assert len(points) == 2
+    planned = result.details["planned_final_joint_positions_rad"]
+    by_canonical = dict(zip(ARM_JOINT_NAMES, points[1].positions))
+    for name in ARM_JOINT_NAMES:
+        assert by_canonical[name] == pytest.approx(planned[name])
+    assert [(t.name, t.position) for t in completion.goal_tolerance] == [
+        (name, ARM_COMPLETION_TOLERANCE_RAD) for name in ARM_JOINT_NAMES
+    ]
+    completion_ev = result.details["arm_completion"]
+    assert completion_ev["attempted"] is True
+    assert completion_ev["action_status"] == "SUCCEEDED"
+    assert result.details["arm_completion_settled"] is True
 
 
 @pytest.mark.parametrize("hook", [None, lambda _state: None])
@@ -1369,6 +1487,126 @@ def test_send_gripper_times_out_cancels_and_never_succeeds():
     assert result.details["phase"] == "execution"
     assert handle.cancel_calls == 1
     assert result.details["cancel"]["attempted"] is True
+
+
+def test_send_gripper_cancels_a_pressing_stall_as_contact_limited():
+    """A sustained in-window press with no net progress cancels safely.
+
+    Live evidence (pick-direct-pregrasp-headed-20261001T033315Z): pressing
+    the brick holds the controller goal active forever, so the runtime's own
+    stall detector must cancel it.  Chatter-free stillness is NOT required —
+    only net drift from the entering reference inside the stall window.
+    """
+    world = make_world()
+    prime_ready(world)
+    handle = FakeGoalHandle()
+    world.events.append(lambda: world.gripper.pending.set(handle))
+    press = {**BASELINE, "gripper_joint1": 0.00395, "gripper_joint2": -0.00395}
+
+    def publish_press():
+        world.events.append(publish_press)
+        publish(world.node, TOPIC_ISAAC_JOINT_STATES, FakeJointStateMsg(press))
+
+    def settle_after_cancel():
+        if handle.cancel_calls:
+            handle.result_future.set(
+                SimpleNamespace(
+                    status=FAKE_GOAL_STATUS.STATUS_CANCELED, result=SimpleNamespace()
+                )
+            )
+        else:
+            world.events.append(settle_after_cancel)
+
+    world.events.append(publish_press)
+    world.events.append(settle_after_cancel)
+    target = gripper_target(
+        opening_m=0.002, expected_opening_m=(0.005, 0.012)
+    )
+    result = world.runtime.send_gripper(target, 20.0)
+    assert result.status is ExecutionStatus.SUCCEEDED
+    assert is_success(result) is True
+    assert result.action_status == "CANCELED"
+    assert handle.cancel_calls == 1
+    assert result.details["contact_limited"] is True
+    assert result.details["contact_opening_m"] == pytest.approx(0.0079)
+    assert result.details["measured_opening_m"] == pytest.approx(0.0079)
+    assert len(result.details["opening_trace"]) >= 2
+    assert result.details["post_result_state_messages"] >= 1
+
+
+def test_send_gripper_never_cancels_while_the_fingers_still_progress():
+    """Net progress through the window keeps re-anchoring the stall reference."""
+    world = make_world()
+    prime_ready(world)
+    handle = FakeGoalHandle()
+    world.events.append(lambda: world.gripper.pending.set(handle))
+    state = {"finger": 0.02}
+
+    def publish_closing():
+        world.events.append(publish_closing)
+        state["finger"] = max(0.004, state["finger"] - 0.002)
+        fingers = {**BASELINE, "gripper_joint1": state["finger"],
+                   "gripper_joint2": -state["finger"]}
+        publish(world.node, TOPIC_ISAAC_JOINT_STATES, FakeJointStateMsg(fingers))
+        if state["finger"] <= 0.006:
+            handle.result_future.set(
+                SimpleNamespace(
+                    status=FAKE_GOAL_STATUS.STATUS_SUCCEEDED,
+                    result=SimpleNamespace(),
+                )
+            )
+
+    world.events.append(publish_closing)
+    target = gripper_target(
+        opening_m=0.004, expected_opening_m=(0.005, 0.02)
+    )
+    result = world.runtime.send_gripper(target, 20.0)
+    assert handle.cancel_calls == 0
+    assert result.status is ExecutionStatus.SUCCEEDED
+    assert result.action_status == "SUCCEEDED"
+    assert result.details.get("contact_limited") is None
+
+
+def test_send_gripper_waits_for_convergence_after_an_early_success():
+    """The verdict outlives the controller's loose mid-travel SUCCEEDED.
+
+    Live evidence (headed close run, 2026-10-01): the controller reported
+    SUCCEEDED with the fingers still 18 mm from the command and creeping at
+    2.6 mm/s.  The runtime must keep waiting while the fingers make net
+    progress and only measure once they have converged on the held setpoint.
+    """
+    world = make_world()
+    prime_ready(world)
+    handle = FakeGoalHandle()
+    world.events.append(lambda: world.gripper.pending.set(handle))
+    state = {"finger": 0.0112}
+
+    def publish_creeping_close():
+        world.events.append(publish_creeping_close)
+        # The action result arrives while the fingers are still mid-travel;
+        # the held setpoint keeps pulling them closed afterwards.
+        if state["finger"] > 0.002:
+            state["finger"] = max(0.002, state["finger"] - 0.0015)
+        fingers = {**BASELINE, "gripper_joint1": state["finger"],
+                   "gripper_joint2": -state["finger"]}
+        publish(world.node, TOPIC_ISAAC_JOINT_STATES, FakeJointStateMsg(fingers))
+        handle.result_future.set(
+            SimpleNamespace(
+                status=FAKE_GOAL_STATUS.STATUS_SUCCEEDED, result=SimpleNamespace()
+            )
+        )
+
+    world.events.append(publish_creeping_close)
+    target = gripper_target(
+        opening_m=0.004, expected_opening_m=(0.002, 0.010)
+    )
+    result = world.runtime.send_gripper(target, 30.0)
+    assert handle.cancel_calls == 0
+    assert result.status is ExecutionStatus.SUCCEEDED
+    assert is_success(result) is True
+    assert result.details["gripper_settled"] is True
+    assert result.details["measured_opening_m"] == pytest.approx(0.004)
+    assert result.details["commanded_opening_m"] == pytest.approx(0.004)
 
 
 def test_send_gripper_rejects_inadmissible_targets_before_any_send():

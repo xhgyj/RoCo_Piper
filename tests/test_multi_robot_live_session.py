@@ -896,10 +896,11 @@ def test_start_proves_every_robot_ready_in_one_host_and_one_container(tmp_path):
     assert argv[argv.index("--plan") + 1] == str(session.config.plan_path)
     assert argv[argv.index("--config") + 1] == str(session.config.config_path)
     assert argv[argv.index("--host-instance-id") + 1] == "host-session-test"
-    # Bounds: the short natural-exit hold is 45 s.
-    assert argv[argv.index("--hold-seconds") + 1] == "45.0"
-    assert argv[argv.index("--hold-steps") + 1] == str(round(45.0 * 458.0))
-    assert argv[argv.index("--time-limit") + 1] == str(6.0 + 45.0 + 120.0)
+    # Bounds: the hold is the configured operation budget (30 s here), long
+    # enough for full robot operations instead of the old readiness-only 45 s.
+    assert argv[argv.index("--hold-seconds") + 1] == "30.0"
+    assert argv[argv.index("--hold-steps") + 1] == str(round(30.0 * 458.0))
+    assert argv[argv.index("--time-limit") + 1] == str(6.0 + 30.0 + 120.0)
     assert env["ROS_DOMAIN_ID"] == "73"
     assert env["FASTRTPS_DEFAULT_PROFILES_FILE"].endswith("dds/fastdds-host.xml")
     assert log_path == tmp_path / "session" / "host-bridge.log"

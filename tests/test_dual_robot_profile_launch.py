@@ -107,11 +107,13 @@ def _synthetic_model(tcp_xyz: str) -> str:
         '<link name="gripper_link1"/>'
         '<joint name="gripper_joint1" type="prismatic"><parent link="gripper_base"/>'
         '<child link="gripper_link1"/><axis xyz="0 0 1"/>'
+        '<origin xyz="0 0 0.138" rpy="1.5707963 0 0"/>'
         '<limit lower="0" upper="0.05" effort="10" velocity="3"/>'
         '<mimic joint="gripper" multiplier="0.5" offset="0.0"/></joint>'
         '<link name="gripper_link2"/>'
         '<joint name="gripper_joint2" type="prismatic"><parent link="gripper_base"/>'
         '<child link="gripper_link2"/><axis xyz="0 0 -1"/>'
+        '<origin xyz="0 0 0.138" rpy="1.5707963 0 -3.1415926"/>'
         '<limit lower="-0.05" upper="0" effort="10" velocity="3"/>'
         '<mimic joint="gripper" multiplier="-0.5" offset="0.0"/></joint>'
         '<ros2_control name="PiperLIsaacTopicBasedSystem" type="system"><hardware>'
@@ -165,6 +167,26 @@ def _assert_generated_pair(helper, configs) -> None:
             if joint.get("name") == prefix + helper.TCP_JOINT
         )
         assert tcp_joint.get("type") == "fixed"
+        # Planning origins match the original runtime mounting without
+        # reversing either finger.
+        gripper_origins = {
+            joint.get("name"): (
+                joint.find("origin").get("xyz"),
+                joint.find("origin").get("rpy"),
+            )
+            for joint in root.findall("joint")
+            if joint.get("name")
+            in {
+                prefix + "gripper_base_joint",
+                prefix + "gripper_joint1",
+                prefix + "gripper_joint2",
+            }
+        }
+        assert gripper_origins == {
+            prefix + "gripper_base_joint": ("0 0 0", "0 0 0"),
+            prefix + "gripper_joint1": ("0 0 0.1358", "1.5707963 0 0"),
+            prefix + "gripper_joint2": ("0 0 0.1358", "1.5707963 0 -3.1415926"),
+        }
         assert tcp_joint.find("parent").get("link") == prefix + helper.LINK6
         assert tcp_joint.find("child").get("link") == prefix + helper.TCP_LINK
         tcp_links = [
@@ -429,7 +451,7 @@ def test_helper_has_no_ros_or_rocobrick_imports(helper) -> None:
 
 def test_synthetic_generation_produces_disjoint_models(helper, tmp_path) -> None:
     expanded = _synthetic_model(
-        "-2.189439796129733e-09 -1.8041124150158794e-16 0.06300922673030293"
+        "-1.887447531601083e-09 -1.3530843112619095e-16 0.1305895866844472"
     )
     configs = _generate(helper, tmp_path / "configs", expanded)
     _assert_generated_pair(helper, configs)
@@ -545,6 +567,11 @@ def test_dual_launch_declares_ids_namespace_and_the_named_stack() -> None:
     assert "generate_dual_robot_configs" in text
     assert "dual_robot_config.py" in text
     assert "/clock" in text
+    assert "tf_remappings" in text
+    assert '("/tf", f"{namespace}/tf")' in text
+    assert '("/tf_static", f"{namespace}/tf_static")' in text
+    assert "remappings=tf_remappings" in text
+    assert text.count("remappings=tf_remappings") == 2
     # The robot ids must only come from the launch argument, never hardcoded
     # to a stack that would shadow piper_1 with canonical piper_0 endpoints.
     assert "/piper_0/" not in text

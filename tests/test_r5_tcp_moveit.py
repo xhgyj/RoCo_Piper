@@ -56,6 +56,7 @@ from rocobrick.moveit_execution import (
     MoveItExecutor,
     is_success,
 )
+from rocobrick.ros_moveit_runtime import POSE_GOAL_TOLERANCE_FRACTION
 from rocobrick.moveit_requests import build_link6_pose_target, build_tcp_pose_target
 from rocobrick.planning_scene import (
     SCHEMA,
@@ -120,7 +121,7 @@ XACRO_NAMESPACE = "http://www.ros.org/wiki/xacro"
 # A metadata pair mirroring the accepted artifact exactly (cross-checked
 # against the artifact bytes in test_artifact_scope_below).
 ACCEPTED_SOURCE_SHA256 = (
-    "4e342f2cdf6d34970d741a091a46e671aee2e6da67be4189136260068b19645d"
+    "3ba48537ed4f453c7e2507e042056128515e8a064adbab7a4c871b3ed2bc94cb"
 )
 OTHER_SHA256 = "b" * 64
 
@@ -141,7 +142,7 @@ def _accepted_transform() -> Transform:
     return Transform(
         parent_frame="link6",
         child_frame="rocobrick_tcp",
-        translation_m=(-2.189439796129733e-09, -1.8041124150158794e-16, 0.06300922673030293),
+        translation_m=(-1.887447531601083e-09, -1.3530843112619095e-16, 0.1305895866844472),
         rotation_xyzw=(0.0, 0.0, 0.0, 1.0),
         source="artifacts/model-audit/piper_l_tcp_calibration.json",
         sha256=ACCEPTED_SOURCE_SHA256,
@@ -508,7 +509,7 @@ def test_build_tcp_pose_target_accepts_artifact_derived_provenance() -> None:
         assert target.source_sha256 == ACCEPTED_SOURCE_SHA256
         # No target offset arithmetic anywhere: the request position is the
         # goal, the 63 mm calibration lives only in the model.
-        assert target.position[2] != pytest.approx(0.35 + 0.06300922673030293)
+        assert target.position[2] != pytest.approx(0.35 + 0.1305895866844472)
 
 
 @pytest.mark.parametrize(
@@ -544,7 +545,7 @@ def test_build_tcp_pose_target_requires_resolved_calibration() -> None:
         Transform(
             parent_frame="link6",
             child_frame="tool0",
-            translation_m=(0.0, 0.0, 0.063),
+            translation_m=(0.0, 0.0, 0.1305896),
             rotation_xyzw=(0.0, 0.0, 0.0, 1.0),
             source="elsewhere",
             sha256=ACCEPTED_SOURCE_SHA256,
@@ -1013,7 +1014,9 @@ def test_send_tcp_pose_builds_the_exact_arm_tcp_goal() -> None:
     assert position.link_name == "rocobrick_tcp"
     sphere = position.constraint_region.primitives[0]
     assert sphere.type == FakeSolidPrimitive.SPHERE
-    assert sphere.dimensions == [target.position_tolerance_m]
+    assert sphere.dimensions == [
+        target.position_tolerance_m * POSE_GOAL_TOLERANCE_FRACTION
+    ]
     center = position.constraint_region.primitive_poses[0]
     assert (center.position.x, center.position.y, center.position.z) == (0.2, -0.1, 0.35)
     assert center.orientation.w == 1.0
@@ -1026,7 +1029,9 @@ def test_send_tcp_pose_builds_the_exact_arm_tcp_goal() -> None:
         orientation.orientation.z,
         orientation.orientation.w,
     ) == (0.0, 0.0, 0.0, 1.0)
-    assert orientation.absolute_x_axis_tolerance == target.orientation_tolerance_rad
+    assert orientation.absolute_x_axis_tolerance == (
+        target.orientation_tolerance_rad * POSE_GOAL_TOLERANCE_FRACTION
+    )
 
 
 def test_send_tcp_pose_rejects_inadmissible_targets_before_any_send() -> None:

@@ -74,6 +74,28 @@ from rocobrick.stap_contract import parse_stap_plan
 
 SESSION_SCHEMA = "rocobrick-runtime-session/v1"
 
+
+def _with_headed_display(env: Mapping[str, str]) -> dict[str, str]:
+    """Bind headed runs to the active local X11 session when SSH omits it."""
+    result = dict(env)
+    if result.get("ROCOBRICK_HEADED") != "1" or result.get("DISPLAY"):
+        return result
+    sockets = sorted(Path("/tmp/.X11-unix").glob("X*"))
+    if not sockets:
+        return result
+    socket = sockets[-1]
+    result["DISPLAY"] = f":{socket.name[1:]}"
+    if not result.get("XAUTHORITY"):
+        candidates = (
+            Path(f"/run/user/{os.getuid()}/gdm/Xauthority"),
+            Path(f"/run/user/{os.getuid()}/Xauthority"),
+        )
+        for candidate in candidates:
+            if candidate.is_file():
+                result["XAUTHORITY"] = str(candidate)
+                break
+    return result
+
 # Pinned proven-stack locations, relative to the repository root.
 P1A_ARTIFACT_RELPATH = Path("artifacts/phase1/dds-multiprocess-gate.json")
 P1A_SCHEMA = "rocobrick-p1-dds-multiprocess-gate/v1"
@@ -518,7 +540,9 @@ class IsaacMoveItSession:
         self._clock = clock if clock is not None else time.monotonic
         self._sleep = sleep if sleep is not None else time.sleep
         self._base_env: dict[str, str] = (
-            dict(base_env) if base_env is not None else dict(os.environ)
+            _with_headed_display(
+                dict(base_env) if base_env is not None else dict(os.environ)
+            )
         )
         self.status = RuntimeSessionStatus.NOT_STARTED
         self.errors: list[str] = []
@@ -1997,7 +2021,9 @@ class MultiRobotIsaacMoveItSession:
         self._clock = clock if clock is not None else time.monotonic
         self._sleep = sleep if sleep is not None else time.sleep
         self._base_env: dict[str, str] = (
-            dict(base_env) if base_env is not None else dict(os.environ)
+            _with_headed_display(
+                dict(base_env) if base_env is not None else dict(os.environ)
+            )
         )
         self._lock = threading.Lock()
         self.status = RuntimeSessionStatus.NOT_STARTED
@@ -2326,11 +2352,15 @@ class MultiRobotIsaacMoveItSession:
         (``shutdown_timeout_s``), because the bridge writes its evidence only
         when its hold completes and Kit intercepts an external SIGINT at the C
         level - so the bridge must be left enough time to self-exit orderly.
+
+        The budget is ``host_hold_budget_s`` (default 300 s): the session now
+        executes full robot operations (approach/close/lift plus the follow
+        observation windows), not just readiness checks - a 45 s hold stopped
+        the clock mid-operation and failed every later readiness gate
+        (``clock_increasing``).  The bound still ends inside
+        ``shutdown_timeout_s`` (900 s) with the teardown grace.
         """
-        # Keep the host alive for a short, deterministic post-readiness window.
-        # This stage performs only readiness and read-only observation; the bridge
-        # must normally self-exit before session cleanup begins.
-        return 45.0
+        return float(self.config.host_hold_budget_s)
 
     def _host_hold_steps(self) -> int:
         """Step bound matching the hold seconds at the measured step rate.

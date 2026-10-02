@@ -1179,3 +1179,36 @@ def test_child_interrupt_path_records_counters_before_final_write(
     assert "bridge = state.bridge" in body[finally_start:first_write]
     assert 'evidence["hold_completed"]' not in body
 
+
+
+def test_sigint_is_deferred_to_coroutine_cleanup(bridge_module, tmp_path) -> None:
+    """The signal handler records intent without writing or stopping Kit."""
+    state = bridge_module.BridgeState()
+    state.evidence = _early_stop_evidence()
+    state.evidence.pop("stopped")
+    state.evidence_path = tmp_path / "evidence.json"
+    state.request_stop(bridge_module.signal.SIGTERM, None)
+    state.check_stop()
+    state.request_stop(bridge_module.signal.SIGINT, None)
+    assert state.stop_signal == bridge_module.signal.SIGINT
+    assert not state.evidence_path.exists()
+    assert "stopped" not in state.evidence
+    with pytest.raises(KeyboardInterrupt):
+        state.check_stop()
+    state.evidence["stopped"] = bridge_module.EARLY_STOP_STOPPED
+    state._flush(dict(EARLY_STOP_CLEANUP))
+    final = json.loads(state.evidence_path.read_text())
+    assert final["early_stop_accepted"] is True
+    assert final["passed"] is False
+
+
+def test_bridge_loops_check_stop_and_preserve_early_evidence_binding(
+    bridge_source: str,
+) -> None:
+    """Each physics loop checks intent before stepping; state owns live evidence."""
+    assert bridge_source.count("        state.check_stop()") == 2
+    assert "signal.signal(signal.SIGINT, state.request_stop)" in bridge_source
+    main_body = bridge_source[bridge_source.index("def main("):]
+    assert main_body.index("state.evidence = evidence") < main_body.index(
+        "if not _running_inside_kit():"
+    )

@@ -300,7 +300,7 @@ def build_tcp_pose_target(
     gates mirror :func:`build_link6_pose_target`: exact ``base_link`` frame,
     three finite position values, a normalized quaternion and tolerances in
     ``(0, maxima]``. The position is copied verbatim — no tool offset
-    arithmetic is applied here or anywhere downstream: the 63 mm link6 to TCP
+    arithmetic is applied here or anywhere downstream: the calibrated link6 to TCP
     translation lives only in the generated model overlay joint.
 
     Returns:

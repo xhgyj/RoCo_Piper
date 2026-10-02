@@ -8,7 +8,12 @@ from pathlib import Path
 
 from rocobrick.bricksim_topology import BrickSimTopologyBundle
 from rocobrick.models import Pose
-from rocobrick.scene_bootstrap import LoadedPart, LoadedRobot, RobotSpawnSpec, SceneBootstrapError
+from rocobrick.scene_bootstrap import (
+    LoadedPart,
+    LoadedRobot,
+    RobotSpawnSpec,
+    SceneBootstrapError,
+)
 from rocobrick.stap_contract import StapPlan
 
 
@@ -43,10 +48,20 @@ def _apply_collision_filters(
     part_paths: Mapping[str, str],
     instance_ids: tuple[str, ...],
 ) -> tuple[tuple[str, str], ...]:
-    """Filter only authorized target-brick/gripper collisions."""
+    """Authorize and record the pick-target/gripper contact pairs.
+
+    No ``UsdPhysics.FilteredPairsAPI`` is applied: a PhysX filter between
+    the gripper and the pick target DISABLES their contact, which makes
+    every physical grasp of the target impossible (live-evidenced: the pads
+    closed to the commanded opening with the brick untouched and the
+    follow gate failed with "object did not lift").  Isaac must keep real
+    collisions everywhere; unwanted contacts stop the motion and fail the
+    operation closed.  This only validates that every authorized pick
+    target (and the gripper links that may touch it) is actually loaded,
+    and returns the authorized pairs for the session evidence.
+    """
     if not instance_ids:
         return ()
-    from pxr import Sdf, UsdPhysics
 
     contact_links = ("gripper_base", "gripper_link1", "gripper_link2")
     pairs: list[tuple[str, str]] = []
@@ -68,14 +83,43 @@ def _apply_collision_filters(
                 raise SceneBootstrapError(
                     f"collision filter gripper link prim is invalid: {link_path}"
                 )
-            UsdPhysics.FilteredPairsAPI.Apply(gripper).CreateFilteredPairsRel().AddTarget(
-                Sdf.Path(part_path)
-            )
-            UsdPhysics.FilteredPairsAPI.Apply(part).CreateFilteredPairsRel().AddTarget(
-                Sdf.Path(link_path)
-            )
             pairs.append((link_path, part_path))
     return tuple(pairs)
+
+
+def _set_initial_viewport_camera(stage: object) -> None:
+    """Set a deterministic headed viewport covering both robots and parts."""
+    import os
+
+    if os.environ.get("ROCOBRICK_HEADED") != "1":
+        return
+    from omni.kit.viewport.utility import get_active_viewport
+    from omni.kit.viewport.utility.camera_state import ViewportCameraState
+    from pxr import Gf, Sdf, UsdGeom
+
+    camera_path = "/World/RoCoBrickInitialCamera"
+    camera = UsdGeom.Camera.Define(stage, camera_path)
+    camera.CreateFocalLengthAttr(50.0)
+    camera.CreateFocusDistanceAttr(1.2)
+    # A newly defined USD camera has no Kit center-of-interest value.  The
+    # Isaac viewport camera-state helper assumes this attribute exists when it
+    # rotates/moves the camera; seed it before using that helper.
+    center_of_interest = camera.GetPrim().CreateAttribute(
+        "omni:kit:centerOfInterest", Sdf.ValueTypeNames.Vector3d
+    )
+    center_of_interest.Set(Gf.Vec3d(0.0, 0.0, -1.0))
+    viewport = get_active_viewport()
+    if viewport is None:
+        raise RuntimeError("headed Isaac run has no active viewport")
+    viewport.camera_path = camera_path
+    camera_state = ViewportCameraState(camera_path=camera_path, viewport=viewport)
+    camera_state.set_position_world(Gf.Vec3d(0.0, 0.70, 0.32), True)
+    camera_state.set_target_world(Gf.Vec3d(0.0, -0.18, 0.075), True)
+    print(
+        "[rocobrick] initial viewport camera configured "
+        f"path={camera_path} position=(0.0,0.70,0.32) target=(0.0,-0.18,0.075)",
+        flush=True,
+    )
 
 
 def _xyzw(wxyz: object) -> tuple[float, float, float, float]:
@@ -104,10 +148,18 @@ async def load_verified_scene(
     import numpy as np
     import omni.kit.app
     from bricksim.assets import DEFAULT_STAGE_PATH
-    from bricksim.core import are_parts_connected, arrange_parts_in_workspace, import_lego
+    from bricksim.core import (
+        are_parts_connected,
+        arrange_parts_in_workspace,
+        import_lego,
+    )
     from isaacsim.core.api.world import World
     from isaacsim.core.prims import SingleArticulation, SingleXFormPrim
-    from isaacsim.core.utils.stage import add_reference_to_stage, get_current_stage, open_stage_async
+    from isaacsim.core.utils.stage import (
+        add_reference_to_stage,
+        get_current_stage,
+        open_stage_async,
+    )
     from pxr import Gf
 
     if set(robots) != set(plan.robots):
@@ -201,6 +253,7 @@ async def load_verified_scene(
 
     await world.reset_async()
     await world.play_async()
+    _set_initial_viewport_camera(stage)
     for _ in range(max(2, config.physics_hz // 10)):
         await app.next_update_async()
 

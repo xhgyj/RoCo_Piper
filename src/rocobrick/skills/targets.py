@@ -12,9 +12,15 @@ SHA-256 fields are mandatory and never defaulted.
 
 Orientation semantics: the grasp orientation is ``qz(closing_yaw) ⊗ qx(180°)``
 (xyzw, normalized) so the tool z axis points DOWN onto the brick and the tool
-y axis stays horizontal, rotated by the closing yaw. The closing yaw is 0°
-when the brick's y-extent does not exceed its x-extent (fingers close along
-world y) and 90° otherwise.
+y axis — the axis the physical fingers translate along (URDF ground truth) —
+stays horizontal, rotated by the closing yaw. The closing yaw is 0° when the
+brick's y-extent does not exceed its x-extent (fingers close across world y)
+and 90° otherwise.
+
+Grasp-width semantics: every gripper width derived here (reach and close
+commands, expected windows) is a physical finger-pad separation converted to
+logical opening through the calibrated intercept. The original-mounted distal
+contact faces coincide at logical zero, so the current intercept is zero.
 """
 
 from __future__ import annotations
@@ -25,6 +31,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, fields
 from pathlib import Path
 
+from rocobrick.gripper import pad_separation_to_logical_opening
 from rocobrick.moveit_contract import (
     BASE_FRAME,
     MAX_ORIENTATION_TOLERANCE_RAD,
@@ -60,17 +67,36 @@ class SkillParams:
 
     pregrasp_standoff_m: float = 0.08  # > 0
     approach_clearance_m: float = 0.015  # > 0; TCP above brick center for side grasp
-    lift_height_m: float = 0.12  # > 0
+    # The lift target is center + standoff + lift_height with the tool held
+    # vertical; the wrist (joint5) demand grows linearly with that TCP height
+    # and the narrowed execution limit (+/-1.2217 rad) caps a vertical-tool
+    # lift at the example1 supply radius (~0.42 m from base) near z ~ 0.121 m.
+    # 0.03 keeps the target at ~0.116 m (joint5 ~1.18 rad) with margin while
+    # still raising the brick ~0.11 m for the holding-follow evidence.
+    lift_height_m: float = 0.03  # > 0; see joint5 note above
     transit_extra_height_m: float = 0.10  # > 0
     open_extra_m: float = 0.02  # >= 0
     squeeze_m: float = 0.004  # >= 0
     contact_window_slop_m: float = 0.006  # > 0
     free_window_slop_m: float = 0.01  # > 0
-    gripper_duration_s: float = 2.5  # > 0
-    gripper_goal_tolerance: float = 0.01  # > 0
+    # 4.0 s: closing now ends against the real brick (contact + squeeze
+    # compression) instead of free travel; 2.5 s was cancelled mid-close and
+    # failed the gripper feedback gate before the pads reached the brick.
+    gripper_duration_s: float = 4.0  # > 0
+    # Per-joint gripper goal tolerance of the FollowJointTrajectory action.
+    # It must stay far below the finger travel: at 0.01 the controller
+    # declared SUCCEEDED mid-travel (live evidence, 2026-10-01: commanded
+    # 19.9 mm, reported success with the fingers at 37.9 mm) and then
+    # stopped streaming setpoints, freezing the fingers short of the grasp.
+    gripper_goal_tolerance: float = 0.002  # > 0
     wait_duration_s: float = 2.0  # > 0
     position_tolerance_m: float = 0.005  # in (0, 0.01]
     orientation_tolerance_rad: float = 0.015  # in (0, 0.03]
+    # Holding-follow orientation bound.  A friction side grasp hangs the
+    # brick a couple of degrees off the TCP frame (live evidence: a steady
+    # 0.027 rad tilt with sub-millimetre positional following); the pose-goal
+    # tolerance above stays tight, this bound only judges the lifted brick.
+    follow_orientation_tolerance_rad: float = 0.05  # in (0, 0.1]
     still_tolerance_m: float = 0.01  # > 0
     hold_follow_tolerance_m: float = 0.02  # > 0
     scene_query_poll_s: float = 0.2  # > 0
@@ -90,6 +116,7 @@ class SkillParams:
             "wait_duration_s": (0.0, math.inf),
             "still_tolerance_m": (0.0, math.inf),
             "hold_follow_tolerance_m": (0.0, math.inf),
+            "follow_orientation_tolerance_rad": (0.0, 0.1),
             "scene_query_poll_s": (0.0, math.inf),
         }
         for name, value in vars(self).items():
@@ -103,6 +130,8 @@ class SkillParams:
             value = float(getattr(self, name))
             if not value > low:
                 raise ValueError(f"{name} must be > {low}, got {value!r}")
+            if not value <= high:
+                raise ValueError(f"{name} must be <= {high}, got {value!r}")
         for name in ("position_tolerance_m", "orientation_tolerance_rad"):
             value = float(getattr(self, name))
             maximum = (
@@ -211,10 +240,14 @@ def grasp_orientation_xyzw(closing_yaw_deg: float) -> QuaternionXYZW:
 def closing_yaw_deg(
     aabb_min: Sequence[float], aabb_max: Sequence[float]
 ) -> float:
-    """Return 0.0 when the fingers close along world y, else 90.0.
+    """Return 0.0 for the wide brick layout, else 90.0.
 
-    The y-extent vs x-extent comparison decides the closing axis: 0.0 when
-    ``dy <= dx`` (close along world y) and 90.0 otherwise (close along x).
+    The physical fingers translate along the tool y axis (URDF ground
+    truth: ``gripper_joint1/2`` prismatic axes map to link6 ±y), so yaw 0.0
+    closes across the brick's y-extent and 90.0 across its x-extent.  The
+    rule keeps the planner-proven yaw per layout; yaw 90 goal regions
+    failed OMPL goal sampling outright at the pregrasp pose (headed run,
+    2026-10-01).
     """
     dx = float(aabb_max[0]) - float(aabb_min[0])
     dy = float(aabb_max[1]) - float(aabb_min[1])
@@ -226,7 +259,7 @@ def closing_yaw_deg(
 def brick_span_m(
     aabb_min: Sequence[float], aabb_max: Sequence[float]
 ) -> float:
-    """Return the brick extent along the closing axis (dy for yaw 0)."""
+    """Return the brick extent under the closing axis (dy at yaw 0)."""
     dx = float(aabb_max[0]) - float(aabb_min[0])
     dy = float(aabb_max[1]) - float(aabb_min[1])
     if not (math.isfinite(dx) and math.isfinite(dy)):
@@ -314,15 +347,22 @@ def transit_target(
 
 @dataclass(frozen=True)
 class PickTargets:
-    """Every derived target of one PICK program over one measured brick."""
+    """Every derived target of one PICK program over one measured brick.
+
+    The gripper quantities are logical openings, but every grasp-width knob
+    (``open_extra_m``, ``squeeze_m``, the window slops and the brick span
+    itself) keeps its physical meaning of finger-pad separation; the
+    calibrated pad-separation intercept is applied when these widths are
+    converted into the commanded/measured logical openings below.
+    """
 
     pregrasp: TcpPoseTarget  # xy = brick center; z = center + standoff
     approach: TcpPoseTarget  # z = brick center (TCP contact mid-height)
     lift: TcpPoseTarget  # z = center + standoff + lift height
-    reach_opening_m: float  # brick_span + open_extra_m
-    close_opening_m: float  # brick_span − squeeze_m
+    reach_opening_m: float  # logical command; pads at span + open_extra_m
+    close_opening_m: float  # logical command; pads pressed to span - squeeze_m
     reach_expected_window_m: tuple[float, float]  # reach opening ± free slop
-    close_expected_window_m: tuple[float, float]  # brick span ± contact slop
+    close_expected_window_m: tuple[float, float]  # pads at span ± contact slop
     brick_span_m: float
     closing_yaw_deg: float
 
@@ -334,7 +374,14 @@ def pick_targets(
     provenance: TcpProvenance,
     params: SkillParams,
 ) -> PickTargets:
-    """Derive every PICK target from one world-frame brick AABB."""
+    """Derive every PICK target from one world-frame brick AABB.
+
+    Grasp widths are physical finger-pad separations; the calibrated
+    pad-separation intercept converts them to the logical openings of the
+    gripper contract.  A brick whose squeezed width cannot be produced by any
+    logical opening raises ``ValueError`` instead of commanding a grasp that
+    can never touch the brick.
+    """
     center_x, center_y, center_z = _brick_center(aabb_min, aabb_max)
     orientation = world_orientation_to_base(
         grasp_orientation_xyzw(closing_yaw_deg(aabb_min, aabb_max)), base
@@ -353,8 +400,9 @@ def pick_targets(
     )
     center_xy = (center_in_base[0], center_in_base[1])
     span = brick_span_m(aabb_min, aabb_max)
-    reach_opening = span + params.open_extra_m
-    close_opening = span - params.squeeze_m
+    reach_opening = pad_separation_to_logical_opening(span + params.open_extra_m)
+    close_opening = pad_separation_to_logical_opening(span - params.squeeze_m)
+    contact_opening = pad_separation_to_logical_opening(span)
     return PickTargets(
         pregrasp=_tcp_pose_target(
             (center_xy[0], center_xy[1], pregrasp_in_base[2]),
@@ -381,8 +429,8 @@ def pick_targets(
             reach_opening + params.free_window_slop_m,
         ),
         close_expected_window_m=(
-            span - params.contact_window_slop_m,
-            span + params.contact_window_slop_m,
+            contact_opening - params.contact_window_slop_m,
+            contact_opening + params.contact_window_slop_m,
         ),
         brick_span_m=span,
         closing_yaw_deg=closing_yaw_deg(aabb_min, aabb_max),

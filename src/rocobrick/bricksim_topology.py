@@ -110,8 +110,15 @@ def build_bricksim_topologies(
     initial_ids = {0} | {
         topology_id_by_instance[instance] for instance in plan.initially_assembled
     }
+    # The runtime scene contains every goal part that is not already present
+    # in the initial structure.  This is important for partial robot plans
+    # (for example TRANSIT -> PICK without PLACE_DOWN), where the carrier has
+    # no structural task yet but the target still must be a loose brick.
+    initial_instance_ids = set(plan.initially_assembled)
     loose_ids = {
-        topology_id_by_instance[task.physical_instance_id] for task in plan.tasks.values()
+        topology_id
+        for instance_id, topology_id in topology_id_by_instance.items()
+        if instance_id not in initial_instance_ids
     }
     initial = _subset(goal, initial_ids, connections=True)
     loose = _subset(goal, loose_ids, connections=False)

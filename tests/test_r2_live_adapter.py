@@ -1461,7 +1461,7 @@ def test_joint_flow_rejects_out_of_limits_targets_before_any_send() -> None:
 
 def test_probe_default_tolerances_stay_inside_the_runtime_gates() -> None:
     """The probe's tighter requested pose tolerances never exceed the gates."""
-    from rocobrick.ros_moveit_runtime import (
+    from rocobrick.moveit_contract import (
         MAX_ORIENTATION_TOLERANCE_RAD,
         MAX_POSITION_TOLERANCE_M,
     )

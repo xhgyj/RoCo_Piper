@@ -50,7 +50,7 @@ import inspect
 import math
 import time
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Protocol
 
 from rocobrick.multi_robot_scheduler import (
@@ -917,13 +917,31 @@ class SkillOperationExecutor:
         )
 
     async def _pick(self, operation: RobotOperation, robot_id: str) -> OperationExecution:
-        """Delegate PICK to its independent, operation-scoped handler."""
+        """Execute PICK from the current pose directly to pregrasp.
+
+        A direct PICK plan treats the former empty TRANSIT as part of the
+        pregrasp motion.  The handler therefore sends one TCP pose from the
+        current robot state to the calibrated pregrasp target instead of
+        first sending a separate high transit pose and replanning downward.
+        """
         handler = self._pick_backends.get(robot_id)
         execute = getattr(handler, "execute", None)
         if not callable(execute):
             return self._failed(operation, "PICK_HANDLER_INVALID")
+        execution_operation = operation
+        if self._state_ledger is not None:
+            arrived = self._state_ledger.observe(robot_id, "robot_at_pick_region")
+            if arrived is None and "robot_at_pick_region" in operation.preconditions:
+                execution_operation = replace(
+                    operation,
+                    preconditions=tuple(
+                        item
+                        for item in operation.preconditions
+                        if item != "robot_at_pick_region"
+                    ),
+                )
         try:
-            result = await execute(operation)
+            result = await execute(execution_operation)
         except Exception as error:
             return self._failed(operation, f"PICK_HANDLER_FAILED: {error}")
         if (

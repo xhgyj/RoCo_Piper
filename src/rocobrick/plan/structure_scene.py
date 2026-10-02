@@ -837,6 +837,7 @@ def _validate_placements(
     initial_ids: frozenset[str],
     layers: Mapping[str, int],
     slots: Mapping[str, int],
+    allow_partial: bool = False,
 ) -> None:
     """Validate every placement against the goal and initial structures.
 
@@ -858,8 +859,13 @@ def _validate_placements(
         raise StructureSceneError(
             f"parts are both initially assembled and placed: {both}"
         )
+    # A robot-operation-plan may intentionally be a skill-level prefix such
+    # as TRANSIT -> PICK, with PLACE_DOWN deferred to a later run.  In that
+    # case every non-initial goal part is loaded as a loose runtime object;
+    # require complete placement only once the plan actually contains a
+    # PLACE_DOWN operation.
     unplaced = sorted(set(row_by_instance) - initial_ids - placed_ids)
-    if unplaced:
+    if unplaced and not allow_partial:
         raise StructureSceneError(
             f"goal parts are not placed by any PLACE_DOWN operation: {unplaced}"
         )
@@ -1006,7 +1012,14 @@ def build_structure_scene_plan_from_files(
         key_to_id[goal_key] for goal_key in start_key_by_goal_key
     )
     layers, slots = _operation_positions(operation_plan)
-    _validate_placements(facts, row_by_instance, initial_ids, layers, slots)
+    allow_partial = any(
+        operation.skill in {"TRANSIT", "PICK"}
+        for operation in operation_plan.operations.values()
+    ) and not facts.placed
+    _validate_placements(
+        facts, row_by_instance, initial_ids, layers, slots,
+        allow_partial=allow_partial,
+    )
     if manifest is not None:
         _validate_manifest(manifest, manifest_brick_ids, row_by_instance)
 

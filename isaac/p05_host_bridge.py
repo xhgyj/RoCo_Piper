@@ -99,13 +99,17 @@ import math
 import os
 import re
 import shlex
+import signal
 import sys
 import time
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
-from rocobrick.gripper import fingers_to_logical_gripper
+from rocobrick.gripper import (
+    fingers_to_contact_opening,
+    fingers_to_logical_gripper,
+)
 from rocobrick.moveit_contract import JOINT_NAMES
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -418,8 +422,15 @@ def _gripper_observation(gripper_positions: Mapping[str, float]) -> dict:
             fingers[GRIPPER_JOINT_1], fingers[GRIPPER_JOINT_2]
         )
     except ValueError as exc:
-        observation["opening_m"] = None
-        observation["opening_error"] = str(exc)
+        try:
+            observation["opening_m"] = fingers_to_contact_opening(
+                fingers[GRIPPER_JOINT_1], fingers[GRIPPER_JOINT_2]
+            )
+            observation["opening_measurement"] = "physical_finger_separation"
+            observation["mimic_relation_deviation"] = str(exc)
+        except ValueError:
+            observation["opening_m"] = None
+            observation["opening_error"] = str(exc)
     return observation
 
 
@@ -1130,6 +1141,17 @@ class BridgeState:
         self.scene_session_id = None
         self.scene_manifest_sha256 = None
         self.tcp_transform = None
+        self.stop_signal = None
+
+    def request_stop(self, signum: int, _frame: object) -> None:
+        """Record SIGINT without invoking Kit or ROS from a signal handler."""
+        if signum == signal.SIGINT:
+            self.stop_signal = signum
+
+    def check_stop(self) -> None:
+        """Transfer an explicit SIGINT into the coroutine cleanup boundary."""
+        if self.stop_signal == signal.SIGINT:
+            raise KeyboardInterrupt
 
     def _flush(self, status: dict) -> None:
         """Persist cleanup progress so a hang in app.close() keeps evidence."""
@@ -1292,7 +1314,7 @@ def initial_evidence(args: argparse.Namespace) -> dict:
         },
         "schema": SCHEMA,
         "phase": PHASE,
-        "headless": True,
+        "headless": os.environ.get("ROCOBRICK_HEADED") != "1",
         "robot_mode": ROBOT_ONLY_MODE if robot_only else SCENE_MODE,
         "bounded": {
             "max_steps": args.max_steps,
@@ -1300,7 +1322,7 @@ def initial_evidence(args: argparse.Namespace) -> dict:
             "ready_timeout_s": args.ready_timeout,
             "hold_steps": args.hold_steps,
             "hold_seconds_s": args.hold_seconds,
-            "render_steps": False,
+            "render_steps": os.environ.get("ROCOBRICK_HEADED") == "1",
         },
         "usd": {"path": str(USD_PATH)},
         "robot_prim_path": ROBOT_PRIM_PATH if robot_only else None,
@@ -1978,9 +2000,14 @@ async def run_bridge(args: argparse.Namespace, state: BridgeState, evidence: dic
                 "provenance": "runtime_host_bricksim_scene_pre_rclpy",
             })
         except Exception as exc:
+            cause = exc.__cause__
             evidence["scene_snapshot"].update({
                 "status": "FAILED",
                 "error": f"{type(exc).__name__}: {exc}",
+                "cause": (
+                    f"{type(cause).__name__}: {cause}"
+                    if cause is not None else None
+                ),
                 "provenance": "runtime_host_bricksim_scene_pre_rclpy",
             })
             raise
@@ -2024,6 +2051,7 @@ async def run_bridge(args: argparse.Namespace, state: BridgeState, evidence: dic
         "name": SCENE_STATE_SERVICE,
         "created": False,
     }
+    render_enabled = os.environ.get("ROCOBRICK_HEADED") == "1"
     bridge = InProcessBridge(
         state, channels, robot_only=args.scene_manifest is None
     )
@@ -2034,7 +2062,9 @@ async def run_bridge(args: argparse.Namespace, state: BridgeState, evidence: dic
         bridge.scene_state_service_created
     )
     evidence["rclpy_started"] = True
+    signal.signal(signal.SIGINT, state.request_stop)
 
+    render_stride = 6
     loop_started = time.monotonic()
     deadline = loop_started + min(args.ready_timeout, args.time_limit)
     hard_deadline = loop_started + args.time_limit
@@ -2050,7 +2080,14 @@ async def run_bridge(args: argparse.Namespace, state: BridgeState, evidence: dic
             raise TimeoutError(f"readiness not reached within {args.max_steps} steps")
         if time.monotonic() >= deadline or time.monotonic() >= hard_deadline:
             raise TimeoutError("readiness not reached before the bounded deadline")
+        state.check_stop()
         world.step(render=False)
+        if render_enabled and steps % render_stride == 0:
+            # The bridge itself runs as a Kit async-engine coroutine.  Calling
+            # World.render_async() here re-enters the simulation context; one
+            # Kit update is sufficient to refresh the headed viewport without
+            # taking control of Kit's render scheduler.
+            await omni.kit.app.get_app().next_update_async()
         steps += 1
         now = time.monotonic()
         if now - last_publish >= PUBLISH_PERIOD_S:
@@ -2105,7 +2142,14 @@ async def run_bridge(args: argparse.Namespace, state: BridgeState, evidence: dic
             raise TimeoutError(f"hold exceeded {args.max_steps} total steps")
         if time.monotonic() >= hard_deadline:
             raise TimeoutError("hold exceeded the bounded time limit")
+        state.check_stop()
         world.step(render=False)
+        if render_enabled and steps % render_stride == 0:
+            # The bridge itself runs as a Kit async-engine coroutine.  Calling
+            # World.render_async() here re-enters the simulation context; one
+            # Kit update is sufficient to refresh the headed viewport without
+            # taking control of Kit's render scheduler.
+            await omni.kit.app.get_app().next_update_async()
         steps += 1
         hold_steps += 1
         now = time.monotonic()
@@ -2182,6 +2226,8 @@ def main(argv: list[str] | None = None) -> int:
     started = time.monotonic()
     state = BridgeState()
     evidence = initial_evidence(args)
+    state.evidence = evidence
+    state.evidence_path = args.evidence_out
 
     if not _running_inside_kit():
         evidence["kit_relaunch"] = {
@@ -2220,6 +2266,11 @@ def main(argv: list[str] | None = None) -> int:
             # then SIGINTs the host. Only this marker can be accepted by
             # evaluate_early_stop_accepted.
             evidence["stopped"] = EARLY_STOP_STOPPED
+        except SystemExit as exc:
+            # Kit can raise SystemExit from the async child before readiness.
+            # Preserve the exact code instead of letting the parent report only
+            # the generic "exited before p0.5" bootstrap failure.
+            evidence["error"] = f"SystemExit from Kit child: code={exc.code!r}"
         except asyncio.CancelledError:
             # Generic Kit-child cancellation: never an accepted early stop.
             evidence["stopped"] = "kit_child_cancelled_orderly_stop"

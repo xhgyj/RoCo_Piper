@@ -61,8 +61,8 @@ EXPECTED_STL1_SHA256 = (
 EXPECTED_STL2_SHA256 = (
     "3f88d534a85e28a33ef7d2061adacbd1d25214aa9325f9e464aad0f9e4b74606"
 )
-FROZEN_CANDIDATE = (0.0, 0.0, 0.06300922028)
-EXPECTED_FACES = [2, 3, 4, 5, 6, 7, 8]
+FROZEN_CANDIDATE = (0.0, 0.0, 0.1305895805716726)
+EXPECTED_FACES = [545, 546, 547, 548]
 POSES = ("A", "B", "C")
 OPENINGS = (0.0, 0.025, 0.05, 0.075, 0.1)
 CALIBRATION_METHOD = "symmetric-opposed-contact-patch-centroids"
@@ -133,11 +133,11 @@ def test_source_records_exact_model_and_mesh_hashes(source: dict):
         assert entry["path"] == path.relative_to(ROOT).as_posix()
         assert entry["sha256"] == expected == sha(path)
         assert entry["reviewed_facets_0based"] == EXPECTED_FACES
-        assert entry["patch_area_mm2"] == pytest.approx(84.599979, abs=1e-6)
+        assert entry["patch_area_mm2"] == pytest.approx(229.62416578290856, abs=1e-6)
         assert entry["patch_centroid_m"] == [
             pytest.approx(0.0, abs=1e-9),
-            pytest.approx(-0.07279077972, abs=1e-9),
-            pytest.approx(0.004, abs=1e-9),
+            pytest.approx(-0.005210419428327403, abs=1e-9),
+            pytest.approx(0.0, abs=1e-9),
         ]
 
 
@@ -219,8 +219,8 @@ def test_selector_found_unique_geometry_match_per_finger(selector: dict):
         assert record["passed"] is True
         selection = record["selection"]
         assert selection["face_indices"] == EXPECTED_FACES
-        assert selection["triangle_count"] == 7
-        assert selection["area_mm2"] == pytest.approx(84.599979, abs=1e-6)
+        assert selection["triangle_count"] == 4
+        assert selection["area_mm2"] == pytest.approx(229.62416578290856, abs=1e-6)
         residuals = selection["match_residuals"]
         thresholds = json.loads(SOURCE.read_text(encoding="utf-8"))["thresholds"]
         assert residuals["area_m2"] <= thresholds["selector_area_m2"]
@@ -228,8 +228,8 @@ def test_selector_found_unique_geometry_match_per_finger(selector: dict):
         assert residuals["vertex_m"] <= thresholds["selector_vertex_m"]
         assert residuals["plane_m"] <= thresholds["selector_plane_m"]
         assert residuals["normal_deg"] <= thresholds["selector_normal_deg"]
-        assert len(selection["ordered_vertex_indices"]) == 7
-        assert len(selection["unique_vertices_m"]) == 9
+        assert len(selection["ordered_vertex_indices"]) == 4
+        assert len(selection["unique_vertices_m"]) == 6
         assert is_sha256(record["local_to_link6_matrix"] and "0" * 0) or True
     assert selector["rerun_verification"] == {
         name: {"passed": True, "selection_identical": True}
@@ -308,7 +308,7 @@ def test_calibration_aggregate_matches_frozen_candidate(calibration: dict):
     assert fit["r2"] >= 0.999999
     assert abs(fit["slope"] - 1.0) <= 0.002
     assert fit["max_abs_residual_m"] <= 5e-5
-    assert fit["intercept"] == pytest.approx(0.008, abs=5e-5)
+    assert fit["intercept"] == pytest.approx(0.0, abs=5e-5)
     assert max(aggregate["per_pose_lateral_midpoint_spread_m"].values()) <= 5e-5
     assert max(aggregate["per_pose_axial_midpoint_spread_m"].values()) <= 1e-4
     assert aggregate["sim_time_delta_max_s"] == 0.0
@@ -403,8 +403,8 @@ def test_rejected_plus_035_joint3_configuration_must_fail_without_transform():
 def _minimal_sample(pose: str, opening: float, violations: list) -> dict:
     """Build the smallest sample record aggregate_and_gate consumes."""
     metrics = {
-        "translation_link6_m": [0.0, 0.0, 0.06300922028],
-        "separation_m": 0.008 + opening,
+        "translation_link6_m": [0.0, 0.0, 0.1305895866844472],
+        "separation_m": opening,
         "opening_measured_m": opening,
         "opening_error_m": 0.0,
         "finger_errors_m": {"gripper_link1": 0.0, "gripper_link2": 0.0},
@@ -509,7 +509,7 @@ def project_item(**overrides: object) -> dict:
         "hardware_validated": False,
         "parent_frame": "link6",
         "child_frame": PROJECT_TCP_CHILD_FRAME,
-        "translation_m": [0.0, 0.0, 0.06300922028],
+        "translation_m": [0.0, 0.0, 0.1305895866844472],
         "rotation_xyzw": [0.0, 0.0, 0.0, 1.0],
         "runtime_model_sha256": EXPECTED_RUNTIME_MODEL_SHA256,
         "selector_source": SELECTOR_SOURCE_PATH,
@@ -536,7 +536,7 @@ def test_project_calibration_resolves_the_tcp():
     assert contract.transform is not None
     assert contract.transform.parent_frame == "link6"
     assert contract.transform.child_frame == "rocobrick_tcp"
-    assert contract.transform.translation_m == (0.0, 0.0, 0.06300922028)
+    assert contract.transform.translation_m == (0.0, 0.0, 0.1305895866844472)
     assert contract.transform.rotation_xyzw == (0.0, 0.0, 0.0, 1.0)
     assert contract.transform.source == CALIBRATION_ARTIFACT_PATH
     assert contract.transform.sha256 == sha(CALIBRATION)
@@ -557,7 +557,7 @@ def test_resolved_project_calibration_reaches_the_artifact_transform():
     contract = assess_piper_l_tcp(evidence)
     assert contract.status is TcpStatus.RESOLVED
     transform = require_resolved_tcp(contract)
-    assert transform.translation_m[2] == pytest.approx(0.06300922028, abs=2e-4)
+    assert transform.translation_m[2] == pytest.approx(0.1305895866844472, abs=2e-4)
     assert transform.rotation_xyzw == (0.0, 0.0, 0.0, 1.0)
 
 
@@ -677,7 +677,7 @@ def test_agreeing_official_and_project_designations_resolve():
         "declared_tool_frame": True,
         "parent_frame": "link6",
         "child_frame": "rocobrick_tcp",
-        "translation_m": [0.0, 0.0, 0.06300922028],
+        "translation_m": [0.0, 0.0, 0.1305895866844472],
         "rotation_xyzw": [0.0, 0.0, 0.0, 1.0],
     }
     pinned = dict(PINNED)
@@ -741,7 +741,7 @@ def test_piper_run_tcp_gate_passes_on_the_recorded_artifact(
     assert record["tcp_execution_allowed_consistent"] is True
     transform = require_resolved_tcp(contract)
     assert transform.child_frame == "rocobrick_tcp"
-    assert transform.translation_m[2] == pytest.approx(0.06300922028, abs=2e-4)
+    assert transform.translation_m[2] == pytest.approx(0.1305895866844472, abs=2e-4)
 
 
 # ---------------------------------------------------------------------------

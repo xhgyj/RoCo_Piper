@@ -1,11 +1,11 @@
-"""Offline tests for the structure-only ``piper-run`` preflight.
+"""Offline tests for the structure-only and direct robot-plan paths.
 
-The tests drive the ``piper-run`` CLI in its structure-only preflight mode:
-``--robot-operation-plan PLAN --structure-goal GOAL`` with the optional
-``--structure-start START`` (omitted or the literal empty string both mean
-EMPTY initial structure) and the explicit ``--scene-manifest``. This mode may
-validate and audit, but it must never dispatch an operation: no runtime
-session, no ROS/Isaac/Docker/GPU process, and no motion.
+The tests drive ``piper-run`` with ``--robot-operation-plan`` and explicit
+structure inputs. Without the complete runtime option group this is a
+structure-only preflight: no runtime session or motion is allowed. With the
+complete group, plans containing only currently implemented direct skills may
+enter the real dispatch seam; this suite uses a guarded fake session to verify
+that routing without STAP is intentional and auditable.
 
 Every run goes through the documented session construction seam
 (``piper_run._create_session``), which is replaced by an autouse guard that
@@ -193,6 +193,7 @@ def _structure_argv(
     start: object = _OMITTED,
     plan: Path = OPERATION_PLAN,
     manifest: Path | None = SCENE_MANIFEST,
+    preflight_only: bool = True,
 ) -> list[str]:
     """Build a structure-only preflight invocation.
 
@@ -202,6 +203,7 @@ def _structure_argv(
         start: ``--structure-start`` value, or the omit sentinel.
         plan: External ``robot-operation-plan/v1`` file.
         manifest: Scene manifest file, or ``None`` to omit the option.
+        preflight_only: Whether to request the explicit no-runtime preflight.
 
     Returns:
         The argv list for ``piper_run.main``.
@@ -216,6 +218,8 @@ def _structure_argv(
         "--structure-goal",
         str(goal),
     ]
+    if preflight_only:
+        argv.append("--preflight-only")
     if start is not _OMITTED:
         assert isinstance(start, (Path, str)), start
         argv += ["--structure-start", str(start)]
@@ -579,9 +583,97 @@ def test_example1_structure_preflight_is_audited_and_never_dispatches(
     _assert_no_motion_claim(evidence_dir)
 
 
-# ---------------------------------------------------------------------------
-# Empty start semantics
-# ---------------------------------------------------------------------------
+def test_complete_runtime_group_dispatches_direct_transit_pick_without_stap(
+    tmp_path: Path,
+    session_guard: list[tuple[object, ...]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A complete direct plan reaches the shared runtime dispatch seam.
+
+    This test does not claim physical motion: the dispatch seam is replaced by
+    a sentinel. It proves that no-STAP routing no longer stops at
+    ``EXECUTION_NOT_IMPLEMENTED`` when the external plan contains only skills
+    with implemented direct backends.
+    """
+    source = _read_json(OPERATION_PLAN)
+    allowed = {
+        "example1-piper0-transit-to-pick",
+        "example1-piper1-wait-stable",
+        "example1-piper0-pick",
+    }
+    operations = [
+        operation
+        for operation in source["operations"]
+        if operation["operation_id"] in allowed
+    ]
+    operation_plan = dict(source)
+    operation_plan["plan_id"] = "direct-transit-pick-no-stap"
+    operation_plan["operations"] = operations
+    operation_plan["evidence_requirements"] = [
+        requirement
+        for requirement in source["evidence_requirements"]
+        if requirement["operation_id"] in allowed
+    ]
+    operation_plan["dependencies"] = [
+        dependency
+        for dependency in source["dependencies"]
+        if dependency["predecessor_operation_id"] in allowed
+        and dependency["successor_operation_id"] in allowed
+    ]
+    operation_plan["execution_layers"] = [
+        [
+            "example1-piper0-transit-to-pick",
+            "example1-piper1-wait-stable",
+        ],
+        ["example1-piper0-pick"],
+    ]
+    operation_plan["planned_schedule"] = [
+        [
+            {"operation_id": "example1-piper0-transit-to-pick", "robot_id": "piper_0"},
+            {"operation_id": "example1-piper1-wait-stable", "robot_id": "piper_1"},
+        ],
+        [{"operation_id": "example1-piper0-pick", "robot_id": "piper_0"}],
+    ]
+    plan_path = tmp_path / "direct-transit-pick.json"
+    plan_path.write_text(json.dumps(operation_plan), encoding="utf-8")
+    complete_start = tmp_path / "complete-structure-start.json"
+    complete_start.write_bytes(TASK_GOAL.read_bytes())
+    calls: list[object] = []
+
+    def dispatch(args, record, recorder, contract, stap_plan):
+        calls.append((args, record, recorder, contract, stap_plan))
+        return None
+
+    monkeypatch.setattr(piper_run, "_robot_operation_plan_phase", dispatch)
+    run_dir = tmp_path / "run"
+    code, line, _ = _invoke(
+        _structure_argv(
+            run_dir,
+            goal=TASK_GOAL,
+            start=complete_start,
+            plan=plan_path,
+            manifest=SCENE_MANIFEST,
+            preflight_only=False,
+        )
+    )
+
+    assert code == 0, line
+    assert line["status"] == "EXECUTED", line
+    assert line["passed"] is True, line
+    assert len(calls) == 1
+    assert calls[0][4] is None
+    assert session_guard == []
+    result_path = Path(str(line["result_path"]))
+    assert result_path.is_file()
+    result = _read_json(result_path)
+    evidence_dir = result_path.parent
+    assert result["status"] == "EXECUTED"
+    assert result["passed"] is True
+    preflight = _read_json(evidence_dir / "preflight.json")
+    assert preflight["dispatch"]["implemented"] is True
+    assert preflight["dispatch"]["stap_authorization"] is None
+    assert preflight["checks"]["runtime_created"] is False
+    assert preflight["checks"]["stap_source_plan_provided"] is False
 
 
 def test_omitted_and_empty_start_mean_empty_and_fail_closed(

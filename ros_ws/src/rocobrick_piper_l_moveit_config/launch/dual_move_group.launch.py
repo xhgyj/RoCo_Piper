@@ -4,8 +4,8 @@ Starts, for every id in ``robot_ids``, an independent namespaced stack in the
 same ROS/DDS session (same container, same ``ROS_DOMAIN_ID``):
 
 * ``/<robot_id>/robot_state_publisher`` publishing the generated
-  ``<robot_id>_``-prefixed model (disjoint TF frame ids; every stack shares
-  the global ``/tf`` topics by ROS design, so the frame ids must differ);
+  ``<robot_id>_``-prefixed model on robot-scoped ``/<robot_id>/tf`` and
+  ``/<robot_id>/tf_static`` topics;
 * ``/<robot_id>/controller_manager`` (``ros2_control_node``) with the
   ``TopicBasedSystem`` hardware on the frozen host-bridge topics
   ``/<robot_id>/isaac_joint_command`` and ``/<robot_id>/isaac_joint_states``,
@@ -19,6 +19,11 @@ so two stacks never share a topic, action, service, joint, frame, or group.
 ``/clock`` stays global: the single host bridge publishes the one shared sim
 clock and the DDS domain/listener topology is unchanged (no bridge start
 here, this launch is container-side only).
+
+Each robot stack remaps both TF topics symmetrically for its own
+``robot_state_publisher`` and ``move_group``. The frame ids remain prefixed,
+and the topic remaps prevent one planning scene monitor from attempting to
+transform the other robot's disconnected tree.
 
 CLI::
 
@@ -97,6 +102,10 @@ def _robot_stack(helper, config, use_sim_time: bool):
     """Build the four nodes (plus spawner event) of one robot stack."""
     namespace = config.endpoints.namespace
     moveit_config = _moveit_config(config)
+    tf_remappings = [
+        ("/tf", f"{namespace}/tf"),
+        ("/tf_static", f"{namespace}/tf_static"),
+    ]
 
     control_node = Node(
         package="controller_manager",
@@ -129,6 +138,7 @@ def _robot_stack(helper, config, use_sim_time: bool):
         package="robot_state_publisher",
         executable="robot_state_publisher",
         namespace=namespace,
+        remappings=tf_remappings,
         output="screen",
         parameters=[
             moveit_config.robot_description,
@@ -139,6 +149,7 @@ def _robot_stack(helper, config, use_sim_time: bool):
         package="moveit_ros_move_group",
         executable="move_group",
         namespace=namespace,
+        remappings=tf_remappings,
         output="screen",
         parameters=[
             moveit_config.to_dict(),

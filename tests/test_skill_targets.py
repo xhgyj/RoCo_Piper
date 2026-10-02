@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 
+from rocobrick.gripper import PIPER_L_PAD_SEPARATION_INTERCEPT_M
 from rocobrick.moveit_contract import (
     TCP_LINK,
     TCP_STATUS_CALIBRATED_PROJECT,
@@ -117,9 +118,9 @@ def test_grasp_orientation_is_normalized() -> None:
 @pytest.mark.parametrize(
     ("aabb_min", "aabb_max", "expected_yaw"),
     [
-        (WIDE_MIN, WIDE_MAX, 0.0),  # dy (0.016) <= dx (0.032)
-        (TALL_MIN, TALL_MAX, 90.0),  # dy (0.032) > dx (0.016)
-        ((0.0, 0.0, 0.0), (1.0, 1.0, 1.0), 0.0),  # dy == dx closes along y
+        (WIDE_MIN, WIDE_MAX, 0.0),  # dy (0.016) <= dx (0.032): straddle x
+        (TALL_MIN, TALL_MAX, 90.0),  # dy (0.032) > dx (0.016): straddle y
+        ((0.0, 0.0, 0.0), (1.0, 1.0, 1.0), 0.0),  # dy == dx straddles x
     ],
 )
 def test_closing_yaw_rule(
@@ -131,7 +132,7 @@ def test_closing_yaw_rule(
 @pytest.mark.parametrize(
     ("aabb_min", "aabb_max", "expected_span"),
     [
-        (WIDE_MIN, WIDE_MAX, 0.016),  # yaw 0 -> dy
+        (WIDE_MIN, WIDE_MAX, 0.016),  # yaw 0 -> dy, the extent under the closing axis
         (TALL_MIN, TALL_MAX, 0.016),  # yaw 90 -> dx
     ],
 )
@@ -236,18 +237,29 @@ def test_pick_targets_heights_windows_and_provenance() -> None:
     )
     assert targets.closing_yaw_deg == 0.0
     assert targets.brick_span_m == pytest.approx(0.016)
-    assert targets.reach_opening_m == pytest.approx(0.016 + params.open_extra_m)
-    assert targets.close_opening_m == pytest.approx(0.016 - params.squeeze_m)
+    # Grasp widths are physical pad separations converted to logical openings:
+    # pads reach span + open_extra, press to span - squeeze, and the close
+    # window centers on the logical opening whose pads sit at the span.
+    assert targets.reach_opening_m == pytest.approx(
+        0.016 + params.open_extra_m - PIPER_L_PAD_SEPARATION_INTERCEPT_M
+    )
+    assert targets.close_opening_m == pytest.approx(
+        0.016 - params.squeeze_m - PIPER_L_PAD_SEPARATION_INTERCEPT_M
+    )
     assert targets.reach_expected_window_m == pytest.approx(
         (
-            0.016 + params.open_extra_m - params.free_window_slop_m,
-            0.016 + params.open_extra_m + params.free_window_slop_m,
+            0.016 + params.open_extra_m - PIPER_L_PAD_SEPARATION_INTERCEPT_M
+            - params.free_window_slop_m,
+            0.016 + params.open_extra_m - PIPER_L_PAD_SEPARATION_INTERCEPT_M
+            + params.free_window_slop_m,
         )
     )
     assert targets.close_expected_window_m == pytest.approx(
         (
-            0.016 - params.contact_window_slop_m,
-            0.016 + params.contact_window_slop_m,
+            0.016 - PIPER_L_PAD_SEPARATION_INTERCEPT_M
+            - params.contact_window_slop_m,
+            0.016 - PIPER_L_PAD_SEPARATION_INTERCEPT_M
+            + params.contact_window_slop_m,
         )
     )
     for pose in (targets.pregrasp, targets.approach, targets.lift):
@@ -260,6 +272,18 @@ def test_pick_targets_heights_windows_and_provenance() -> None:
         assert pose.orientation_tolerance_rad == params.orientation_tolerance_rad
         assert pose.orientation_xyzw == pytest.approx(
             grasp_orientation_xyzw(0.0)
+        )
+
+
+def test_pick_targets_rejects_a_brick_too_narrow_to_squeeze() -> None:
+    """A brick no logical opening can squeeze fails closed at target build."""
+    # With the distal faces coincident at zero, only a squeezed width below
+    # zero is outside the graspable range.
+    narrow_min = (1.0, 1.0, 0.0)
+    narrow_max = (1.032, 1.003, 0.016)
+    with pytest.raises(ValueError, match="graspable range"):
+        pick_targets(
+            narrow_min, narrow_max, IDENTITY_BASE, PROVENANCE, SkillParams()
         )
 
 
@@ -285,17 +309,18 @@ def test_pick_targets_xy_follows_the_rotated_base_frame() -> None:
 def test_skill_params_defaults_match_the_pinned_values() -> None:
     params = SkillParams()
     assert params.pregrasp_standoff_m == 0.08
-    assert params.lift_height_m == 0.12
+    assert params.lift_height_m == 0.03
     assert params.transit_extra_height_m == 0.10
     assert params.open_extra_m == 0.02
     assert params.squeeze_m == 0.004
     assert params.contact_window_slop_m == 0.006
     assert params.free_window_slop_m == 0.01
-    assert params.gripper_duration_s == 2.5
-    assert params.gripper_goal_tolerance == 0.01
+    assert params.gripper_duration_s == 4.0
+    assert params.gripper_goal_tolerance == 0.002
     assert params.wait_duration_s == 2.0
     assert params.position_tolerance_m == 0.005
     assert params.orientation_tolerance_rad == 0.015
+    assert params.follow_orientation_tolerance_rad == 0.05
     assert params.still_tolerance_m == 0.01
     assert params.hold_follow_tolerance_m == 0.02
     assert params.scene_query_poll_s == 0.2

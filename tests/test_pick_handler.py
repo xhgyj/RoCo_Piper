@@ -167,7 +167,13 @@ def test_pick_handler_rejects_preflight_without_motion(defect: str) -> None:
 
 
 def test_pick_planning_scene_includes_protected_ground_box() -> None:
-    """The target may contact the fingers, but the floor must remain protected."""
+    """The floor stays protected for every robot link, with no ACM waiver.
+
+    The calibrated distal-pad TCP keeps the tool clear of the floor at the
+    approach target, so the ground box is a hard collision constraint: an
+    unreachable target must fail planning instead of being authorized to
+    graze the floor and then stall against it in Isaac.
+    """
     ledger = OperationStateLedger(("piper_0",))
     ledger.confirm(
         "piper_0", "robot_at_pick_region",
@@ -189,4 +195,37 @@ def test_pick_planning_scene_includes_protected_ground_box() -> None:
     assert ground["frame_id"] == "piper_0_world"
     assert ground["minimum_m"] == (-1.0, -1.2, -0.021)
     assert ground["maximum_m"] == (1.0, 0.8, -0.001)
-    assert all("piper_0_ground" not in pair for pair in payload["allowed_collision_pairs"])
+    assert set(map(tuple, payload["allowed_collision_pairs"])) == {
+        ("brick-a", "piper_0_gripper_link1"),
+        ("brick-a", "piper_0_gripper_link2"),
+    }
+
+
+def test_dispatch_preserves_nested_motion_evidence() -> None:
+    """Outer false dispatch metadata must not hide actual command evidence."""
+    class MotionWithNestedEvidence(Motion):
+        def run_motion_operation(self, robot_id, runtime_operation):
+            return {
+                "motion_sent": False,
+                "result": {
+                    "passed": True,
+                    "execution": {
+                        "terminal": True, "safe_to_release": True,
+                        "command_messages": 12,
+                    },
+                    "evidence": {"motion_sent": True},
+                },
+            }
+
+    handler = PickHandler(
+        Observer(document()), OperationStateLedger(("piper_0",)),
+        session_id="session-1", manifest_sha256="a" * 64,
+        motion_transport=MotionWithNestedEvidence(),
+    )
+    request = RuntimeOperation(
+        kind=OperationKind.TCP_POSE, payload={}, timeout_s=1.0,
+        request_id="pick-1:approach",
+    )
+    result = asyncio.run(handler._dispatch(operation(), "approach", request))
+    assert result.passed is True
+    assert result.motion_sent is True

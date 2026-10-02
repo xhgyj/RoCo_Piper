@@ -4,14 +4,14 @@
   (R5.A). Regenerate from the accepted artifact; never hand-edit numbers.
 
   Provenance (single authority): artifacts/model-audit/piper_l_tcp_binding_contract.json
-    artifact sha256 : dd9a5cc3c7723b782c382bd5f3a667fefa979bbdc751e156e43d5fd8f6065215
+    artifact sha256 : 0da6d121bb50617282fc1e9517ae0413b5e782cea32918eff3c41da60e1ecfea
     tcp_contract.status : RESOLVED
     calibration_authority : project
     simulation_only : true
     hardware_validated : false
     runtime_usd_scoped : true
     transform.source : artifacts/model-audit/piper_l_tcp_calibration.json
-    transform.sha256 : 4e342f2cdf6d34970d741a091a46e671aee2e6da67be4189136260068b19645d
+    transform.sha256 : 3ba48537ed4f453c7e2507e042056128515e8a064adbab7a4c871b3ed2bc94cb
 
   The link/joint below carry the EXACT artifact transform
   parent link6 -> child rocobrick_tcp; the identity rotation quaternion
@@ -29,16 +29,16 @@
       value="artifacts/model-audit/piper_l_tcp_binding_contract.json"/>
     <xacro:property
       name="tcp_binding_artifact_sha256"
-      value="dd9a5cc3c7723b782c382bd5f3a667fefa979bbdc751e156e43d5fd8f6065215"/>
+      value="0da6d121bb50617282fc1e9517ae0413b5e782cea32918eff3c41da60e1ecfea"/>
     <xacro:property
       name="tcp_calibration_source"
       value="artifacts/model-audit/piper_l_tcp_calibration.json"/>
     <xacro:property
       name="tcp_calibration_source_sha256"
-      value="4e342f2cdf6d34970d741a091a46e671aee2e6da67be4189136260068b19645d"/>
+      value="3ba48537ed4f453c7e2507e042056128515e8a064adbab7a4c871b3ed2bc94cb"/>
     <xacro:property
       name="tcp_translation_m"
-      value="-2.189439796129733e-09 -1.8041124150158794e-16 0.06300922673030293"/>
+      value="-1.887447531601083e-09 -1.3530843112619095e-16 0.1305895866844472"/>
     <xacro:property
       name="tcp_rotation_xyzw"
       value="0.0 0.0 0.0 1.0"/>

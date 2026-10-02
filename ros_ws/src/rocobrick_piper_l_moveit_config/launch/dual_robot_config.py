@@ -74,6 +74,20 @@ GRIPPER_CONTROLLER: str = "gripper_controller"
 LIST_CONTROLLERS_SERVICE: str = "controller_manager/list_controllers"
 PLAN_SERVICE: str = "plan_kinematic_path"
 COMPUTE_FK_SERVICE: str = "compute_fk"
+
+# The planning checkout includes a flange spacer and a different finger
+# origin. Match the runtime URDF without changing either finger's orientation.
+_PINNED_GRIPPER_ORIGINS: dict[str, tuple[str, str]] = {
+    "gripper_base_joint": ("0 0 0.0045", "0 0 0"),
+    "gripper_joint1": ("0 0 0.138", "1.5707963 0 0"),
+    "gripper_joint2": ("0 0 0.138", "1.5707963 0 -3.1415926"),
+}
+_CORRECTED_GRIPPER_ORIGINS: dict[str, tuple[str, str]] = {
+    "gripper_base_joint": ("0 0 0", "0 0 0"),
+    "gripper_joint1": ("0 0 0.1358", "1.5707963 0 0"),
+    "gripper_joint2": ("0 0 0.1358", "1.5707963 0 -3.1415926"),
+}
+
 REQUIRED_CONTROLLERS: tuple[str, ...] = (
     "joint_state_broadcaster",
     ARM_CONTROLLER,
@@ -248,6 +262,34 @@ def prefix_model(
             value = element.get(attribute)
             if value is not None:
                 element.set(attribute, prefix + value)
+    ET.indent(root)
+    return ET.tostring(root, encoding="unicode")
+
+
+def align_gripper_geometry_to_runtime_asset(urdf_text: str) -> str:
+    """Align planning origins with the original, unmodified runtime URDF.
+
+    Fail closed on an unreviewed planning-model revision. Both finger
+    orientations, axes, limits and mesh references remain unchanged.
+    """
+    root = ET.fromstring(urdf_text)
+    joints = {element.get("name"): element for element in root.findall("joint")}
+    for name, (pinned_xyz, pinned_rpy) in _PINNED_GRIPPER_ORIGINS.items():
+        joint = joints.get(name)
+        if joint is None:
+            raise ValueError(f"pinned model lost joint {name!r}")
+        origin = joint.find("origin")
+        if origin is None:
+            raise ValueError(f"joint {name!r} has no origin element")
+        if origin.get("xyz") != pinned_xyz or origin.get("rpy") != pinned_rpy:
+            raise ValueError(
+                f"pinned origin of {name!r} changed: "
+                f"xyz={origin.get('xyz')!r} rpy={origin.get('rpy')!r}"
+            )
+    for name, (xyz, rpy) in _CORRECTED_GRIPPER_ORIGINS.items():
+        origin = joints[name].find("origin")
+        origin.set("xyz", xyz)
+        origin.set("rpy", rpy)
     ET.indent(root)
     return ET.tostring(root, encoding="unicode")
 
@@ -537,7 +579,9 @@ def generate_dual_robot_configs(
         raise ValueError("robot_ids must not be empty")
     output_dir = Path(output_dir)
     config_dir = Path(package_dir) / "config"
-    expanded_urdf_text = xacro_runner(Path(package_dir) / SINGLE_ROBOT_XACRO)
+    expanded_urdf_text = align_gripper_geometry_to_runtime_asset(
+        xacro_runner(Path(package_dir) / SINGLE_ROBOT_XACRO)
+    )
     single_srdf_text = (config_dir / "piper_l.srdf").read_text(encoding="utf-8")
     if "rocobrick_tcp" not in expanded_urdf_text:
         raise ValueError(

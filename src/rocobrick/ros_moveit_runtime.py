@@ -59,7 +59,11 @@ from rocobrick.feedback import (
     position_error_m,
     state_is_stable,
 )
-from rocobrick.gripper import fingers_to_logical_gripper, logical_gripper_to_fingers
+from rocobrick.gripper import (
+    fingers_to_contact_opening,
+    fingers_to_logical_gripper,
+    logical_gripper_to_fingers,
+)
 from rocobrick.moveit_contract import (
     ACTION_ARM_FOLLOW,
     ACTION_GRIPPER_FOLLOW,
@@ -68,8 +72,6 @@ from rocobrick.moveit_contract import (
     EXACT_STATE_MATCH_TOLERANCE,
     GRIPPER_JOINT_NAMES,
     JOINT_NAMES,
-    MAX_ORIENTATION_TOLERANCE_RAD,
-    MAX_POSITION_TOLERANCE_M,
     MOVE_GROUP_ACTION_CANDIDATES,
     QUAT_NORM_MIN,
     SERVICE_COMPUTE_FK,
@@ -157,6 +159,41 @@ FINAL_CONVERGENCE_TIMEOUT_S = 20.0
 FINAL_CONVERGENCE_POLL_S = 0.2
 FINAL_SETTLE_SAMPLES = 8
 FINAL_SETTLE_STEP_MAX = 5.0e-4
+# Direct arm-completion re-command.  When a MoveGroup goal succeeds but the
+# final FK gate finds the arm frozen short of the plan (the container-side
+# pipeline stops streaming setpoints at trajectory end), the runtime
+# re-sends the planned final joints over its own arm follow action with
+# these tight bounds; the subsequent FK re-verification still decides.
+ARM_COMPLETION_DURATION_S = 3.0
+ARM_COMPLETION_TIMEOUT_S = 20.0
+ARM_COMPLETION_TOLERANCE_RAD = 0.005
+# Post-action convergence wait: the simulated fingers travel at roughly
+# 5 mm/s while the controller holds the last trajectory setpoint, so a full
+# close can need several seconds of continued convergence after the action
+# result; the wait is bounded by this and the remaining action deadline.
+GRIPPER_CONVERGENCE_TIMEOUT_S = 15.0
+# Contact-stall detection under a sustained press.  Per-sample stillness
+# (a fixed step between adjacent states) is defeated by contact
+# chatter: live evidence (headed close run, 2026-10-01) shows a close goal
+# pressing 4 mm into the brick holding the action active for the full 60 s
+# wall deadline because neither the controller's own tolerance check nor the
+# stillness monitor ever fired.  A stall is therefore "no net progress":
+# once the measured opening is inside the expected window, the finger
+# reading may drift at most GRIPPER_CONTACT_STALL_DRIFT_M from the entering
+# reference for GRIPPER_CONTACT_STALL_S before the goal is cancelled as
+# contact-limited; net progress beyond the drift re-anchors the reference.
+GRIPPER_CONTACT_STALL_DRIFT_M = 1.0e-3
+GRIPPER_CONTACT_STALL_S = 1.5
+GRIPPER_OPENING_TRACE_MAX = 256
+
+# The MoveGroup goal region is tightened to this fraction of the target's own
+# tolerance. The final FK gate verifies against the full target tolerance, so
+# a planner allowed the whole budget legitimately stops anywhere inside it
+# (live evidence: pose-goal residuals of +3.3 mm and -4.5 mm on the same
+# target) and the gate then fails intermittently by planner slack alone.
+# Planning inside the fraction keeps the verified residual dominated by
+# tracking error with headroom against the requested tolerance.
+POSE_GOAL_TOLERANCE_FRACTION = 0.4
 
 FkVerification = tuple[tuple[float, float, float], tuple[float, float, float, float]]
 FkVerifier = Callable[[Mapping[str, float]], "FkVerification | None"]
@@ -1019,7 +1056,7 @@ class RosMoveItRuntime:
             collision_object_factory=CollisionObject,
             attached_collision_object_factory=lambda: __import__(
                 "moveit_msgs.msg", fromlist=["AttachedCollisionObject"]
-            ).AttachedCollisionObject,
+            ).AttachedCollisionObject(),
             allowed_collision_entry_factory=AllowedCollisionEntry,
             get_planning_scene_type=lambda: GetPlanningScene,
             get_planning_scene_request_factory=GetPlanningScene.Request,
@@ -1331,7 +1368,7 @@ class RosMoveItRuntime:
             return None
 
     def capability_readiness(
-        self, *, probe_scene: bool = False
+        self, *, probe_scene: bool = False, require_broadcaster_match: bool = True
     ) -> RobotCapabilityReadiness:
         """This robot's full capability readiness, endpoints included.
 
@@ -1370,7 +1407,11 @@ class RosMoveItRuntime:
         )
 
     def wait_until_capability_ready(
-        self, timeout_s: float, *, probe_scene: bool = True
+        self,
+        timeout_s: float,
+        *,
+        probe_scene: bool = True,
+        require_broadcaster_match: bool = True,
     ) -> bool:
         """Bounded per-robot capability readiness wait; never sends motion.
 
@@ -1385,7 +1426,10 @@ class RosMoveItRuntime:
         deadline = self._clock_fn() + float(timeout_s)
         while True:
             self._spin_fn()
-            if self.capability_readiness(probe_scene=probe_scene).passed:
+            if self.capability_readiness(
+                probe_scene=probe_scene,
+                require_broadcaster_match=require_broadcaster_match,
+            ).passed:
                 return True
             if self._clock_fn() >= deadline:
                 return False
@@ -2197,6 +2241,61 @@ class RosMoveItRuntime:
             goal.goal_tolerance.append(tolerance)
         return goal
 
+    def _await_settled_gripper(
+        self, result_states: int, deadline: float
+    ) -> tuple[dict[str, float] | None, bool]:
+        """Wait until the fingers stop making net progress after the action.
+
+        The controller's own SUCCEEDED is not convergence evidence: with the
+        loose per-joint goal tolerance it fires mid-travel (live evidence: a
+        close commanded to 3.9 mm reported SUCCEEDED with the fingers still
+        at 22.4 mm and creeping at 2.6 mm/s).  The terminal reading is
+        therefore taken only after the measured fingers drift at most
+        GRIPPER_CONTACT_STALL_DRIFT_M from a reference for
+        GRIPPER_CONTACT_STALL_S — the same no-net-progress criterion the
+        in-loop contact monitor uses — or the bounded wait expires.
+        """
+        reference: tuple[float, float] | None = None
+        reference_at: float | None = None
+        settle_deadline = min(
+            float(deadline), self._clock_fn() + GRIPPER_CONVERGENCE_TIMEOUT_S
+        )
+        while self._clock_fn() < settle_deadline:
+            self._spin_fn()
+            self._sleep_fn(self._wait_step_s)
+            current = self.latest_isaac_state()
+            if current is None or self._isaac_state_count <= result_states:
+                continue
+            try:
+                fingers = (
+                    float(current["gripper_joint1"]),
+                    float(current["gripper_joint2"]),
+                )
+            except (KeyError, TypeError, ValueError):
+                reference = None
+                reference_at = None
+                continue
+            now = self._clock_fn()
+            if reference is None:
+                reference = fingers
+                reference_at = now
+                continue
+            drift = max(
+                abs(fingers[0] - reference[0]),
+                abs(fingers[1] - reference[1]),
+            )
+            if drift > GRIPPER_CONTACT_STALL_DRIFT_M:
+                # Still moving toward the held setpoint: keep waiting.
+                reference = fingers
+                reference_at = now
+                continue
+            if (
+                reference_at is not None
+                and now - reference_at >= GRIPPER_CONTACT_STALL_S
+            ):
+                return current, True
+        return self.latest_isaac_state(), False
+
     def _execute_gripper_goal(
         self,
         goal: Any,
@@ -2247,9 +2346,75 @@ class RosMoveItRuntime:
         details["accepted"] = True
         self._active_result_future = handle.get_result_async()
         result_future = self._active_result_future
-        if not self._wait_future(result_future, deadline):
-            details["cancel"] = self.cancel_active()
-            lifecycle = details["cancel"]
+        window_low = float(target.expected_opening_m[0])
+        window_high = float(target.expected_opening_m[1])
+        contact_limited = False
+        cancel_lifecycle = None
+        stall_reference: tuple[float, float] | None = None
+        stall_entered_at: float | None = None
+        opening_trace: list[tuple[float, float]] = []
+        while not result_future.done():
+            self._spin_fn()
+            current = self.latest_isaac_state()
+            if current is not None and self._isaac_state_count > 0:
+                now = self._clock_fn()
+                try:
+                    finger_1 = float(current["gripper_joint1"])
+                    finger_2 = float(current["gripper_joint2"])
+                    try:
+                        measured_contact = fingers_to_logical_gripper(
+                            finger_1, finger_2
+                        )
+                    except ValueError:
+                        measured_contact = fingers_to_contact_opening(
+                            finger_1, finger_2
+                        )
+                    if len(opening_trace) < GRIPPER_OPENING_TRACE_MAX:
+                        opening_trace.append((now, measured_contact))
+                    # A stall anywhere cancels the goal — in or out of the
+                    # expected window.  The controller pressing a blocked
+                    # workpiece never terminates on its own (live evidence,
+                    # 2026-10-01), so without this the phase deadlocks to the
+                    # wall deadline.  Whether the stalled reading proves
+                    # contact stays the verdict's window check below.
+                    if stall_reference is None:
+                        stall_reference = (finger_1, finger_2)
+                        stall_entered_at = now
+                    else:
+                        drift = max(
+                            abs(finger_1 - stall_reference[0]),
+                            abs(finger_2 - stall_reference[1]),
+                        )
+                        if drift > GRIPPER_CONTACT_STALL_DRIFT_M:
+                            # Net progress toward the command re-anchors the
+                            # reference: the fingers have not stalled yet.
+                            stall_reference = (finger_1, finger_2)
+                            stall_entered_at = now
+                        elif (
+                            stall_entered_at is not None
+                            and now - stall_entered_at >= GRIPPER_CONTACT_STALL_S
+                        ):
+                            lifecycle = self.cancel_active()
+                            cancel_lifecycle = lifecycle
+                            if lifecycle.get("terminal") is True and lifecycle.get("safe") is True:
+                                details["contact_limited"] = True
+                                details["contact_opening_m"] = measured_contact
+                                details["cancel"] = lifecycle
+                                contact_limited = True
+                            break
+                except (KeyError, TypeError, ValueError):
+                    stall_reference = None
+                    stall_entered_at = None
+            if self._clock_fn() >= deadline:
+                break
+            self._sleep_fn(self._wait_step_s)
+        details["opening_trace"] = [
+            [round(when, 3), round(opening, 6)]
+            for when, opening in opening_trace
+        ]
+        if not contact_limited and not result_future.done():
+            lifecycle = cancel_lifecycle or self.cancel_active()
+            details["cancel"] = lifecycle
             self._active_handle = None
             self._active_goal_future = None
             self._active_result_future = None
@@ -2277,12 +2442,9 @@ class RosMoveItRuntime:
             wrapper.status, factories.goal_status_type()
         )
         result_states = self._isaac_state_count
-        while self._isaac_state_count <= result_states and self._clock_fn() < deadline:
-            self._spin_fn()
-            if self._isaac_state_count > result_states:
-                break
-            self._sleep_fn(self._wait_step_s)
+        final, gripper_settled = self._await_settled_gripper(result_states, deadline)
         details["post_result_state_messages"] = self._isaac_state_count - result_states
+        details["gripper_settled"] = gripper_settled
         common = {
             "goal_accepted": True,
             "terminal": True,
@@ -2290,7 +2452,6 @@ class RosMoveItRuntime:
             "action_status": details["action_status"],
         }
         commanded = float(target.opening_m)
-        final = self.latest_isaac_state()
         measured: float | None = None
         if (
             final is None
@@ -2301,12 +2462,21 @@ class RosMoveItRuntime:
                 "no complete isaac finger state was observed after the action"
             )
         else:
+            finger_1 = float(final["gripper_joint1"])
+            finger_2 = float(final["gripper_joint2"])
+            details["measured_finger_positions_m"] = {
+                "gripper_joint1": finger_1,
+                "gripper_joint2": finger_2,
+            }
             try:
-                measured = fingers_to_logical_gripper(
-                    float(final["gripper_joint1"]), float(final["gripper_joint2"])
-                )
+                measured = fingers_to_logical_gripper(finger_1, finger_2)
             except ValueError as exc:
-                details["measured_opening_error"] = str(exc)
+                try:
+                    measured = fingers_to_contact_opening(finger_1, finger_2)
+                    details["mimic_relation_deviation"] = str(exc)
+                    details["opening_measurement"] = "physical_finger_separation"
+                except ValueError:
+                    details["measured_opening_error"] = str(exc)
         window_low, window_high = (
             float(target.expected_opening_m[0]),
             float(target.expected_opening_m[1]),
@@ -2349,8 +2519,11 @@ class RosMoveItRuntime:
                 details=details,
                 **common,
             )
-        if details["action_status"] != "SUCCEEDED":
-            details["error"] = "gripper action did not report SUCCEEDED"
+        if details["action_status"] != "SUCCEEDED" and not (
+            details.get("contact_limited") is True
+            and details["action_status"] in {"CANCELED", "CANCELLED"}
+        ):
+            details["error"] = "gripper action did not report SUCCEEDED or safe contact-limited cancellation"
             return ExecutionResult(
                 status=ExecutionStatus.FAILED,
                 planned_waypoints=2,
@@ -2523,7 +2696,9 @@ class RosMoveItRuntime:
         position.link_name = link
         sphere = factories.solid_primitive_factory()
         sphere.type = getattr(type(sphere), "SPHERE")
-        sphere.dimensions = [float(target.position_tolerance_m)]
+        sphere.dimensions = [
+            float(target.position_tolerance_m) * POSE_GOAL_TOLERANCE_FRACTION
+        ]
         position.constraint_region.primitives.append(sphere)
         center = factories.pose_factory()
         center.position.x = float(target.position[0])
@@ -2541,7 +2716,9 @@ class RosMoveItRuntime:
         orientation.orientation.y = float(target.orientation_xyzw[1])
         orientation.orientation.z = float(target.orientation_xyzw[2])
         orientation.orientation.w = float(target.orientation_xyzw[3])
-        orientation_tolerance = float(target.orientation_tolerance_rad)
+        orientation_tolerance = (
+            float(target.orientation_tolerance_rad) * POSE_GOAL_TOLERANCE_FRACTION
+        )
         orientation.absolute_x_axis_tolerance = orientation_tolerance
         orientation.absolute_y_axis_tolerance = orientation_tolerance
         orientation.absolute_z_axis_tolerance = orientation_tolerance
@@ -2741,6 +2918,122 @@ class RosMoveItRuntime:
             names = [by_device[name] for name in names]
         return len(points), validate_trajectory_waypoints(names, points)
 
+    def _complete_pose_goal_via_arm(
+        self,
+        planned: Mapping[str, float],
+        factories: RosMoveItFactories,
+    ) -> dict[str, object]:
+        """Re-command one plan's final arm joints directly to the controller.
+
+        The container-side execution pipeline can stop streaming setpoints
+        when the MoveGroup trajectory ends while the simulated arm is still
+        short of the goal (live evidence, 2026-10-01: a descent plan
+        reported SUCCEEDED with the arm 67 mm from its target and frozen
+        there, independent of drive stiffness).  Re-sending the planned
+        final joints as this runtime's own FollowJointTrajectory goal with
+        tight per-joint tolerances keeps the controller active — the same
+        property that keeps the gripper actions honest — until the live
+        state converges or the bounded wait expires.
+
+        Returns:
+            JSON-safe lifecycle evidence; the caller re-verifies the pose.
+        """
+        evidence: dict[str, object] = {"attempted": True}
+        current = self.latest_isaac_state()
+        if current is None or any(name not in current for name in ARM_JOINT_NAMES):
+            evidence["attempted"] = False
+            evidence["error"] = "no complete live arm state to build the goal from"
+            return evidence
+        # The plan evidence names this robot's device joints on the wire; the
+        # state getters are canonical.  Project the planned final joints onto
+        # the canonical order before building the completion goal.
+        by_device = {
+            device: canonical
+            for canonical, device in zip(ARM_JOINT_NAMES, self._arm_joint_names)
+        }
+        planned_canonical: dict[str, float] = {}
+        for key, value in planned.items():
+            canonical = by_device.get(str(key), str(key))
+            if canonical in ARM_JOINT_NAMES and canonical not in planned_canonical:
+                planned_canonical[canonical] = float(value)
+        missing_planned = [name for name in ARM_JOINT_NAMES if name not in planned_canonical]
+        if missing_planned:
+            evidence["attempted"] = False
+            evidence["error"] = (
+                f"the plan evidence lacks canonical arm joints: {missing_planned}"
+            )
+            return evidence
+        if (
+            factories.follow_joint_trajectory_goal_factory is None
+            or factories.joint_trajectory_point_factory is None
+            or factories.joint_tolerance_factory is None
+            or factories.duration_factory is None
+        ):
+            evidence["attempted"] = False
+            evidence["error"] = "the injected factories carry no arm goal transport"
+            return evidence
+        if self._arm_client is None:
+            evidence["attempted"] = False
+            evidence["error"] = "arm action client is not registered"
+            return evidence
+        goal = factories.follow_joint_trajectory_goal_factory()
+        trajectory = goal.trajectory
+        trajectory.joint_names = list(self._arm_joint_names)
+        start = factories.joint_trajectory_point_factory()
+        start.positions = [float(current[name]) for name in ARM_JOINT_NAMES]
+        start.time_from_start = self._duration_message(0.0, factories)
+        end = factories.joint_trajectory_point_factory()
+        end.positions = [float(planned_canonical[name]) for name in ARM_JOINT_NAMES]
+        end.time_from_start = self._duration_message(
+            ARM_COMPLETION_DURATION_S, factories
+        )
+        trajectory.points = [start, end]
+        goal.goal_tolerance = []
+        for name in self._arm_joint_names:
+            tolerance = factories.joint_tolerance_factory()
+            tolerance.name = name
+            tolerance.position = ARM_COMPLETION_TOLERANCE_RAD
+            goal.goal_tolerance.append(tolerance)
+        deadline = self._clock_fn() + ARM_COMPLETION_TIMEOUT_S
+        try:
+            future = self._arm_client.send_goal_async(goal)
+            self._active_goal_future = future
+        except Exception as exc:
+            evidence["error"] = f"send_goal_async failed: {type(exc).__name__}: {exc}"
+            return evidence
+        if not self._wait_future(future, min(self._clock_fn() + ACCEPT_TIMEOUT_S, deadline)):
+            evidence["cancel"] = self.cancel_active()
+            self._active_goal_future = None
+            evidence["error"] = "arm completion goal was not accepted in time"
+            return evidence
+        handle = future.result()
+        self._active_goal_future = None
+        if handle is None or not getattr(handle, "accepted", False):
+            evidence["error"] = "arm controller did not accept the completion goal"
+            return evidence
+        self._active_handle = handle
+        self._active_result_future = handle.get_result_async()
+        result_future = self._active_result_future
+        accepted_at = self._clock_fn()
+        while not result_future.done() and self._clock_fn() < deadline:
+            self._spin_fn()
+            self._sleep_fn(self._wait_step_s)
+        terminal_status = None
+        if result_future.done():
+            wrapper = result_future.result()
+            terminal_status = _terminal_status_name(
+                wrapper.status, factories.goal_status_type()
+            )
+        else:
+            lifecycle = self.cancel_active()
+            evidence["cancel"] = lifecycle
+            terminal_status = "CANCELED" if lifecycle.get("terminal") is True else None
+        self._active_handle = None
+        self._active_result_future = None
+        evidence["duration_s"] = round(self._clock_fn() - accepted_at, 3)
+        evidence["action_status"] = terminal_status
+        return evidence
+
     def _verify_final(
         self,
         kind: str,
@@ -2775,7 +3068,23 @@ class RosMoveItRuntime:
             )
         if kind == "joint":
             return self._verify_joint_final(target, final, baseline, common, details)
-        return self._verify_pose_final(target, final, common, details)
+        result = self._verify_pose_final(target, final, common, details)
+        if result.status is not ExecutionStatus.SUCCEEDED:
+            planned = details.get("planned_final_joint_positions_rad")
+            if isinstance(planned, Mapping) and planned:
+                # The plan reached the goal; the container-side execution
+                # pipeline froze the arm short of it.  Re-command the planned
+                # final joints directly and re-verify against the same gates.
+                details["arm_completion"] = self._complete_pose_goal_via_arm(
+                    planned, self._resolve_factories()
+                )
+                retry_final, retry_settled = self._await_settled_final()
+                details["arm_completion_settled"] = retry_settled
+                if retry_final is not None and self._state_fresh():
+                    result = self._verify_pose_final(
+                        target, retry_final, common, details
+                    )
+        return result
 
     def _await_settled_final(self) -> tuple[dict[str, float] | None, bool]:
         """Bounded at-rest wait over live samples before the final verdict.
@@ -2903,11 +3212,11 @@ class RosMoveItRuntime:
         details["final_arm_joint_positions_rad"] = {
             name: float(final[name]) for name in ARM_JOINT_NAMES if name in final
         }
-        details["position_tolerance_m"] = MAX_POSITION_TOLERANCE_M
-        details["orientation_tolerance_rad"] = MAX_ORIENTATION_TOLERANCE_RAD
+        details["position_tolerance_m"] = float(target.position_tolerance_m)
+        details["orientation_tolerance_rad"] = float(target.orientation_tolerance_rad)
         if (
-            position_error > MAX_POSITION_TOLERANCE_M
-            or orientation_error > MAX_ORIENTATION_TOLERANCE_RAD
+            position_error > float(target.position_tolerance_m)
+            or orientation_error > float(target.orientation_tolerance_rad)
         ):
             details["error"] = (
                 "final live fk did not confirm the requested pose within tolerance"

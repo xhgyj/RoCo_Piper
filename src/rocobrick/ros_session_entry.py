@@ -574,10 +574,22 @@ def perform_operation(
                         "runtime; this runtime carries no robot id"
                     ),
                 )
+            # A gripper command is verified from the Isaac finger state after
+            # the action.  When the fingertips are physically in contact with
+            # the baseplate, the controller broadcaster can temporarily lag
+            # that state; do not let that arm-state comparison prevent the
+            # gripper action itself.  Arm/TCP operations retain the strict gate.
+            require_broadcaster_match = operation.kind != "GRIPPER_TARGET"
             waited_ok = bool(
-                runtime.wait_until_capability_ready(timeout_s=operation.timeout_s)
+                runtime.wait_until_capability_ready(
+                    timeout_s=operation.timeout_s,
+                    require_broadcaster_match=require_broadcaster_match,
+                )
             )
-            capability = runtime.capability_readiness(probe_scene=True)
+            capability = runtime.capability_readiness(
+                probe_scene=True,
+                require_broadcaster_match=require_broadcaster_match,
+            )
             readiness_passed = bool(waited_ok and capability.passed)
             evidence.update(
                 {

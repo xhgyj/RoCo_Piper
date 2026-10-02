@@ -2,7 +2,7 @@
   "schema": "rocobrick-piper-l-tcp-binding-contract/v1",
   "phase": "P0.4/R3",
   "model": "agilex_piper_l",
-  "collected_date_utc": "2026-09-21",
+  "collected_date_utc": "2026-10-02",
   "offline": true,
   "inputs": {
     "pinned_files": [
@@ -33,17 +33,17 @@
       },
       {
         "path": "config/calibration/piper_l_tcp_source.json",
-        "sha256": "5dc84e3a49844b44fa55312c96cb7507238967c5360569a9a0114e444c2c6d49",
+        "sha256": "b94ac37e9993117291e772066d2e9745d61001d83a21678ceaa151bdf12f9353",
         "source": "project calibration (live Isaac 5.1)"
       },
       {
         "path": "artifacts/model-audit/piper_l_tcp_selector_discovery.json",
-        "sha256": "22955bdee22cc7248251be101457b4a9a4478d249b13ff5ed9d3982387f43d9c",
+        "sha256": "7d9d93217684252d7c4c9817ac2385a79cf7639e7b8a53add7dbc4f4cb77b336",
         "source": "project calibration (live Isaac 5.1)"
       },
       {
         "path": "artifacts/model-audit/piper_l_tcp_calibration.json",
-        "sha256": "4e342f2cdf6d34970d741a091a46e671aee2e6da67be4189136260068b19645d",
+        "sha256": "3ba48537ed4f453c7e2507e042056128515e8a064adbab7a4c871b3ed2bc94cb",
         "source": "project calibration (live Isaac 5.1)"
       }
     ],
@@ -918,7 +918,7 @@
       "kind": "project_calibration",
       "classification": "project_calibration",
       "source": "artifacts/model-audit/piper_l_tcp_calibration.json",
-      "source_sha256": "4e342f2cdf6d34970d741a091a46e671aee2e6da67be4189136260068b19645d",
+      "source_sha256": "3ba48537ed4f453c7e2507e042056128515e8a064adbab7a4c871b3ed2bc94cb",
       "declared_tool_frame": true,
       "passed": true,
       "method": "symmetric-opposed-contact-patch-centroids",
@@ -927,9 +927,9 @@
       "parent_frame": "link6",
       "child_frame": "rocobrick_tcp",
       "translation_m": [
-        -2.189439796129733e-09,
-        -1.8041124150158794e-16,
-        0.06300922673030293
+        -1.887447531601083e-09,
+        -1.3530843112619095e-16,
+        0.1305895866844472
       ],
       "rotation_xyzw": [
         0.0,
@@ -939,9 +939,9 @@
       ],
       "runtime_model_sha256": "a781d52f9d55291fca9c8f2695abf9e311640d996314d272f47639d5323e2375",
       "selector_source": "config/calibration/piper_l_tcp_source.json",
-      "selector_source_sha256": "5dc84e3a49844b44fa55312c96cb7507238967c5360569a9a0114e444c2c6d49",
+      "selector_source_sha256": "b94ac37e9993117291e772066d2e9745d61001d83a21678ceaa151bdf12f9353",
       "selector_artifact": "artifacts/model-audit/piper_l_tcp_selector_discovery.json",
-      "selector_artifact_sha256": "22955bdee22cc7248251be101457b4a9a4478d249b13ff5ed9d3982387f43d9c",
+      "selector_artifact_sha256": "7d9d93217684252d7c4c9817ac2385a79cf7639e7b8a53add7dbc4f4cb77b336",
       "selector_checks_passed": true,
       "calibration_authority": "project",
       "simulation_only": true,
@@ -1019,9 +1019,9 @@
       "parent_frame": "link6",
       "child_frame": "rocobrick_tcp",
       "translation_m": [
-        -2.189439796129733e-09,
-        -1.8041124150158794e-16,
-        0.06300922673030293
+        -1.887447531601083e-09,
+        -1.3530843112619095e-16,
+        0.1305895866844472
       ],
       "rotation_xyzw": [
         0.0,
@@ -1030,7 +1030,7 @@
         1.0
       ],
       "source": "artifacts/model-audit/piper_l_tcp_calibration.json",
-      "sha256": "4e342f2cdf6d34970d741a091a46e671aee2e6da67be4189136260068b19645d"
+      "sha256": "3ba48537ed4f453c7e2507e042056128515e8a064adbab7a4c871b3ed2bc94cb"
     },
     "candidate_frames": [
       "link6",

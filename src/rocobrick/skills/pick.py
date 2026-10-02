@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import math
 from collections.abc import Mapping
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from typing import Protocol
 
 from rocobrick.execution.operation_state_ledger import OperationStateLedger
@@ -15,12 +16,12 @@ from rocobrick.isaac_backend import (
     planning_scene_operation,
     tcp_pose_operation,
 )
+from rocobrick.moveit_contract import GripperTarget
 from rocobrick.multi_robot_scheduler import (
     JSONValue,
     OperationExecution,
     OperationStatus,
 )
-from rocobrick.moveit_contract import GripperTarget
 from rocobrick.planning_scene import PlanningSceneUpdate, box_from_aabb, scene_digest
 from rocobrick.robot_operation_plan import RobotOperation
 from rocobrick.skills.observation import (
@@ -30,6 +31,51 @@ from rocobrick.skills.observation import (
 )
 from rocobrick.skills.targets import pick_targets, world_position_to_base
 from rocobrick.transit_adapter import TransitContext
+
+# The project TCP calibration defines rocobrick_tcp as the midpoint of the
+# two measured distal-finger contact-patch centroids; that frame is already
+# materialized in the MoveIt model, so the link6-to-TCP offset must never be
+# added to a TCP pose target.  The approach therefore commands the TCP to a
+# small positive clearance above the brick centre: the pads straddle the
+# side walls and the finger tips stay clear of the floor; the floor remains
+# an independent MoveIt collision constraint.
+PICK_CONTACT_SURFACE_CLEARANCE_M = 0.0035
+# Original-mounted tips extend 5.211 mm beyond the measured distal pad
+# centroid (135.8 mm tip depth minus 130.5896 mm calibrated TCP depth).
+FINGER_TIP_BELOW_TCP_M = 0.005211
+FLOOR_CONTACT_MARGIN_M = 0.005
+
+
+def _tcp_relative_aabb(sample: PickObservation) -> tuple[tuple[float, float, float], tuple[float, float, float]]:
+    """Transform the measured brick AABB corners into the TCP frame."""
+    qx, qy, qz, qw = sample.tcp_pose.orientation_xyzw
+    iq = (-qx, -qy, -qz, qw)
+
+    def rotate(vector):
+        vx, vy, vz = vector
+        tx = 2.0 * (iq[1] * vz - iq[2] * vy)
+        ty = 2.0 * (iq[2] * vx - iq[0] * vz)
+        tz = 2.0 * (iq[0] * vy - iq[1] * vx)
+        return (
+            vx + iq[3] * tx + (iq[1] * tz - iq[2] * ty),
+            vy + iq[3] * ty + (iq[2] * tx - iq[0] * tz),
+            vz + iq[3] * tz + (iq[0] * ty - iq[1] * tx),
+        )
+
+    corners = []
+    for x in (sample.aabb_min[0], sample.aabb_max[0]):
+        for y in (sample.aabb_min[1], sample.aabb_max[1]):
+            for z in (sample.aabb_min[2], sample.aabb_max[2]):
+                delta = (
+                    x - sample.tcp_pose.position_xyz[0],
+                    y - sample.tcp_pose.position_xyz[1],
+                    z - sample.tcp_pose.position_xyz[2],
+                )
+                corners.append(rotate(delta))
+    return (
+        tuple(min(point[index] for point in corners) for index in range(3)),
+        tuple(max(point[index] for point in corners) for index in range(3)),
+    )
 
 
 class PickObservationTransport(Protocol):
@@ -186,12 +232,13 @@ class PickHandler:
                     ),
                 )
             )
-        links = tuple(sorted(
-            (
-                (object_id, f"{admission.robot_id}_gripper_link1"),
-                (object_id, f"{admission.robot_id}_gripper_link2"),
-            )
-        ))
+        links = [
+            (object_id, f"{admission.robot_id}_gripper_link1"),
+            (object_id, f"{admission.robot_id}_gripper_link2"),
+        ]
+        links = tuple(sorted(links))
+        # The floor remains a hard constraint for every robot link.
+        # Allowed finger/brick contact must never authorize ground penetration.
         update = PlanningSceneUpdate(
             scene_id=f"{admission.operation_id}-pick-scene",
             boxes=tuple(boxes),
@@ -241,7 +288,23 @@ class PickHandler:
         else:
             terminal = execution.get("terminal") is True if isinstance(execution, Mapping) else False
             safe = execution.get("safe_to_release") is True if isinstance(execution, Mapping) else False
-        sent = record.get("motion_sent") is True if isinstance(record, Mapping) else True
+        command_messages = (
+            execution.get("command_messages") if isinstance(execution, Mapping) else None
+        )
+        runtime_evidence = (
+            raw_result.get("evidence") if isinstance(raw_result, Mapping) else None
+        )
+        sent = (
+            record.get("motion_sent") is True
+            or (
+                type(command_messages) is int
+                and command_messages > 0
+            )
+            or (
+                isinstance(runtime_evidence, Mapping)
+                and runtime_evidence.get("motion_sent") is True
+            )
+        )
         evidence: dict[str, JSONValue] = {
             "phase": phase,
             "request_id": runtime_operation.request_id,
@@ -265,6 +328,13 @@ class PickHandler:
         A successful gripper action is only a mechanical feedback gate.
         Contact/holding is confirmed later by the lifted brick following the
         TCP, because the current scene contract exposes no force sensor.
+
+        Closing onto a real brick can never reach the commanded opening: the
+        fingers stall against the workpiece, the runtime cancels the stalled
+        goal safely and reports ``contact_limited`` with the stalled opening
+        (already window-checked by the runtime).  That evidence path is
+        accepted here exactly as narrowly as the runtime verdict rule: a
+        plain cancellation without ``contact_limited`` still fails closed.
         """
         runtime = evidence.get("runtime")
         execution = runtime.get("execution") if isinstance(runtime, Mapping) else None
@@ -281,22 +351,52 @@ class PickHandler:
         accepted = execution.get("goal_accepted") is True
         terminal = execution.get("terminal") is True
         safe = execution.get("safe_to_release") is True
-        status = execution.get("action_status") == "SUCCEEDED"
+        action_status = execution.get("action_status")
+        contact_limited = details.get("contact_limited") is True
+        cancel = details.get("cancel")
+        contact_opening = details.get("contact_opening_m")
+        status_ok = action_status == "SUCCEEDED"
+        if contact_limited:
+            status_ok = (
+                action_status in ("CANCELED", "CANCELLED")
+                and isinstance(cancel, Mapping)
+                and cancel.get("terminal") is True
+                and cancel.get("safe") is True
+                and details.get("gripper_settled") is True
+                and not isinstance(contact_opening, bool)
+                and isinstance(contact_opening, (int, float))
+                and math.isfinite(contact_opening)
+            )
         if (
             isinstance(measured, bool)
             or not isinstance(measured, (int, float))
+            or not math.isfinite(measured)
             or not isinstance(window, (list, tuple))
             or len(window) != 2
-            or not all(isinstance(value, (int, float)) for value in window)
+            or not all(
+                not isinstance(value, bool)
+                and isinstance(value, (int, float))
+                and math.isfinite(value)
+                for value in window
+            )
+            or isinstance(post_state, bool)
             or not isinstance(post_state, int)
             or post_state < 1
             or not (float(window[0]) <= float(measured) <= float(window[1]))
-            or not all((accepted, terminal, safe, status))
+            or not all((accepted, terminal, safe, status_ok))
+            or (
+                contact_limited
+                and not (float(window[0]) <= contact_opening <= float(window[1]))
+            )
         ):
             raise ValueError("close gripper feedback did not prove the commanded opening")
         return {
             "goal_accepted": True,
-            "action_status": "SUCCEEDED",
+            "action_status": action_status,
+            "contact_limited": contact_limited,
+            "contact_opening_m": (
+                float(contact_opening) if contact_limited else None
+            ),
             "terminal": True,
             "safe_to_release": True,
             "measured_opening_m": float(measured),
@@ -374,6 +474,56 @@ class PickHandler:
                 context.provenance,
                 context.params,
             )
+            center_x = (
+                admission.sample.aabb_min[0] + admission.sample.aabb_max[0]
+            ) / 2.0
+            center_y = (
+                admission.sample.aabb_min[1] + admission.sample.aabb_max[1]
+            ) / 2.0
+            center_z = (
+                admission.sample.aabb_min[2] + admission.sample.aabb_max[2]
+            ) / 2.0
+            # The rocobrick_tcp frame already sits at the finger contact
+            # patches in the MoveIt model (the calibrated link6->TCP offset
+            # lives only in the model and must never be re-added here), so
+            # the approach TCP height is the brick centre plus a small
+            # positive clearance, clamped so the finger tips (which reach
+            # FINGER_TIP_BELOW_TCP_M below the pad plane with the tool
+            # vertical) stay FLOOR_CONTACT_MARGIN_M above the configured
+            # ground top: tips grazing the floor through the PhysX contact
+            # offset previously let the pads lose the brick.
+            contact_world_z = center_z + PICK_CONTACT_SURFACE_CLEARANCE_M
+            floor_bound = None
+            if context.ground is not None:
+                floor_bound = (
+                    context.ground.top_z_m
+                    + FINGER_TIP_BELOW_TCP_M
+                    + FLOOR_CONTACT_MARGIN_M
+                )
+                contact_world_z = max(contact_world_z, floor_bound)
+            contact_base = world_position_to_base(
+                (center_x, center_y, contact_world_z), context.base
+            )
+            approach_z = contact_base[2]
+            targets = replace(
+                targets,
+                approach=replace(
+                    targets.approach,
+                    position=(targets.approach.position[0],
+                              targets.approach.position[1], approach_z),
+                ),
+            )
+            evidence["approach_contact_surface"] = {
+                "source": "piper_l_tcp_calibration_contact_patch_midpoint",
+                "contact_clearance_m": PICK_CONTACT_SURFACE_CLEARANCE_M,
+                "brick_center_world_z_m": center_z,
+                "contact_tcp_world_z_m": contact_world_z,
+                "floor_tip_clearance_bound_m": floor_bound,
+                "finger_tip_below_tcp_m": FINGER_TIP_BELOW_TCP_M,
+                "floor_contact_margin_m": FLOOR_CONTACT_MARGIN_M,
+                "selected_tcp_base_z_m": approach_z,
+                "floor_collision_checked_by_moveit": context.ground is not None,
+            }
             evidence.update({
                 "target_identity_checked": {
                     "operation_id": admission.operation_id,
@@ -454,16 +604,23 @@ class PickHandler:
                 manifest_sha256=self._manifest_sha256,
             )
             evidence["grasp_observation"] = asdict(grasp_sample)
-            attach_payload = self._planning_payload(admission, context, grasp_sample)
+            attach_minimum, attach_maximum = _tcp_relative_aabb(grasp_sample)
+            attach_frame = f"{admission.robot_id}_rocobrick_tcp"
+            attach_geometry_digest = box_from_aabb(
+                object_id=admission.physical_instance_id,
+                frame_id=attach_frame,
+                minimum_m=attach_minimum,
+                maximum_m=attach_maximum,
+            ).geometry_digest
             attach = attached_planning_scene_operation(
                 {
                     "scene_id": f"{operation.operation_id}-attach",
                     "object_id": admission.physical_instance_id,
-                    "link_name": f"{admission.robot_id}_rocobrick_tcp",
-                    "frame_id": f"{admission.robot_id}_world",
-                    "minimum_m": list(grasp_sample.aabb_min),
-                    "maximum_m": list(grasp_sample.aabb_max),
-                    "geometry_digest": attach_payload["boxes"][0]["geometry_digest"],
+                    "link_name": attach_frame,
+                    "frame_id": attach_frame,
+                    "minimum_m": list(attach_minimum),
+                    "maximum_m": list(attach_maximum),
+                    "geometry_digest": attach_geometry_digest,
                     "touch_links": [
                         f"{admission.robot_id}_gripper_link1",
                         f"{admission.robot_id}_gripper_link2",
@@ -490,7 +647,13 @@ class PickHandler:
                 manifest_sha256=self._manifest_sha256,
             )
             evidence["lift_start_observation"] = asdict(lift_start)
-            samples = [lift_start]
+            # The reference sample is the GRASP observation (before the
+            # lift): the lift motion settles before this point, so a sample
+            # taken now already shows the brick at its lifted height and the
+            # lift delta would always be zero.  The grasp sample anchors the
+            # "did the object actually rise" half of the proof; the samples
+            # below prove the brick keeps following the TCP afterwards.
+            samples = [grasp_sample, lift_start]
             for _ in range(2):
                 await asyncio.sleep(self._poll_interval_s)
                 sample = parse_pick_observation(
@@ -504,7 +667,9 @@ class PickHandler:
             holding = verify_pick_following(
                 samples,
                 position_tolerance_m=context.params.hold_follow_tolerance_m,
-                orientation_tolerance_rad=context.params.orientation_tolerance_rad,
+                orientation_tolerance_rad=(
+                    context.params.follow_orientation_tolerance_rad
+                ),
                 minimum_lift_m=context.params.lift_height_m * 0.5,
             )
             evidence["holding_confirmed"] = holding

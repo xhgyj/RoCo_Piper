@@ -5,7 +5,7 @@ Stage 1 (selector discovery, fail-closed): compose the CURRENT runtime USD at
 ``/World/Robot_0`` with no physics play/step, locate the exact finger collision
 mesh prims (USD prim instances matching the historical runtime paths), read the
 complete composed mesh topology, and map the reviewed STL candidate patch
-(seven coplanar distal facets) into USD face indices by GEOMETRY ONLY — a
+(four coplanar distal contact facets) into USD face indices by GEOMETRY ONLY — a
 connected, coplanar patch whose area, centroid and polygon vertices match the
 reviewed STL candidate within explicit tolerances, required to be unique. No
 face-index assumption and no whole-link bounding box is used anywhere. The
@@ -107,12 +107,12 @@ FK_BODIES = (
     "gripper_link2",
 )
 
-# Reviewed STL candidate: 0-based facets 2..8 of both finger STLs, seven
-# coplanar z=0.004 triangles. The signature is recomputed from the actual STL
-# bytes at runtime and must match these frozen review values.
-STL_FACET_RANGE = (2, 8)
-FROZEN_PATCH_AREA_MM2 = 84.599979
-FROZEN_PATCH_CENTROID_M = (0.0, -0.07279077972, 0.004)
+# The independent visual material occupies these four distal inward facets.
+# Original mounting maps mesh y in [-10.02, 0] mm to link6 z in
+# [125.78, 135.8] mm; the former facets 2..8 belong to the proximal mount.
+STL_FACET_RANGE = (545, 548)
+FROZEN_PATCH_AREA_MM2 = 229.62416578290856
+FROZEN_PATCH_CENTROID_M = (0.0, -0.005210419428327403, 0.0)
 
 TCP_DEFINITION = {
     "parent_frame": "link6",
@@ -127,8 +127,8 @@ TCP_DEFINITION = {
         "y": "closing direction",
         "z": "same as link6",
     },
-    "expected_candidate_translation_m": [0.0, 0.0, 0.06300922028],
-    "expected_patch_separation_m": "opening + 0.008",
+    "expected_candidate_translation_m": [0.0, 0.0, 0.1305895805716726],
+    "expected_patch_separation_m": "opening + 0.0",
     "authority": CALIBRATION_AUTHORITY,
     "official_or_hardware_tcp": False,
 }
@@ -145,7 +145,7 @@ FINGER_JOINTS = {
 }
 DOF_ORDER = ARM_JOINTS + ["gripper_joint1", "gripper_joint2"]
 OPENINGS = [0.0, 0.025, 0.05, 0.075, 0.1]
-GRIPPER_CENTER_OFFSET_M = 0.008
+GRIPPER_CENTER_OFFSET_M = 0.0
 AXIS_VECTORS = {"X": (1.0, 0.0, 0.0), "Y": (0.0, 1.0, 0.0), "Z": (0.0, 0.0, 1.0)}
 
 THRESHOLDS = {
@@ -1067,7 +1067,13 @@ def evaluate_sample(context) -> dict:
     n1_link6 = _unit(to_link6(n1))
     separation_vector = _sub(c2, c1)
     separation = _norm(separation_vector)
-    sep_axis_link6 = _unit(to_link6(separation_vector))
+    # At logical zero the distal faces coincide. Their opposed normals
+    # define the closing axis without normalizing a numerical zero vector.
+    sep_axis_link6 = (
+        _unit(to_link6(separation_vector))
+        if separation > THRESHOLDS["opening_error_m"]
+        else n1_link6
+    )
     midpoint = tuple((c1[k] + c2[k]) / 2.0 for k in range(3))
     translation_link6 = apply_matrix(link6_inv, midpoint)
     reconstruction = _norm(_sub(

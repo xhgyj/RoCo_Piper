@@ -41,20 +41,16 @@ contract libraries and a future execution backend. Every invocation:
    mode (``allow_legacy_results=False``) over
    :class:`rocobrick.robot_operation_executor.SkillOperationExecutor`, which
    observes the real scene through the session's read-only ``observe``
-   transport. In this phase only a genuinely observed WAIT can be
-   confirmed; PICK, TRANSIT and PLACE_DOWN fail closed with
-   ``CAPABILITY_UNAVAILABLE`` and ``motion_sent=False``. The session is
-   stopped with cleanup evidence in a ``finally`` block on every path, and
-   ``robot-operation-plan-run.json`` (schema
-   ``rocobrick-operation-plan-run/v1``) records readiness, per-robot
+   transport. WAIT, TRANSIT and PICK use their available evidence backends;
+   PLACE_DOWN remains fail closed until its connection, release and retreat
+   evidence path is complete. The session is stopped with cleanup evidence in
+   a ``finally`` block on every path, and ``robot-operation-plan-run.json``
+   (schema ``rocobrick-operation-plan-run/v1``) records readiness, per-robot
    isolated operations, layers, cancellations, resources, cleanup, the
-   immutable input digests and the aggregate ``passed`` verdict. A final
-   semantic check additionally requires every pending STAP task's assembly
-   effect to be evidenced by one CONFIRMED ``PLACE_DOWN`` operation for that
-   exact task/part/robot carrying the required connection, release and
-   retreat labels; binding the external plan to the STAP plan is never
-   assembly evidence, so a run that only confirms an observation (for
-   example a WAIT) stays ``EXECUTION_FAILED`` while any task is unassembled.
+   immutable input digests and the aggregate ``passed`` verdict. STAP-backed
+   runs additionally require pending assembly effects to be evidenced by
+   CONFIRMED PLACE_DOWN operations; direct robot-operation-plan runs have no
+   STAP assembly effect to evaluate.
    Terminal statuses: ``INVALID_INPUT`` (2) for a malformed or unbindable
    external plan, ``UNRESOLVED_TCP`` (4) when the TCP authorization denies,
    ``RUNTIME_START_FAILED`` (8) when the session or any robot readiness
@@ -67,36 +63,34 @@ contract libraries and a future execution backend. Every invocation:
    the external operation plan and after the runtime — and fails with
    ``INPUT_MUTATED`` if any digest changed (IMMUTABILITY).
 9. ``--robot-operation-plan`` WITHOUT ``--task``/``--plan`` is the
-   structure-only preflight. It requires ``--structure-goal`` (which is
+   structure-bound direct path. It requires ``--structure-goal`` (which is
    never defaulted); ``--structure-start`` is optional and an omitted flag
    or the literal empty string both mean EMPTY initial structure, and the
-   preflight inputs record that choice explicitly (``start_provided`` and
+   inputs record that choice explicitly (``start_provided`` and
    ``start_empty``) without inventing a digest for an absent start. The
    named original inputs must also stay distinct files: the plan, the goal,
    a supplied start and the optional scene manifest and config are rejected
    with ``INVALID_INPUT`` (2) when any two of them resolve to the same file,
-   strictly before the binder runs. The
-   external plan is read, copied verbatim, hashed and validated with
-   ``parse_robot_operation_plan(source_plan=None)``, then bound to the exact
-   structure files with
+   strictly before the binder runs. The external plan is read, copied
+   verbatim, hashed and validated with ``parse_robot_operation_plan(source_plan=None)``,
+   then bound to the exact structure files with
    :func:`rocobrick.plan.structure_scene.build_structure_scene_plan_from_files`
-   and only afterwards is the TCP claim re-derived. This mode never creates
-   a session, never schedules an operation and never sends motion, and it
-   synthesizes no STAP plan: the bound structure carrier is not an
-   ``assembly-plan/v2`` document. A valid preflight therefore ends
-   ``EXECUTION_NOT_IMPLEMENTED`` (7) with the explicit reason that there is
-   no authoritative STAP authorization, a failed TCP gate keeps its own
-   status, invalid plan/structure input ends ``INVALID_INPUT`` (2) before
-   any session exists and changed original inputs end ``INPUT_MUTATED`` (6).
-   ``passed`` is never true in this mode and no assembly effect is ever
-   reported. Only the ``--task``/``--plan`` STAP path can dispatch.
+   and only afterwards is the TCP claim re-derived. By default this path
+   executes: the scene manifest, snapshot, host id and config paths are
+   filled from the fresh run directory and repository defaults, and the
+   Isaac host generates the manifest from its loaded scene before PICK
+   dispatch. With ``--preflight-only`` the same invocation becomes the
+   no-runtime preflight: no scene path is invented, no session is created,
+   no operation is scheduled and no motion is sent.
 
 The program is offline and pure apart from its evidence directory and the
-explicit ``--task``/``--plan`` plus ``--robot-operation-plan`` runtime
-bridge: without it, it imports no runtime adapter module, and it writes
-evidence (input copies, phase events, ``preflight.json``, and
-``result.json``) only inside its own run directory. Exactly one final JSON
-line is printed to stdout; diagnostics go to stderr.
+explicit ``--task``/``--plan`` STAP or structure-bound
+``--robot-operation-plan`` runtime bridge: without dispatch (no
+``--robot-operation-plan``, or the ``--preflight-only`` direct form) it
+imports no runtime adapter module. It writes evidence (input copies, phase
+events, ``preflight.json``, and ``result.json``) only inside its own run
+directory. Exactly one final JSON line is printed to stdout; diagnostics go
+to stderr.
 """
 
 from __future__ import annotations
@@ -334,8 +328,9 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="PLAN_JSON",
         help=(
             "assembly-plan/v2 STAP plan JSON file; read-only, together with "
-            "--task; omit both to select the structure-only "
-            "--robot-operation-plan preflight"
+            "--task; omit both to select the structure-bound "
+            "--robot-operation-plan path (add --preflight-only for the "
+            "no-runtime preflight)"
         ),
     )
     parser.add_argument(
@@ -393,7 +388,7 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="GOAL_JSON",
         dest="structure_goal",
         help=(
-            "goal structure JSON of a structure-only "
+            "goal structure JSON of a structure-bound "
             "--robot-operation-plan invocation (no --task/--plan STAP "
             "source); required in that mode and never defaulted"
         ),
@@ -404,7 +399,7 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="START_JSON",
         dest="structure_start",
         help=(
-            "optional initial structure JSON of a structure-only "
+            "optional initial structure JSON of a structure-bound "
             "--robot-operation-plan invocation; an omitted flag or the "
             "literal empty string both mean EMPTY initial structure"
         ),
@@ -418,10 +413,11 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "the ONLY production dispatch entry: an external "
             "robot-operation-plan/v1 document, validated against the "
-            "read-only assembly-plan/v2 binding and then executed through "
-            "the real multi-robot session; requires the full scene option "
-            "group and cannot be combined with --preflight-only"
+            "assembly-plan/v2 binding (with --task/--plan) or the explicit "
+            "structure inputs, then executed through the real multi-robot "
+            "session; scene paths default into the run directory"
         ),
+
     )
     return parser
 
@@ -680,6 +676,49 @@ def _rederive_tcp(tcp_record: dict[str, object]) -> TcpContract:
     return contract
 
 
+def _derive_pick_collision_filter(
+    args: "_Arguments",
+    robot_ids: tuple[str, ...],
+) -> tuple[str | None, tuple[str, ...]]:
+    """Derive the narrow Isaac collision filter for direct PICK execution.
+
+    Returns the unique PICK executor and its target physical-instance ids.
+    Ambiguous multi-robot assignments return ``(None, ())``.
+    """
+    plan_path = getattr(args, "robot_operation_plan_path", None)
+    if plan_path is None or not plan_path.is_file():
+        return None, ()
+    try:
+        document = json.loads(plan_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None, ()
+    operations = document.get("operations")
+    if not isinstance(operations, list):
+        return None, ()
+    by_robot: dict[str, set[str]] = {}
+    for operation in operations:
+        if not isinstance(operation, Mapping) or operation.get("skill") != "PICK":
+            continue
+        robot_id = operation.get("executor_robot_id")
+        target = operation.get("target")
+        physical_id = (
+            target.get("physical_instance_id")
+            if isinstance(target, Mapping)
+            else None
+        )
+        if (
+            isinstance(robot_id, str)
+            and robot_id in robot_ids
+            and isinstance(physical_id, str)
+            and physical_id
+        ):
+            by_robot.setdefault(robot_id, set()).add(physical_id)
+    if len(by_robot) != 1:
+        return None, ()
+    robot_id, instance_ids = next(iter(by_robot.items()))
+    return robot_id, tuple(sorted(instance_ids))
+
+
 def _create_session(
     session_dir: Path,
     args: "_Arguments",
@@ -712,6 +751,9 @@ def _create_session(
         SubprocessRunner,
     )
 
+    collision_filter_robot_id, collision_filter_instance_ids = (
+        _derive_pick_collision_filter(args, robot_ids)
+    )
     config = MultiRobotSessionConfig(
         repo_root=REPO_ROOT,
         robot_ids=robot_ids,
@@ -727,6 +769,8 @@ def _create_session(
         structure_dir=args.structure_dir,
         structure_goal_path=args.structure_goal,
         structure_start_path=args.structure_start,
+        collision_filter_robot_id=collision_filter_robot_id,
+        collision_filter_instance_ids=collision_filter_instance_ids,
         verify_plan_robots=not (
             args.robot_operation_plan_path is not None
             and args.plan_path is None
@@ -1334,14 +1378,14 @@ def _robot_operation_plan_phase(
         load_transit_contexts,
     )
     from rocobrick.execution.operation_state_ledger import OperationStateLedger
-    from rocobrick.skills.pick import PickHandler
     from rocobrick.robot_operation_executor import SkillOperationExecutor
-    from rocobrick.tcp_contract import EXPECTED_RUNTIME_MODEL_SHA256
     from rocobrick.robot_operation_runner import (
         RUN_SCHEMA,
         OperationPlanRunner,
         serialize_run_result,
     )
+    from rocobrick.skills.pick import PickHandler
+    from rocobrick.tcp_contract import EXPECTED_RUNTIME_MODEL_SHA256
 
     plan_record: dict[str, object] = {
         "path": str(args.robot_operation_plan_path),
@@ -1733,7 +1777,10 @@ def _robot_operation_plan_phase(
             "evidenced_task_ids": [],
             "missing_task_ids": [],
             "tasks": [],
-            "reason": "no assembly-plan/v2 binding is required for robot-operation-plan simulation",
+            "reason": (
+                "no assembly-plan/v2 binding is required for "
+                "robot-operation-plan simulation"
+            ),
         }
     )
     assembly_effects_passed = assembly_effects.get("passed") is True
@@ -2017,29 +2064,26 @@ def _structure_carrier_summary(
 def _run_robot_operation_plan_primary(
     args: _Arguments, run_dir: Path, recorder: EvidenceRecorder
 ) -> RunOutcome:
-    """Preflight one structure-only ``--robot-operation-plan`` invocation.
+    """Validate and, when authorized, execute a direct operation plan.
 
-    This invocation carries no ``--task``/``--plan`` STAP source. The
-    external ``robot-operation-plan/v1`` bytes are read, copied verbatim,
-    hashed and validated with ``parse_robot_operation_plan(source_plan=None)``
-    and bound to the exact ``--structure-goal`` (and optional
-    ``--structure-start``) files with
-    :func:`rocobrick.plan.structure_scene.build_structure_scene_plan_from_files`
-    BEFORE the TCP claim is re-derived; every step is audited as an event
-    even when it fails. Before the binder runs, the named original inputs are
-    audited for aliasing: the plan, the goal, a supplied start and the
-    optional scene manifest and config must resolve to distinct files, and an
-    aliased pair ends ``INVALID_INPUT`` with no binding. The preflight inputs
-    also record the start choice explicitly (``start_provided`` and
-    ``start_empty``); an omitted or empty-string start is EMPTY initial
-    structure and never receives an invented SHA-256. No session is ever
-    created here: ``piper-run``
-    synthesizes no ``assembly-plan/v2`` STAP plan, so there is no
-    authoritative STAP authorization to dispatch. A valid preflight therefore
-    ends ``EXECUTION_NOT_IMPLEMENTED`` with that explicit reason, invalid plan
-    or structure input ends ``INVALID_INPUT`` before any session can exist, a
-    failed TCP gate keeps its own status, and a digest change of any original
-    input ends ``INPUT_MUTATED``. The outcome is never ``passed``.
+    Without an authoritative STAP source this path still validates and binds
+    the external operation plan to explicit structure inputs. A complete scene
+    option group then permits the shared real runtime for skills with available
+    backends; the direct path does not synthesize STAP authorization or
+    assembly-effect evidence.
+    The explicit structure inputs are captured and bound before the TCP claim is
+    re-derived; every step is audited as an event. Before the binder runs, the
+    named original inputs are audited for aliasing: the plan, the goal, a
+    supplied start and the optional scene manifest and config must resolve to
+    distinct files, and an aliased pair ends ``INVALID_INPUT`` with no binding.
+    The inputs also record the start choice explicitly; an omitted or
+    empty-string start is EMPTY initial structure and never receives an
+    invented SHA-256. With a complete runtime option group, the shared runtime
+    dispatch is authorized by the same TCP gate and executor used by the STAP
+    path. Without that group, the invocation remains a no-runtime preflight.
+    A direct run does not synthesize an ``assembly-plan/v2`` STAP plan or
+    evaluate STAP assembly effects.
+
 
     Args:
         args: Parsed arguments of a structure-only invocation.
@@ -2144,18 +2188,11 @@ def _run_robot_operation_plan_primary(
     payload: Mapping[str, object] | None = None
     operation_plan = None
     start_path_for_builder: Path | None = None
-    direct_runtime_group = all(
-        value is not None
-        for value in (
-            args.scene_manifest,
-            args.scene_snapshot_out,
-            args.host_instance_id,
-            args.config_path,
-        )
-    )
-    # Only TRANSIT and WAIT are eligible for direct runtime dispatch until
-    # the real PICK and PLACE_DOWN evidence backends are complete.
-    direct_dispatch = False
+    # Scene paths are materialized into the fresh run directory by
+    # _materialize_direct_defaults, so direct runtime dispatch is available
+    # unless the caller explicitly requested the no-runtime preflight.
+    # PLACE_DOWN remains fail-closed.
+    direct_dispatch = not args.preflight_only
 
     # Phase 1: IMMUTABLE_INPUT. Every original input is read once, hashed and
     # copied verbatim; the goal is required and the start, scene manifest and
@@ -2358,13 +2395,11 @@ def _run_robot_operation_plan_primary(
             "validated": True,
         })
         checks["robot_operation_plan_validated"] = True
-        direct_dispatch = direct_runtime_group and all(
-            operation.skill in {"TRANSIT", "WAIT"}
+        direct_dispatch = direct_dispatch and all(
+            operation.skill in {"TRANSIT", "WAIT", "PICK"}
             for operation in operation_plan.operations.values()
         )
-        checks["direct_runtime_skills_supported"] = (
-            not direct_runtime_group or direct_dispatch
-        )
+        checks["direct_runtime_skills_supported"] = direct_dispatch
         recorder.append_event({
             "phase": "robot_operation_plan",
             "status": "VALIDATED",
@@ -2525,23 +2560,23 @@ def _run_robot_operation_plan_primary(
             "reason": terminal[1],
         })
 
-    # Phase 6: execute only the validated TRANSIT/WAIT direct path.
+    # Phase 6: execute the validated no-STAP path for skills with real
+    # backends. PLACE_DOWN remains fail-closed until its connection, release,
+    # and retreat evidence backend is complete.
     if terminal is None and direct_dispatch:
         runtime_terminal = _robot_operation_plan_phase(
             args, record, recorder, contract, None
         )
         terminal = runtime_terminal or (
             RunStatus.EXECUTED,
-            "TRANSIT/WAIT robot operation plan completed with confirmed "
-            "evidence and successful cleanup",
+            "robot operation plan completed with confirmed evidence and "
+            "successful cleanup",
         )
     elif terminal is None:
         terminal = (
             RunStatus.EXECUTION_NOT_IMPLEMENTED,
-            f"{NO_STAP_AUTHORIZATION}: the plan was validated, but direct "
-            "runtime dispatch is currently limited to TRANSIT and WAIT; "
-            "PICK/PLACE_DOWN require their real evidence backends before "
-            "they can start a session",
+            f"{NO_STAP_AUTHORIZATION}: the plan contains a skill without a "
+            "real direct-execution backend; PLACE_DOWN remains fail-closed",
         )
 
     # Phase 7: IMMUTABILITY after all phases and the terminal documents.
@@ -2626,7 +2661,9 @@ def _run_robot_operation_plan_primary(
         recorder.write_json(PLAN_RUN_NAME, run_document)
         recorder.write_json("preflight.json", record)
         result = FinalResult(
-            input_valid=status not in (RunStatus.INVALID_INPUT, RunStatus.INPUT_MUTATED),
+            input_valid=(
+                status not in (RunStatus.INVALID_INPUT, RunStatus.INPUT_MUTATED)
+            ),
             tasks_complete=checks.get("structure_scene_validated") is True,
             structure_valid=checks.get("structure_scene_validated") is True,
             execution_safe=status is RunStatus.EXECUTED,
@@ -2785,7 +2822,19 @@ def _run_robot_operation_plan_primary(
 
 
 def _materialize_direct_defaults(args: _Arguments, run_dir: Path) -> _Arguments:
-    """Fill internal runtime paths for a direct robot plan."""
+    """Fill internal runtime paths for a direct robot plan.
+
+    Args:
+        args: Parsed invocation arguments.
+        run_dir: Fresh evidence directory used for generated paths.
+
+    Returns:
+        The arguments with direct-runtime defaults materialized; an explicit
+        no-runtime preflight request is passed through unchanged so no scene
+        path is ever invented for it.
+    """
+    if args.preflight_only:
+        return args
     if args.robot_operation_plan_path is None:
         return args
     return replace(
@@ -3005,7 +3054,11 @@ def _run(args: _Arguments) -> RunOutcome:
         # external document and authorizes the calibrated TCP strictly before
         # any real session exists.
         if binding is not None:
-            if terminal is None and args.robot_operation_plan_path is not None:
+            if (
+                terminal is None
+                and args.robot_operation_plan_path is not None
+                and not args.preflight_only
+            ):
                 record["dispatch"] = {
                     "implemented": True,
                     "dispatch_requested": True,
@@ -3261,12 +3314,14 @@ def _parse_arguments(argv: list[str] | None) -> _Arguments:
     """Parse the command line into an ``_Arguments`` value.
 
     ``--robot-operation-plan`` without ``--task``/``--plan`` selects the
-    structure-only preflight: it then requires ``--structure-goal`` (never
-    defaulted) and accepts an optional ``--structure-start`` whose omitted
-    flag and literal empty string both mean EMPTY initial structure. With
-    ``--task``/``--plan`` the established STAP path is preserved unchanged,
-    including its required ``--backend`` and its full scene option group when
-    it also carries ``--robot-operation-plan``.
+    structure-bound direct path: it requires ``--structure-goal`` (never
+    defaulted) and, unless ``--preflight-only`` is passed, executes through
+    the real session with scene paths materialized into the run directory;
+    ``--preflight-only`` turns the same invocation into the no-runtime
+    preflight. With ``--task``/``--plan`` the established STAP path is
+    preserved unchanged, including its required ``--backend``, its full scene
+    option group when it also carries ``--robot-operation-plan`` and the
+    rejection of ``--preflight-only`` combinations with dispatch.
 
     Args:
         argv: Raw arguments, or ``None`` to use ``sys.argv[1:]``.
@@ -3279,36 +3334,17 @@ def _parse_arguments(argv: list[str] | None) -> _Arguments:
     """
     namespace = build_parser().parse_args(argv)
     direct = namespace.robot_operation_plan is not None
-    if direct and namespace.preflight_only:
+    if direct and namespace.preflight_only and (
+        namespace.task is not None or namespace.plan is not None
+    ):
         raise _UsageError(
             "--robot-operation-plan cannot be combined with --preflight-only"
         )
-    runtime_option_supplied = any(
-        value is not None
-        for value in (
-            namespace.scene_manifest,
-            namespace.scene_snapshot_out,
-            namespace.host_instance_id,
-            namespace.config,
-        )
-    )
-    runtime_option_complete = all(
-        value is not None
-        for value in (
-            namespace.scene_manifest,
-            namespace.scene_snapshot_out,
-            namespace.host_instance_id,
-            namespace.config,
-        )
-    )
     structure_only = (
         direct
         and namespace.task is None
         and namespace.plan is None
-        and (
-            namespace.structure_goal is None
-            or (runtime_option_supplied and not runtime_option_complete)
-        )
+        and namespace.preflight_only
     )
     if structure_only:
         if namespace.structure_goal is None:
@@ -3323,7 +3359,7 @@ def _parse_arguments(argv: list[str] | None) -> _Arguments:
             backend=namespace.backend or BACKENDS[0],
             robot_id=namespace.robot_id,
             run_dir=namespace.run_dir,
-            preflight_only=False,
+            preflight_only=True,
             robot_operation_plan_path=namespace.robot_operation_plan,
             scene_manifest=namespace.scene_manifest,
             scene_snapshot_out=namespace.scene_snapshot_out,

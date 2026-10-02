@@ -26,13 +26,13 @@ from rocobrick.planning_scene import (
 from rocobrick.runtime_session import RuntimeSessionError
 from rocobrick.session_phase_backend import SessionPhaseBackend, SkillStepSpec
 from rocobrick.skill_execution import execute_skill
-from rocobrick.skills import PhaseStatus, SkillPhase
 from rocobrick.skill_targets import (
     RobotBaseFrame,
     SkillParams,
     TcpProvenance,
     pick_targets,
 )
+from rocobrick.skills import PhaseStatus, SkillPhase
 
 EXPECTED_RUNTIME_MODEL_SHA256 = (
     "a781d52f9d55291fca9c8f2695abf9e311640d996314d272f47639d5323e2375"
@@ -52,8 +52,11 @@ FRAME = "world"
 GROUND_MIN = (1.0, 1.0, 0.0)
 GROUND_MAX = (1.032, 1.016, 0.016)
 GROUND_CENTER = (1.016, 1.008, 0.008)
-LIFT_MIN = (1.0, 1.0, 0.12)
-LIFT_MAX = (1.032, 1.016, 0.136)
+# The lifted brick must rise by exactly the configured lift height, so the
+# fixture derives it from SkillParams instead of a stale magic number.
+_LIFT = SkillParams().lift_height_m
+LIFT_MIN = (1.0, 1.0, _LIFT)
+LIFT_MAX = (1.032, 1.016, _LIFT + 0.016)
 MOVED_MIN = (0.95, 1.0, 0.0)
 MOVED_MAX = (0.982, 1.016, 0.016)
 
