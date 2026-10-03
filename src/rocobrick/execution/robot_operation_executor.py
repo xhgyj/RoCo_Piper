@@ -36,9 +36,9 @@ Boundaries recorded for later phases (deliberately NOT implemented here):
 * ``TRANSIT`` can currently at most reach a measured pose above a brick
   (``skill_targets.transit_target``); carrying/connection transport is not
   implemented and must never be reported as ``carrying_state_confirmed``.
-* ``PLACE_DOWN`` has only phase definitions
-  (:data:`rocobrick.skills.PLACE_DOWN_PROGRAM`); no insert, connection,
-  release or retreat implementation exists.
+* ``PLACE_DOWN`` dispatches to an injected per-robot backend only after the
+  ledger confirms the carrying state; the backend owns the separated
+  connection, release and retreat evidence.
 * The legacy ``--skill-request/v1`` path is not an entry point for this
   executor.
 """
@@ -533,6 +533,7 @@ class SkillOperationExecutor:
         transit_adapters: Mapping[str, object] | None = None,
         transit_contexts: Mapping[str, TransitContext] | None = None,
         pick_backends: Mapping[str, object] | None = None,
+        place_backends: Mapping[str, object] | None = None,
         state_ledger: OperationStateLedger | None = None,
     ) -> None:
         """Validate the robot set, transport and bounded polling knobs.
@@ -587,6 +588,7 @@ class SkillOperationExecutor:
         self._transit_adapters = dict(transit_adapters or {})
         self._transit_contexts = dict(transit_contexts or {})
         self._pick_backends = dict(pick_backends or {})
+        self._place_backends = dict(place_backends or {})
         self._state_ledger = state_ledger
         self._active: dict[str, _ActiveOperation] = {}
         self._finished: dict[str, bool] = {}
@@ -639,6 +641,10 @@ class SkillOperationExecutor:
             if skill == PICK and robot_id in self._pick_backends:
                 return await self._run_motion_operation(
                     operation, lambda: self._pick(operation, robot_id)
+                )
+            if skill == PLACE_DOWN and robot_id in self._place_backends:
+                return await self._run_motion_operation(
+                    operation, lambda: self._place_down(operation, robot_id)
                 )
             return self._failed(operation, REASON_CAPABILITY_UNAVAILABLE)
         if skill != WAIT:
@@ -733,6 +739,20 @@ class SkillOperationExecutor:
                         "or safe state can be claimed"
                     )
                 },
+            )
+        if record.skill == PLACE_DOWN:
+            backend = self._place_backends.get(record.robot_id)
+            cancel_place = getattr(backend, "cancel", None)
+            if not callable(cancel_place):
+                return CancelEvidence(operation_id=operation_id, acknowledged=False,
+                                      terminal=False, safe=False, evidence={})
+            raw = await cancel_place(operation_id)
+            return CancelEvidence(
+                operation_id=operation_id,
+                acknowledged=isinstance(raw, Mapping) and raw.get("attempted") is True,
+                terminal=isinstance(raw, Mapping) and raw.get("terminal") is True,
+                safe=isinstance(raw, Mapping) and raw.get("safe") is True,
+                evidence=dict(raw) if isinstance(raw, Mapping) else {},
             )
         record.cancel_event.set()
         if record.motion_sent:
@@ -950,6 +970,57 @@ class SkillOperationExecutor:
             or result.robot_id != robot_id
         ):
             return self._failed(operation, "PICK_RESULT_INVALID")
+        return result
+
+    async def _place_down(
+        self, operation: RobotOperation, robot_id: str
+    ) -> OperationExecution:
+        """Execute PLACE_DOWN with the carrying gate before any motion.
+
+        The ledger must already confirm this robot holds the upper part; a
+        carrying request without that confirmation is refused before the
+        handler (and therefore before any motion command) runs.  A direct
+        plan without a prior TRANSIT carries its own transport phase, so an
+        unconfirmed ``robot_at_place_region`` precondition is removed the
+        same way the direct PICK path removes its arrival precondition.
+
+        Returns:
+            The backend's operation execution, or a closed failure.
+        """
+        handler = self._place_backends.get(robot_id)
+        execute = getattr(handler, "execute", None)
+        if not callable(execute):
+            return self._failed(operation, "PLACE_DOWN_HANDLER_INVALID")
+        target_values = operation.target.values if operation.target is not None else {}
+        upper = target_values.get("upper_physical_instance_id")
+        if self._state_ledger is None or not isinstance(upper, str) or not upper:
+            return self._failed(operation, "PLACE_DOWN_CARRYING_UNCONFIRMED")
+        if self._state_ledger.owner_of_object(upper) != robot_id:
+            return self._failed(
+                operation,
+                "PLACE_DOWN_CARRYING_UNCONFIRMED: the ledger does not confirm "
+                f"{robot_id} holding {upper!r}",
+            )
+        execution_operation = operation
+        if self._state_ledger.observe(robot_id, "robot_at_place_region") is None:
+            execution_operation = replace(
+                operation,
+                preconditions=tuple(
+                    item
+                    for item in operation.preconditions
+                    if item != "robot_at_place_region"
+                ),
+            )
+        try:
+            result = await execute(execution_operation)
+        except Exception as error:
+            return self._failed(operation, f"PLACE_DOWN_HANDLER_FAILED: {error}")
+        if (
+            not isinstance(result, OperationExecution)
+            or result.operation_id != operation.operation_id
+            or result.robot_id != robot_id
+        ):
+            return self._failed(operation, "PLACE_DOWN_RESULT_INVALID")
         return result
 
     async def _wait(

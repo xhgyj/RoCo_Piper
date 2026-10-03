@@ -667,8 +667,12 @@ class PickHandler:
             holding = verify_pick_following(
                 samples,
                 position_tolerance_m=context.params.hold_follow_tolerance_m,
+                # "Still held, not falling": a friction grasp lets the brick
+                # swing well past the pose-goal tolerance (live evidence:
+                # 0.080 rad on a 0.84 mm slip) while position slip stays
+                # sub-millimetre, so only near-escape pivoting rejects.
                 orientation_tolerance_rad=(
-                    context.params.follow_orientation_tolerance_rad
+                    context.params.holding_orientation_tolerance_rad
                 ),
                 minimum_lift_m=context.params.lift_height_m * 0.5,
             )

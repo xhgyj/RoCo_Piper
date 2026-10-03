@@ -140,6 +140,191 @@ def parse_pick_observation(
     )
 
 
+def parse_place_observation(
+    document: Mapping[str, object],
+    *,
+    robot_id: str,
+    upper_physical_instance_id: str,
+    lower_physical_instance_id: str,
+    session_id: str,
+    manifest_sha256: str,
+) -> "PlaceObservation":
+    """Accept one co-sampled placement observation with the live connection.
+
+    Both bricks and this robot's TCP/opening come from the SAME scene
+    document (same sequence and simulation time); the connection value is
+    the live bricksim ``are_parts_connected`` verdict for exactly the
+    requested pair, never an inferred stacking geometry.
+
+    Returns:
+        An immutable sample with no inferred placement state.
+
+    Raises:
+        ValueError: When any identity, freshness or shape guarantee fails.
+    """
+    upper = parse_pick_observation(
+        document,
+        robot_id=robot_id,
+        physical_instance_id=upper_physical_instance_id,
+        session_id=session_id,
+        manifest_sha256=manifest_sha256,
+    )
+    lower = parse_pick_observation(
+        document,
+        robot_id=robot_id,
+        physical_instance_id=lower_physical_instance_id,
+        session_id=session_id,
+        manifest_sha256=manifest_sha256,
+    )
+    connections = document.get("connections")
+    if not isinstance(connections, Mapping):
+        raise ValueError("scene connections mapping is missing")
+    pair = "|".join(sorted((upper_physical_instance_id, lower_physical_instance_id)))
+    value = connections.get(pair)
+    if isinstance(value, bool):
+        connected = value
+    elif isinstance(value, Mapping) and isinstance(value.get("connected"), bool):
+        connected = value["connected"]
+    else:
+        raise ValueError(f"scene connection {pair!r} is missing or not boolean")
+    return PlaceObservation(upper=upper, lower=lower, connection=connected,
+                            interfaces=document.get("placement_interfaces"))
+
+
+@dataclass(frozen=True)
+class PlaceObservation:
+    """One same-step placement sample: both bricks, the connection verdict."""
+
+    upper: PickObservation
+    lower: PickObservation
+    connection: bool
+    interfaces: object = None
+
+
+def verify_place_bricks(
+    samples: Sequence[PlaceObservation],
+    *,
+    position_tolerance_m: float,
+    orientation_tolerance_rad: float,
+    require_connected: bool = True,
+    minimum_tcp_rise_m: float = 0.0,
+) -> Mapping[str, object]:
+    """Require advancing, identified samples with stable bricks and TCP rise.
+
+    Every sample must belong to the same robot/session/manifest and carry a
+    strictly advancing scene sequence and simulation time.  Both bricks must
+    stay within ``position_tolerance_m``/``orientation_tolerance_rad`` of
+    their first-sample poses (a disturbed stack never passes); when
+    ``require_connected`` every sample's live connection verdict must be
+    true; when ``minimum_tcp_rise_m`` is positive the TCP must have risen at
+    least that far from the first to the last sample (retreat proof).
+
+    Returns:
+        JSON-safe measurement summary; no placement confirmation label.
+
+    Raises:
+        ValueError: When any identity, advancement, stability, connection
+            or rise requirement fails.
+    """
+    if len(samples) < 2:
+        raise ValueError("placement verification requires at least two observations")
+    for name, value in (
+        ("position_tolerance_m", position_tolerance_m),
+        ("orientation_tolerance_rad", orientation_tolerance_rad),
+        ("minimum_tcp_rise_m", minimum_tcp_rise_m),
+    ):
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or not math.isfinite(float(value))
+            or value < 0
+        ):
+            raise ValueError(f"{name} must be finite and non-negative")
+    first = samples[0]
+    if first.upper.physical_instance_id == first.lower.physical_instance_id:
+        raise ValueError("placement upper and lower parts are identical")
+    max_upper_position = 0.0
+    max_upper_orientation = 0.0
+    max_lower_position = 0.0
+    max_lower_orientation = 0.0
+    previous = first
+    for sample in samples:
+        upper = sample.upper
+        lower = sample.lower
+        if (
+            upper.robot_id != first.upper.robot_id
+            or upper.physical_instance_id != first.upper.physical_instance_id
+            or lower.physical_instance_id != first.lower.physical_instance_id
+            or upper.session_id != first.upper.session_id
+            or upper.manifest_sha256 != first.upper.manifest_sha256
+        ):
+            raise ValueError("placement observation identity changed")
+        if (
+            sample is not first
+            and (
+                upper.sequence <= previous.upper.sequence
+                or upper.sim_time_s <= previous.upper.sim_time_s
+                or lower.sequence != upper.sequence
+                or lower.sim_time_s != upper.sim_time_s
+            )
+        ):
+            raise ValueError("placement observations are stale or reordered")
+        if require_connected and sample.connection is not True:
+            raise ValueError("the live connection verdict is not connected")
+        for measured, reference, label in (
+            (upper.object_pose, first.upper.object_pose, "upper"),
+            (lower.object_pose, first.lower.object_pose, "lower"),
+        ):
+            difference = math.dist(
+                measured.position_xyz, reference.position_xyz
+            )
+            dot = abs(sum(a * b for a, b in zip(
+                measured.orientation_xyzw, reference.orientation_xyzw
+            )))
+            angle = 2.0 * math.acos(min(1.0, dot))
+            if label == "upper":
+                max_upper_position = max(max_upper_position, difference)
+                max_upper_orientation = max(max_upper_orientation, angle)
+            else:
+                max_lower_position = max(max_lower_position, difference)
+                max_lower_orientation = max(max_lower_orientation, angle)
+        previous = sample
+    tcp_rise = (
+        samples[-1].upper.tcp_pose.position_xyz[2]
+        - first.upper.tcp_pose.position_xyz[2]
+    )
+    if minimum_tcp_rise_m > 0.0 and tcp_rise < minimum_tcp_rise_m:
+        raise ValueError("the TCP did not rise the required retreat distance")
+    if (
+        max_upper_position > position_tolerance_m
+        or max_upper_orientation > orientation_tolerance_rad
+        or max_lower_position > position_tolerance_m
+        or max_lower_orientation > orientation_tolerance_rad
+    ):
+        raise ValueError("a placed brick moved beyond the placement tolerance")
+    return {
+        "robot_id": first.upper.robot_id,
+        "upper_physical_instance_id": first.upper.physical_instance_id,
+        "lower_physical_instance_id": first.lower.physical_instance_id,
+        "session_id": first.upper.session_id,
+        "manifest_sha256": first.upper.manifest_sha256,
+        "first_sequence": first.upper.sequence,
+        "last_sequence": samples[-1].upper.sequence,
+        "first_sim_time_s": first.upper.sim_time_s,
+        "last_sim_time_s": samples[-1].upper.sim_time_s,
+        "samples": len(samples),
+        "connected": True,
+        "upper_max_position_change_m": max_upper_position,
+        "upper_max_orientation_change_rad": max_upper_orientation,
+        "lower_max_position_change_m": max_lower_position,
+        "lower_max_orientation_change_rad": max_lower_orientation,
+        "tcp_rise_m": tcp_rise,
+        "position_tolerance_m": float(position_tolerance_m),
+        "orientation_tolerance_rad": float(orientation_tolerance_rad),
+        "minimum_tcp_rise_m": float(minimum_tcp_rise_m),
+    }
+
+
 def _conjugate(quat: tuple[float, float, float, float]) -> tuple[float, ...]:
     return (-quat[0], -quat[1], -quat[2], quat[3])
 

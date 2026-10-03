@@ -41,9 +41,9 @@ contract libraries and a future execution backend. Every invocation:
    mode (``allow_legacy_results=False``) over
    :class:`rocobrick.robot_operation_executor.SkillOperationExecutor`, which
    observes the real scene through the session's read-only ``observe``
-   transport. WAIT, TRANSIT and PICK use their available evidence backends;
-   PLACE_DOWN remains fail closed until its connection, release and retreat
-   evidence path is complete. The session is stopped with cleanup evidence in
+   transport. WAIT, TRANSIT, PICK and PLACE_DOWN use their evidence backends;
+   PLACE_DOWN proves connection, release and retreat separately before any
+   assembled state is published. The session is stopped with cleanup evidence in
    a ``finally`` block on every path, and ``robot-operation-plan-run.json``
    (schema ``rocobrick-operation-plan-run/v1``) records readiness, per-robot
    isolated operations, layers, cancellations, resources, cleanup, the
@@ -99,6 +99,7 @@ import argparse
 import asyncio
 import json
 import math
+import os
 import re
 import sys
 from collections.abc import Mapping, Sequence
@@ -680,10 +681,13 @@ def _derive_pick_collision_filter(
     args: "_Arguments",
     robot_ids: tuple[str, ...],
 ) -> tuple[str | None, tuple[str, ...]]:
-    """Derive the narrow Isaac collision filter for direct PICK execution.
+    """Derive the authorized scene-contact set for direct skill execution.
 
-    Returns the unique PICK executor and its target physical-instance ids.
-    Ambiguous multi-robot assignments return ``(None, ())``.
+    Covers every PICK target and every PLACE_DOWN upper/lower part.
+
+    Returns:
+        The unique executor robot and its authorized physical-instance ids;
+        ambiguous multi-robot assignments return ``(None, ())``.
     """
     plan_path = getattr(args, "robot_operation_plan_path", None)
     if plan_path is None or not plan_path.is_file():
@@ -697,26 +701,70 @@ def _derive_pick_collision_filter(
         return None, ()
     by_robot: dict[str, set[str]] = {}
     for operation in operations:
-        if not isinstance(operation, Mapping) or operation.get("skill") != "PICK":
+        if not isinstance(operation, Mapping):
             continue
+        skill = operation.get("skill")
         robot_id = operation.get("executor_robot_id")
         target = operation.get("target")
-        physical_id = (
-            target.get("physical_instance_id")
-            if isinstance(target, Mapping)
-            else None
-        )
-        if (
-            isinstance(robot_id, str)
-            and robot_id in robot_ids
-            and isinstance(physical_id, str)
-            and physical_id
-        ):
-            by_robot.setdefault(robot_id, set()).add(physical_id)
+        physical_ids: set[str] = set()
+        if skill == "PICK" and isinstance(target, Mapping):
+            physical_id = target.get("physical_instance_id")
+            if isinstance(physical_id, str) and physical_id:
+                physical_ids.add(physical_id)
+        elif skill == "PLACE_DOWN" and isinstance(target, Mapping):
+            for name in (
+                "upper_physical_instance_id",
+                "lower_physical_instance_id",
+            ):
+                value = target.get(name)
+                if isinstance(value, str) and value:
+                    physical_ids.add(value)
+        if isinstance(robot_id, str) and robot_id in robot_ids and physical_ids:
+            by_robot.setdefault(robot_id, set()).update(physical_ids)
     if len(by_robot) != 1:
         return None, ()
     robot_id, instance_ids = next(iter(by_robot.items()))
     return robot_id, tuple(sorted(instance_ids))
+
+
+def _derive_observation_connection_pairs(
+    args: "_Arguments",
+    robot_ids: tuple[str, ...],
+) -> tuple[tuple[str, str], ...]:
+    """Derive the observed connection pairs of direct PLACE_DOWN targets.
+
+    Every PLACE_DOWN upper/lower pair of the plan becomes one observed
+    connection pair, so each scene observation carries the live bricksim
+    ``are_parts_connected`` verdict the placement evidence requires.  Pairs
+    are unique and order-normalized.
+
+    Returns:
+        The unique order-normalized connection pairs of the plan.
+    """
+    plan_path = getattr(args, "robot_operation_plan_path", None)
+    if plan_path is None or not plan_path.is_file():
+        return ()
+    try:
+        document = json.loads(plan_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return ()
+    operations = document.get("operations")
+    if not isinstance(operations, list):
+        return ()
+    pairs: set[tuple[str, str]] = set()
+    for operation in operations:
+        if not isinstance(operation, Mapping) or operation.get("skill") != "PLACE_DOWN":
+            continue
+        if operation.get("executor_robot_id") not in robot_ids:
+            continue
+        target = operation.get("target")
+        if not isinstance(target, Mapping):
+            continue
+        upper = target.get("upper_physical_instance_id")
+        lower = target.get("lower_physical_instance_id")
+        if isinstance(upper, str) and isinstance(lower, str) and upper and lower:
+            pairs.add((upper, lower))
+    return tuple(sorted(pairs))
 
 
 def _create_session(
@@ -771,6 +819,9 @@ def _create_session(
         structure_start_path=args.structure_start,
         collision_filter_robot_id=collision_filter_robot_id,
         collision_filter_instance_ids=collision_filter_instance_ids,
+        observation_connection_pairs=_derive_observation_connection_pairs(
+            args, robot_ids
+        ),
         verify_plan_robots=not (
             args.robot_operation_plan_path is not None
             and args.plan_path is None
@@ -1385,6 +1436,7 @@ def _robot_operation_plan_phase(
         serialize_run_result,
     )
     from rocobrick.skills.pick import PickHandler
+    from rocobrick.skills.place_down import PlaceDownHandler
     from rocobrick.tcp_contract import EXPECTED_RUNTIME_MODEL_SHA256
 
     plan_record: dict[str, object] = {
@@ -1644,8 +1696,9 @@ def _robot_operation_plan_phase(
                     }
                     state_ledger = OperationStateLedger(operation_plan.robots)
                     pick_backends = {}
+                    place_backends = {}
                     if any(
-                        item.skill == "PICK"
+                        item.skill in ("PICK", "PLACE_DOWN")
                         for item in operation_plan.operations.values()
                     ):
                         from rocobrick.isaac_snapshot_host_adapter import (
@@ -1653,25 +1706,55 @@ def _robot_operation_plan_phase(
                         )
 
                         if args.scene_manifest is None:
-                            raise RuntimeError("PICK requires a scene manifest")
-                        manifest = load_scene_snapshot_manifest(args.scene_manifest)
-                        pick_backends = {
-                            robot_id: PickHandler(
-                                session,
-                                state_ledger,
-                                session_id=args.host_instance_id,
-                                manifest_sha256=manifest.manifest_sha256,
-                                motion_transport=session,
-                                context=transit_contexts[robot_id],
+                            raise RuntimeError(
+                                "PICK/PLACE_DOWN requires a scene manifest"
                             )
-                            for robot_id in operation_plan.robots
-                        }
+                        manifest = load_scene_snapshot_manifest(args.scene_manifest)
+                        if any(
+                            item.skill == "PICK"
+                            for item in operation_plan.operations.values()
+                        ):
+                            pick_backends = {
+                                robot_id: PickHandler(
+                                    session,
+                                    state_ledger,
+                                    session_id=args.host_instance_id,
+                                    manifest_sha256=manifest.manifest_sha256,
+                                    motion_transport=session,
+                                    context=transit_contexts[robot_id],
+                                )
+                                for robot_id in operation_plan.robots
+                            }
+                        if any(
+                            item.skill == "PLACE_DOWN"
+                            for item in operation_plan.operations.values()
+                        ):
+                            # Explicit validation switch: probe stops at the
+                            # FIRST measured interface contact, withdraws and
+                            # fails closed; it never publishes a placed state.
+                            place_probe = (
+                                os.environ.get("ROCOBRICK_PLACE_CONTACT_PROBE")
+                                == "1"
+                            )
+                            place_backends = {
+                                robot_id: PlaceDownHandler(
+                                    session,
+                                    state_ledger,
+                                    session_id=args.host_instance_id,
+                                    manifest_sha256=manifest.manifest_sha256,
+                                    motion_transport=session,
+                                    context=transit_contexts[robot_id],
+                                    probe_contact=place_probe,
+                                )
+                                for robot_id in operation_plan.robots
+                            }
                     executor = SkillOperationExecutor(
                         operation_plan.robots,
                         session,
                         transit_adapters=transit_adapters,
                         transit_contexts=transit_contexts,
                         pick_backends=pick_backends,
+                        place_backends=place_backends,
                         state_ledger=state_ledger,
                     )
                 else:
@@ -2191,7 +2274,6 @@ def _run_robot_operation_plan_primary(
     # Scene paths are materialized into the fresh run directory by
     # _materialize_direct_defaults, so direct runtime dispatch is available
     # unless the caller explicitly requested the no-runtime preflight.
-    # PLACE_DOWN remains fail-closed.
     direct_dispatch = not args.preflight_only
 
     # Phase 1: IMMUTABLE_INPUT. Every original input is read once, hashed and
@@ -2396,7 +2478,7 @@ def _run_robot_operation_plan_primary(
         })
         checks["robot_operation_plan_validated"] = True
         direct_dispatch = direct_dispatch and all(
-            operation.skill in {"TRANSIT", "WAIT", "PICK"}
+            operation.skill in {"TRANSIT", "WAIT", "PICK", "PLACE_DOWN"}
             for operation in operation_plan.operations.values()
         )
         checks["direct_runtime_skills_supported"] = direct_dispatch
@@ -2561,8 +2643,7 @@ def _run_robot_operation_plan_primary(
         })
 
     # Phase 6: execute the validated no-STAP path for skills with real
-    # backends. PLACE_DOWN remains fail-closed until its connection, release,
-    # and retreat evidence backend is complete.
+    # backends (WAIT, TRANSIT, PICK, PLACE_DOWN).
     if terminal is None and direct_dispatch:
         runtime_terminal = _robot_operation_plan_phase(
             args, record, recorder, contract, None
@@ -2576,7 +2657,7 @@ def _run_robot_operation_plan_primary(
         terminal = (
             RunStatus.EXECUTION_NOT_IMPLEMENTED,
             f"{NO_STAP_AUTHORIZATION}: the plan contains a skill without a "
-            "real direct-execution backend; PLACE_DOWN remains fail-closed",
+            "real direct-execution backend",
         )
 
     # Phase 7: IMMUTABILITY after all phases and the terminal documents.

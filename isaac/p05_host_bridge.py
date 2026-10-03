@@ -922,6 +922,8 @@ class RobotChannel:
         self.commands_applied = 0
         self.commands_clamped = 0
         self.unknown_joint_names: list[str] = []
+        self.gravity_feedforward = False
+        self.gravity_efforts = ()
 
     @property
     def joint_names(self) -> tuple[str, ...]:
@@ -1044,6 +1046,50 @@ class RobotChannel:
             )
         )
         self.commands_applied += 1
+
+    def apply_gravity_feedforward(self) -> None:
+        """Apply explicitly enabled bounded gravity forces to arm joints only."""
+        if not self.gravity_feedforward:
+            return
+        import numpy as np
+
+        from rocobrick.gravity_feedback import arm_gravity_efforts
+
+        values = self._robot._articulation_view.get_generalized_gravity_forces()
+        if values is None:
+            raise RuntimeError("enabled gravity feedforward has no live model feedback")
+        efforts = arm_gravity_efforts(self._dof_names, [float(x) for x in values[0]])
+        self._robot.set_joint_efforts(np.asarray(efforts))
+        self.gravity_efforts = efforts
+
+    def dynamics_feedback(self) -> dict[str, object]:
+        """Read joint efforts and gravity-model forces without changing drives.
+
+        Returns:
+            Identified finite joint vectors or explicit unavailable evidence.
+        """
+        try:
+            efforts = self._robot.get_measured_joint_efforts()
+            view = getattr(self._robot, "_articulation_view", None)
+            getter = getattr(view, "get_generalized_gravity_forces", None)
+            gravity = getter() if callable(getter) else None
+            if efforts is None or gravity is None:
+                return {"available": False, "reason": "dynamics feedback unavailable"}
+            gravity_values = gravity[0]
+            measured = [float(x) for x in efforts]
+            model = [float(x) for x in gravity_values]
+            if len(measured) != len(self._dof_names) or len(model) != len(self._dof_names):
+                raise ValueError("dynamics joint vector length mismatch")
+            if not all(math.isfinite(x) for x in measured + model):
+                raise ValueError("nonfinite dynamics feedback")
+            return {"available": True, "robot_id": self.robot_id,
+                    "gravity_feedforward_enabled": self.gravity_feedforward,
+                    "applied_gravity_efforts": list(self.gravity_efforts),
+                    "joint_names": list(self._dof_names),
+                    "measured_efforts": measured, "gravity_compensation_efforts": model,
+                    "source": "physx_articulation", "tcp_wrench_calibrated": False}
+        except Exception as error:
+            return {"available": False, "reason": f"{type(error).__name__}: {error}"}
 
     def gripper_positions(self) -> dict[str, float]:
         """Read this robot's two gripper finger DOFs.
@@ -1533,6 +1579,7 @@ class InProcessBridge:
         self.clock_publisher.publish(self._clock_message(sim_time_s))
         self.clock_published += 1
         for channel in self._channels:
+            channel.apply_gravity_feedforward()
             channel.publish_state(sim_time_s)
 
     def _robot_gripper_observations(self) -> dict:
@@ -1644,6 +1691,90 @@ class InProcessBridge:
                 )
         return connections
 
+    def _placement_interfaces(self) -> dict[str, object]:
+        """Return immutable stud-hole geometry, without creating connections."""
+        from bricksim.core import (
+            compute_connection_transform,
+            get_assembly_debug_infos,
+            get_assembly_thresholds,
+            lookup_physics_connection,
+        )
+
+        paths = self._state.runtime_host.physical_instance_paths
+        ids = getattr(self._state, "instance_by_topology_id", {})
+        result = {}
+        for connection in getattr(self._state, "goal_connections", ()):
+            lower = ids.get(connection["stud_id"])
+            upper = ids.get(connection["hole_id"])
+            if lower not in paths or upper not in paths:
+                continue
+            rotation, position = compute_connection_transform(
+                stud_path=paths[lower], stud_if=connection["stud_iface"],
+                hole_path=paths[upper], hole_if=connection["hole_iface"],
+                offset=tuple(connection["offset"]), yaw=connection["yaw"],
+            )
+            # BrickSim returns WXYZ; scene rigid poses use XYZW.
+            part = getattr(self._state, "topology_parts", {}).get(connection["hole_id"], {})
+            payload = part.get("payload", {})
+            symmetries = [0]
+            if part.get("type") == "brick" and all(
+                type(payload.get(name)) is int and payload[name] > 0
+                for name in ("L", "W", "H")
+            ):
+                symmetries = [0, 1, 2, 3] if payload["L"] == payload["W"] else [0, 2]
+            # Regular brick prototypes use a centred local origin; only their
+            # verified C4 shape symmetries may substitute for the nominal yaw.
+            live = lookup_physics_connection(
+                paths[lower], connection["stud_iface"], paths[upper], connection["hole_iface"]
+            )
+            actual = None
+            if live is not None:
+                actual_rotation, actual_position = compute_connection_transform(
+                    paths[lower], live.stud_ifid, paths[upper], live.hole_ifid,
+                    tuple(live.offset), live.yaw,
+                )
+                actual = {"stud_interface": live.stud_ifid,
+                          "hole_interface": live.hole_ifid,
+                          "offset": list(live.offset), "yaw": live.yaw,
+                          "lower_to_upper": {"position_xyz": list(actual_position),
+                           "orientation_xyzw": [actual_rotation[1], actual_rotation[2],
+                                                actual_rotation[3], actual_rotation[0]]}}
+            result["|".join(sorted((lower, upper)))] = {
+                "actual_connection": actual,
+                "contact_force_n": None,
+                "stud_path": paths[lower], "hole_path": paths[upper],
+                "allowed_upper_yaw_quarter_turns": symmetries,
+                "upper_shape": {"type": part.get("type"), "payload": payload},
+                "lower_physical_instance_id": lower,
+                "upper_physical_instance_id": upper,
+                "lower_to_upper": {
+                    "position_xyz": list(position),
+                    "orientation_xyzw": [rotation[1], rotation[2], rotation[3], rotation[0]],
+                },
+                "stud_interface": connection["stud_iface"],
+                "hole_interface": connection["hole_iface"],
+                "offset": list(connection["offset"]), "yaw": connection["yaw"],
+            }
+        thresholds = get_assembly_thresholds()
+        diagnostics = []
+        for info in get_assembly_debug_infos():
+            if info.stud_path in paths.values() and info.hole_path in paths.values():
+                for pair in result.values():
+                    if info.stud_path == pair["stud_path"] and info.hole_path == pair["hole_path"]:
+                        pair["contact_force_n"] = float(info.projected_force)
+                diagnostics.append({name: getattr(info, name) for name in (
+                    "accepted", "relative_distance", "tilt", "projected_force",
+                    "yaw_error", "position_error", "grid_pos", "grid_pos_snapped",
+                    "stud_path", "hole_path", "stud_interface", "hole_interface",
+                )})
+        return {"pairs": result, "diagnostics": diagnostics, "thresholds": {
+            name: getattr(thresholds, name) for name in (
+                "enabled", "distance_tolerance", "max_penetration",
+                "z_angle_tolerance", "required_force", "yaw_tolerance",
+                "position_tolerance",
+            )
+        }}
+
     def _on_scene_state(self, request, response):
         """Fill the Trigger response with canonical per-robot scene-state JSON.
 
@@ -1709,6 +1840,11 @@ class InProcessBridge:
                 scene_state_error_document(f"{type(exc).__name__}: {exc}")
             )
             return response
+        for channel in self._channels:
+            if channel.robot_id in document.get("robots", {}):
+                document["robots"][channel.robot_id]["dynamics"] = channel.dynamics_feedback()
+        if getattr(self._state, "goal_connections", None) is not None:
+            document["placement_interfaces"] = self._placement_interfaces()
         response.success = True
         response.message = _canonical_json(document)
         return response
@@ -1790,8 +1926,11 @@ async def run_bridge(args: argparse.Namespace, state: BridgeState, evidence: dic
         world.play()
     else:
         from rocobrick.isaac_snapshot_host_adapter import (
-            build_host_binding, collect_stage_snapshot, load_scene_snapshot_manifest,
-            build_scene_manifest_from_runtime_host, write_scene_manifest_atomic,
+            build_host_binding,
+            build_scene_manifest_from_runtime_host,
+            collect_stage_snapshot,
+            load_scene_snapshot_manifest,
+            write_scene_manifest_atomic,
             write_snapshot_artifact_atomic,
         )
         from rocobrick.robot_operation_plan import parse_robot_operation_plan
@@ -1799,7 +1938,8 @@ async def run_bridge(args: argparse.Namespace, state: BridgeState, evidence: dic
         from rocobrick.runtime_host_inputs import build_runtime_host_inputs
         from rocobrick.stap_contract import parse_stap_plan
         from rocobrick.structure_scene import (
-            build_structure_scene_plan, build_structure_scene_plan_from_files,
+            build_structure_scene_plan,
+            build_structure_scene_plan_from_files,
         )
 
         try:
@@ -1844,6 +1984,9 @@ async def run_bridge(args: argparse.Namespace, state: BridgeState, evidence: dic
                 plan, inputs.topology, inputs.robots, inputs.scene_config
             )
             state.runtime_host = runtime_host
+            state.goal_connections = inputs.topology.expected_goal_connections
+            state.topology_parts = {part["id"]: part for part in inputs.topology.goal["parts"]}
+            state.instance_by_topology_id = inputs.topology.instance_by_topology_id
             state.app = runtime_host.app
             world = runtime_host.world
             state.world = world
@@ -2041,7 +2184,16 @@ async def run_bridge(args: argparse.Namespace, state: BridgeState, evidence: dic
     # The ONLY DDS participant: one rclpy node owning the shared clock
     # publisher, one namespaced publisher/subscription pair per robot and the
     # scene-state service (the validated in-process alternative).
+    # Gravity feed-forward is the controller-layer compensation this arm's
+    # position drives need to behave like a real motor controller (live
+    # evidence 2026-10-02: placement press transmits reliably with it and
+    # mostly stalls without it). Default ON; ROCOBRICK_GRAVITY_FEEDFORWARD=0
+    # disables it for comparison runs. Read before any DDS resource exists.
+    gravity_enabled = os.environ.get("ROCOBRICK_GRAVITY_FEEDFORWARD", "1") != "0"
+    evidence["gravity_feedforward"] = {"enabled": gravity_enabled,
+                                        "arm_limit_nm": 10.0, "finger_efforts": 0.0}
     for channel in channels:
+        channel.gravity_feedforward = gravity_enabled
         channel.record_dof_limits(
             evidence
             if args.scene_manifest is None

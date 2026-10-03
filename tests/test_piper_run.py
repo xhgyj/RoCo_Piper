@@ -79,6 +79,7 @@ ALLOWED_ROCOBRICK = {
     "rocobrick.execution.operation_state_ledger",
     "rocobrick.isaac_snapshot_host_adapter",
     "rocobrick.skills.pick",
+    "rocobrick.skills.place_down",
     "rocobrick.plan.structure_scene",
     "rocobrick.robot_operation_executor",
     "rocobrick.robot_operation_runner",

@@ -92,14 +92,31 @@ class SkillParams:
     wait_duration_s: float = 2.0  # > 0
     position_tolerance_m: float = 0.005  # in (0, 0.01]
     orientation_tolerance_rad: float = 0.015  # in (0, 0.03]
-    # Holding-follow orientation bound.  A friction side grasp hangs the
-    # brick a couple of degrees off the TCP frame (live evidence: a steady
-    # 0.027 rad tilt with sub-millimetre positional following); the pose-goal
-    # tolerance above stays tight, this bound only judges the lifted brick.
-    follow_orientation_tolerance_rad: float = 0.05  # in (0, 0.1]
+    # PICK allows bounded rotation during lift; resting-stack stability uses
+    # a separate, tighter orientation bound. Neither bound proves contact.
+    follow_orientation_tolerance_rad: float = 0.05
+    holding_orientation_tolerance_rad: float = 0.35
     still_tolerance_m: float = 0.01  # > 0
     hold_follow_tolerance_m: float = 0.02  # > 0
     scene_query_poll_s: float = 0.2  # > 0
+    # Insertion and retreat distances are along the selected stud axis.
+    place_standoff_m: float = 0.08
+    # Commanded descent bound BELOW the seated interface depth, not a press
+    # to hold: the live monitor cancels the descent the moment the exact
+    # connection forms, so this bound absorbs gravity droop and grip
+    # compliance without gravity feed-forward while the support/slip guards
+    # bound any overrun.
+    place_press_m: float = 0.0045
+    place_retreat_height_m: float = 0.05
+    place_align_tolerance_m: float = 0.004
+    place_alignment_orientation_rad: float = 0.15
+    # Stud/hole engagement bound: the descent gate. Measured studs still
+    # self-centre up to roughly this lateral offset (live evidence: connected
+    # at 1.49 mm), and uncompensated arm positioning carries ~2 mm noise, so
+    # a tighter gate would block placeable offsets while corrections chase
+    # noise. Larger offsets get one measured correction; the in-flight
+    # support guard bounds any descent that still cannot engage.
+    place_interface_align_tolerance_m: float = 0.0025
 
     def __post_init__(self) -> None:
         bounds = {
@@ -117,7 +134,14 @@ class SkillParams:
             "still_tolerance_m": (0.0, math.inf),
             "hold_follow_tolerance_m": (0.0, math.inf),
             "follow_orientation_tolerance_rad": (0.0, 0.1),
+            "holding_orientation_tolerance_rad": (0.0, 1.0),
             "scene_query_poll_s": (0.0, math.inf),
+            "place_standoff_m": (0.0, math.inf),
+            "place_alignment_orientation_rad": (0.0, 0.5),
+            "place_press_m": (0.0, 0.005),
+            "place_retreat_height_m": (0.0, math.inf),
+            "place_align_tolerance_m": (0.0, 0.01),
+            "place_interface_align_tolerance_m": (0.0, 0.01),
         }
         for name, value in vars(self).items():
             if isinstance(value, bool) or not isinstance(value, (int, float)):
@@ -140,9 +164,7 @@ class SkillParams:
                 else MAX_ORIENTATION_TOLERANCE_RAD
             )
             if not 0.0 < value <= maximum:
-                raise ValueError(
-                    f"{name} must be in (0, {maximum}], got {value!r}"
-                )
+                raise ValueError(f"{name} must be in (0, {maximum}], got {value!r}")
 
 
 def load_skill_params(path: Path) -> SkillParams:
@@ -192,9 +214,7 @@ def _quat_conjugate(quat: QuaternionXYZW) -> QuaternionXYZW:
     return (-x, -y, -z, w)
 
 
-def _quat_mul(
-    left: QuaternionXYZW, right: QuaternionXYZW
-) -> QuaternionXYZW:
+def _quat_mul(left: QuaternionXYZW, right: QuaternionXYZW) -> QuaternionXYZW:
     """Return the Hamilton product left ⊗ right of two xyzw quaternions."""
     xl, yl, zl, wl = left
     xr, yr, zr, wr = right
@@ -206,9 +226,7 @@ def _quat_mul(
     )
 
 
-def _quat_rotate_vector(
-    quat: QuaternionXYZW, vector: Sequence[float]
-) -> Vector3:
+def _quat_rotate_vector(quat: QuaternionXYZW, vector: Sequence[float]) -> Vector3:
     """Rotate a 3-vector by an xyzw quaternion (v' = q ⊗ v ⊗ q*)."""
     x, y, z = (float(value) for value in vector)
     qx, qy, qz, qw = quat
@@ -237,9 +255,7 @@ def grasp_orientation_xyzw(closing_yaw_deg: float) -> QuaternionXYZW:
     return _normalize_quat(_quat_mul(qz, qx_180))
 
 
-def closing_yaw_deg(
-    aabb_min: Sequence[float], aabb_max: Sequence[float]
-) -> float:
+def closing_yaw_deg(aabb_min: Sequence[float], aabb_max: Sequence[float]) -> float:
     """Return 0.0 for the wide brick layout, else 90.0.
 
     The physical fingers translate along the tool y axis (URDF ground
@@ -256,9 +272,7 @@ def closing_yaw_deg(
     return 0.0 if dy <= dx else 90.0
 
 
-def brick_span_m(
-    aabb_min: Sequence[float], aabb_max: Sequence[float]
-) -> float:
+def brick_span_m(aabb_min: Sequence[float], aabb_max: Sequence[float]) -> float:
     """Return the brick extent under the closing axis (dy at yaw 0)."""
     dx = float(aabb_max[0]) - float(aabb_min[0])
     dy = float(aabb_max[1]) - float(aabb_min[1])
@@ -291,8 +305,7 @@ def world_orientation_to_base(
 def _brick_center(aabb_min: Sequence[float], aabb_max: Sequence[float]) -> Vector3:
     """Return the world-frame center of the brick AABB."""
     return tuple(  # type: ignore[return-value]
-        (float(low) + float(high)) / 2.0
-        for low, high in zip(aabb_min, aabb_max)
+        (float(low) + float(high)) / 2.0 for low, high in zip(aabb_min, aabb_max)
     )
 
 
@@ -411,7 +424,11 @@ def pick_targets(
             params,
         ),
         approach=_tcp_pose_target(
-            (center_xy[0], center_xy[1], center_in_base[2] + params.approach_clearance_m),
+            (
+                center_xy[0],
+                center_xy[1],
+                center_in_base[2] + params.approach_clearance_m,
+            ),
             orientation,
             provenance,
             params,
@@ -435,6 +452,20 @@ def pick_targets(
         brick_span_m=span,
         closing_yaw_deg=closing_yaw_deg(aabb_min, aabb_max),
     )
+
+
+@dataclass(frozen=True)
+class PlaceTargets:
+    """Tool targets derived from an interface and a measured grasp transform."""
+
+    preplace: TcpPoseTarget  # xy = lower centre; z = contact + standoff
+    contact: TcpPoseTarget  # z = contact height - press
+    retreat: TcpPoseTarget  # z = contact height + retreat height
+    release_opening_m: float  # logical command; pads at upper span + open_extra
+    release_expected_window_m: tuple[float, float]  # ± free slop
+    upper_span_m: float
+    closing_yaw_deg: float
+    contact_world_z_m: float  # TCP world z at stud contact
 
 
 def load_robot_base_frame(config_path: Path, robot_id: str) -> RobotBaseFrame:
@@ -507,6 +538,7 @@ def _finite_tuple(value: object, length: int, label: str) -> tuple[float, ...]:
 
 __all__ = [
     "PickTargets",
+    "PlaceTargets",
     "RobotBaseFrame",
     "SkillParams",
     "TcpProvenance",

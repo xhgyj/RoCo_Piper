@@ -1402,7 +1402,7 @@ HOST_STEPS_PER_SECOND = 458.0
 # ``_stop_host``): a self-exit is preferred, the bridge's hold is never waited
 # out, and the bridge catches KeyboardInterrupt itself, so an interrupted stop
 # still produces the bridge's own ``stopped``/cleanup evidence.
-MULTI_ROBOT_HOST_SELF_EXIT_GRACE_S = 90.0
+MULTI_ROBOT_HOST_SELF_EXIT_GRACE_S = 2.0
 MULTI_ROBOT_HOST_INT_GRACE_S = 60.0
 MULTI_ROBOT_HOST_KILL_GRACE_S = 15.0
 CONTAINER_ALIVE_ATTEMPTS = 3
@@ -1647,6 +1647,8 @@ def build_global_scene_document(
         **({"manifest_sha256": view["manifest_sha256"]}
            if "manifest_sha256" in view else {}),
         **({"sequence": view["sequence"]} if "sequence" in view else {}),
+        **({"placement_interfaces": view["placement_interfaces"]}
+           if "placement_interfaces" in view else {}),
     }
 
 
@@ -2898,6 +2900,7 @@ class MultiRobotIsaacMoveItSession:
                 OperationKind.JOINT_TARGET,
                 OperationKind.LINK6_POSE,
                 OperationKind.TCP_POSE,
+                OperationKind.GUARDED_TCP_POSE,
                 OperationKind.GRIPPER_TARGET,
                 OperationKind.APPLY_PLANNING_SCENE,
                 OperationKind.ATTACH_PLANNING_SCENE,

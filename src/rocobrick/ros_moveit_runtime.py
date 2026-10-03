@@ -45,7 +45,7 @@ import threading
 import time
 from collections import deque
 from collections.abc import Sequence
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from typing import Any, Callable, Mapping
 
 from rocobrick.admission import (
@@ -384,9 +384,7 @@ def robot_scene_view(
         not isinstance(document, Mapping)
         or document.get("schema") != SCENE_STATE_SCHEMA
     ):
-        raise RuntimeError(
-            f"scene-state schema must be exactly {SCENE_STATE_SCHEMA!r}"
-        )
+        raise RuntimeError(f"scene-state schema must be exactly {SCENE_STATE_SCHEMA!r}")
     robots = document.get("robots")
     if not isinstance(robots, Mapping):
         raise RuntimeError(
@@ -410,17 +408,12 @@ def robot_scene_view(
             not isinstance(bound_joint_names, Sequence)
             or isinstance(bound_joint_names, (str, bytes, bytearray))
             or not bound_joint_names
-            or not all(
-                isinstance(name, str) and name for name in bound_joint_names
-            )
+            or not all(isinstance(name, str) and name for name in bound_joint_names)
         ):
             raise RuntimeError(
-                f"scene-state binding joint_names of robot {robot_id!r} are "
-                "malformed"
+                f"scene-state binding joint_names of robot {robot_id!r} are malformed"
             )
-        expected = (
-            tuple(joint_names) if joint_names is not None else None
-        )
+        expected = tuple(joint_names) if joint_names is not None else None
         if expected is not None and (
             len(bound_joint_names) != len(expected)
             or set(str(name) for name in bound_joint_names) != set(expected)
@@ -483,6 +476,8 @@ def robot_scene_view(
         view["robot_sequence"] = block["sequence"]
     if "tcp_pose" in block:
         view["tcp_pose"] = block["tcp_pose"]
+    if "placement_interfaces" in document:
+        view["placement_interfaces"] = document["placement_interfaces"]
     return view
 
 
@@ -695,9 +690,7 @@ def _collision_box_matches(item: object, box: AxisAlignedBox) -> bool:
     )
 
 
-def _attached_object_matches(
-    item: object, *, object_id: str, link_name: str
-) -> bool:
+def _attached_object_matches(item: object, *, object_id: str, link_name: str) -> bool:
     """Require one attached object to carry exact object/link identity.
 
     Returns:
@@ -729,7 +722,9 @@ def _merge_allowed_collision_pairs(
         names = [str(name) for name in matrix.entry_names]
         source_rows = [list(entry.enabled) for entry in matrix.entry_values]
     except (AttributeError, TypeError, ValueError) as error:
-        raise ValueError(f"current allowed collision matrix is unreadable: {error}") from error
+        raise ValueError(
+            f"current allowed collision matrix is unreadable: {error}"
+        ) from error
     if not names or len(set(names)) != len(names):
         raise ValueError("current allowed collision matrix has no unique entries")
     if len(source_rows) != len(names) or any(
@@ -839,8 +834,7 @@ class RosMoveItRuntime:
             len(self._joint_names) != len(JOINT_NAMES)
             or len(self._arm_joint_names) != len(ARM_JOINT_NAMES)
             or len(self._gripper_joint_names) != len(GRIPPER_JOINT_NAMES)
-            or self._joint_names
-            != self._arm_joint_names + self._gripper_joint_names
+            or self._joint_names != self._arm_joint_names + self._gripper_joint_names
         ):
             raise ValueError(
                 "robot joint names must be the 6 arm + 2 gripper joints of "
@@ -865,17 +859,13 @@ class RosMoveItRuntime:
             arm_planning_group
             if arm_planning_group is not None
             else (
-                profile.link6_planning_group
-                if profile is not None
-                else PLANNING_GROUP
+                profile.link6_planning_group if profile is not None else PLANNING_GROUP
             )
         )
         self._tcp_planning_group = (
             tcp_planning_group
             if tcp_planning_group is not None
-            else (
-                profile.planning_group if profile is not None else TCP_PLANNING_GROUP
-            )
+            else (profile.planning_group if profile is not None else TCP_PLANNING_GROUP)
         )
         self._qos_sensor = qos_sensor
         self._qos_state = qos_state
@@ -1085,7 +1075,9 @@ class RosMoveItRuntime:
             history=HistoryPolicy.KEEP_LAST,
             depth=50,
             reliability=(
-                ReliabilityPolicy.RELIABLE if reliable else ReliabilityPolicy.BEST_EFFORT
+                ReliabilityPolicy.RELIABLE
+                if reliable
+                else ReliabilityPolicy.BEST_EFFORT
             ),
         )
 
@@ -1109,7 +1101,10 @@ class RosMoveItRuntime:
                 qos_sensor,
             ),
             self.topics.joint_states: self.node.create_subscription(
-                joint_state_type, self.topics.joint_states, self._on_joint_state, qos_state
+                joint_state_type,
+                self.topics.joint_states,
+                self._on_joint_state,
+                qos_state,
             ),
             self.topics.isaac_joint_command: self.node.create_subscription(
                 joint_state_type,
@@ -1281,9 +1276,7 @@ class RosMoveItRuntime:
             with self._lock:
                 self._controllers_future = new_future
                 self._controllers_requested_at = self._clock_fn()
-            states = (
-                _parse_controller_states(new_future) if new_future.done() else None
-            )
+            states = _parse_controller_states(new_future) if new_future.done() else None
             if states is not None:
                 with self._lock:
                     self._controller_states = states
@@ -1560,8 +1553,7 @@ class RosMoveItRuntime:
                 details={
                     "scene_id": update.scene_id,
                     "error": (
-                        "planning-scene applier raised: "
-                        f"{type(exc).__name__}: {exc}"
+                        f"planning-scene applier raised: {type(exc).__name__}: {exc}"
                     ),
                 },
             )
@@ -1627,8 +1619,7 @@ class RosMoveItRuntime:
         future = client.call_async(request)
         if not self._wait_future(future, self._clock_fn() + float(timeout_s)):
             return None, (
-                f"{self.services.get_planning_scene} did not answer within "
-                f"{timeout_s}s"
+                f"{self.services.get_planning_scene} did not answer within {timeout_s}s"
             )
         try:
             response = future.result()
@@ -1638,8 +1629,10 @@ class RosMoveItRuntime:
             rows = list(matrix.entry_values)
         except Exception as error:
             return None, f"GetPlanningScene response is invalid: {error}"
-        if not names or len(rows) != len(names) or any(
-            len(entry.enabled) != len(names) for entry in rows
+        if (
+            not names
+            or len(rows) != len(names)
+            or any(len(entry.enabled) != len(names) for entry in rows)
         ):
             return None, (
                 "GetPlanningScene returned a non-square or empty allowed "
@@ -1702,7 +1695,8 @@ class RosMoveItRuntime:
         try:
             attached = future.result().scene.robot_state.attached_collision_objects
             matches = [
-                item for item in attached
+                item
+                for item in attached
                 if _attached_object_matches(
                     item, object_id=object_id, link_name=link_name
                 )
@@ -1730,15 +1724,22 @@ class RosMoveItRuntime:
             factories.pose_factory,
         )
         if any(item is None for item in required):
-            return {"passed": False, "readback_confirmed": False,
-                    "error": "attached-scene factories are unavailable"}
+            return {
+                "passed": False,
+                "readback_confirmed": False,
+                "error": "attached-scene factories are unavailable",
+            }
         client = self._ensure_planning_scene_client()
         if client is None or not self._service_ready(client):
-            return {"passed": False, "readback_confirmed": False,
-                    "error": "apply planning-scene client is unavailable"}
+            return {
+                "passed": False,
+                "readback_confirmed": False,
+                "error": "apply planning-scene client is unavailable",
+            }
         try:
             request = factories.apply_planning_scene_request_factory()
             request.scene.is_diff = True
+            request.scene.robot_state.is_diff = True
             collision = factories.collision_object_factory()
             collision.id = str(payload["object_id"])
             collision.header.frame_id = str(payload["frame_id"])
@@ -1762,17 +1763,28 @@ class RosMoveItRuntime:
             attached.append(attached_object)
             future = client.call_async(request)
             if not self._wait_future(future, self._clock_fn() + float(timeout_s)):
-                return {"passed": False, "readback_confirmed": False,
-                        "error": "apply planning-scene timed out"}
+                return {
+                    "passed": False,
+                    "readback_confirmed": False,
+                    "error": "apply planning-scene timed out",
+                }
             if future.result().success is not True:
-                return {"passed": False, "readback_confirmed": False,
-                        "error": "apply planning-scene reported failure"}
+                return {
+                    "passed": False,
+                    "readback_confirmed": False,
+                    "error": "apply planning-scene reported failure",
+                }
         except (AttributeError, TypeError, ValueError) as error:
-            return {"passed": False, "readback_confirmed": False,
-                    "error": f"attached-scene request malformed: {error}"}
+            return {
+                "passed": False,
+                "readback_confirmed": False,
+                "error": f"attached-scene request malformed: {error}",
+            }
         ok, error = self._read_attached_collision_object(
-            float(timeout_s), factories,
-            object_id=str(payload["object_id"]), link_name=str(payload["link_name"]),
+            float(timeout_s),
+            factories,
+            object_id=str(payload["object_id"]),
+            link_name=str(payload["link_name"]),
         )
         return {
             "passed": ok,
@@ -1780,6 +1792,121 @@ class RosMoveItRuntime:
             "attached_object_id": str(payload["object_id"]),
             "attached_link": str(payload["link_name"]),
             "error": error,
+        }
+
+    def detach_attached_planning_scene(
+        self, payload: Mapping[str, object], timeout_s: float
+    ) -> Mapping[str, object]:
+        """Detach one attached collision object and read back its absence.
+
+        MoveIt ``REMOVE`` semantics: the attached object leaves the robot
+        state entirely.  Success requires the readback to find ZERO matching
+        attached objects; an object that is still attached never passes.
+
+        Returns:
+            The strict detach evidence with its readback verdict.
+        """
+        factories = self._resolve_factories()
+        required = (
+            factories.apply_planning_scene_type,
+            factories.apply_planning_scene_request_factory,
+            factories.collision_object_factory,
+            factories.attached_collision_object_factory,
+        )
+        if any(item is None for item in required):
+            return {
+                "passed": False,
+                "readback_confirmed": False,
+                "error": "detached-scene factories are unavailable",
+            }
+        client = self._ensure_planning_scene_client()
+        if client is None or not self._service_ready(client):
+            return {
+                "passed": False,
+                "readback_confirmed": False,
+                "error": "apply planning-scene client is unavailable",
+            }
+        try:
+            request = factories.apply_planning_scene_request_factory()
+            request.scene.is_diff = True
+            request.scene.robot_state.is_diff = True
+            collision = factories.collision_object_factory()
+            collision.id = str(payload["object_id"])
+            collision.operation = getattr(type(collision), "REMOVE")
+            attached_object = factories.attached_collision_object_factory()
+            attached_object.link_name = str(payload["link_name"])
+            attached_object.object = collision
+            request.scene.robot_state.attached_collision_objects.append(attached_object)
+            future = client.call_async(request)
+            if not self._wait_future(future, self._clock_fn() + float(timeout_s)):
+                return {
+                    "passed": False,
+                    "readback_confirmed": False,
+                    "error": "detach planning-scene timed out",
+                }
+            if future.result().success is not True:
+                return {
+                    "passed": False,
+                    "readback_confirmed": False,
+                    "error": "detach planning-scene reported failure",
+                }
+        except (AttributeError, TypeError, ValueError) as error:
+            return {
+                "passed": False,
+                "readback_confirmed": False,
+                "error": f"detached-scene request malformed: {error}",
+            }
+        client_get = self._ensure_get_planning_scene_client()
+        request_factory = factories.get_planning_scene_request_factory
+        if (
+            client_get is None
+            or not self._service_ready(client_get)
+            or (request_factory is None)
+        ):
+            return {
+                "passed": False,
+                "readback_confirmed": False,
+                "error": "GetPlanningScene attached objects are unavailable",
+            }
+        get_request = request_factory()
+        get_request.components.components = PLANNING_SCENE_ROBOT_STATE_ATTACHED_OBJECTS
+        future = client_get.call_async(get_request)
+        if not self._wait_future(future, self._clock_fn() + float(timeout_s)):
+            return {
+                "passed": False,
+                "readback_confirmed": False,
+                "error": "GetPlanningScene attached objects timed out",
+            }
+        try:
+            attached = future.result().scene.robot_state.attached_collision_objects
+            matches = [
+                item
+                for item in attached
+                if getattr(item.object, "id", None) == str(payload["object_id"])
+            ]
+        except (AttributeError, TypeError, ValueError) as error:
+            return {
+                "passed": False,
+                "readback_confirmed": False,
+                "error": f"GetPlanningScene attached objects malformed: {error}",
+            }
+        if matches:
+            return {
+                "passed": False,
+                "readback_confirmed": False,
+                "detached_object_id": str(payload["object_id"]),
+                "detached_link": str(payload["link_name"]),
+                "error": (
+                    f"the attached object {payload['object_id']!r} is still "
+                    "attached after the detach request"
+                ),
+            }
+        return {
+            "passed": True,
+            "readback_confirmed": True,
+            "detached_object_id": str(payload["object_id"]),
+            "detached_link": str(payload["link_name"]),
+            "error": None,
         }
 
     def _default_planning_scene_applier(
@@ -1816,8 +1943,7 @@ class RosMoveItRuntime:
                 details={
                     "scene_id": update.scene_id,
                     "error": (
-                        f"{self.services.apply_planning_scene} client is not "
-                        "available"
+                        f"{self.services.apply_planning_scene} client is not available"
                     ),
                 },
             )
@@ -1903,9 +2029,7 @@ class RosMoveItRuntime:
             "scene_digest": computed,
         }
         if not service_success:
-            details["error"] = (
-                f"{self.services.apply_planning_scene} reported failure"
-            )
+            details["error"] = f"{self.services.apply_planning_scene} reported failure"
             return PlanningSceneResult(
                 passed=False, applied_object_ids=(), details=details
             )
@@ -2014,9 +2138,7 @@ class RosMoveItRuntime:
             )
         client = self._scene_state_client
         if client is None or not self._service_ready(client):
-            raise RuntimeError(
-                f"{self.services.scene_state} client is not available"
-            )
+            raise RuntimeError(f"{self.services.scene_state} client is not available")
         factories = self._resolve_factories()
         if factories.trigger_request_factory is None:
             raise RuntimeError(
@@ -2026,8 +2148,7 @@ class RosMoveItRuntime:
         future = client.call_async(factories.trigger_request_factory())
         if not self._wait_future(future, self._clock_fn() + float(timeout_s)):
             raise RuntimeError(
-                f"{self.services.scene_state} did not answer within "
-                f"{timeout_s}s"
+                f"{self.services.scene_state} did not answer within {timeout_s}s"
             )
         try:
             response = future.result()
@@ -2069,9 +2190,7 @@ class RosMoveItRuntime:
                 "runtime; this runtime has no robot id"
             )
         document = self.query_scene_state(timeout_s)
-        return robot_scene_view(
-            document, self._robot_id, joint_names=self._joint_names
-        )
+        return robot_scene_view(document, self._robot_id, joint_names=self._joint_names)
 
     # ------------------------------------------------------------------ sends
 
@@ -2079,7 +2198,9 @@ class RosMoveItRuntime:
         """Admit, build and send one arm joint MoveGroup goal (bounded)."""
         return self._send_goal("joint", target, timeout_s)
 
-    def send_link6_pose(self, target: Link6PoseTarget, timeout_s: float) -> ExecutionResult:
+    def send_link6_pose(
+        self, target: Link6PoseTarget, timeout_s: float
+    ) -> ExecutionResult:
         """Admit, build and send one link6 pose MoveGroup goal (bounded)."""
         return self._send_goal("pose", target, timeout_s)
 
@@ -2342,7 +2463,9 @@ class RosMoveItRuntime:
             lifecycle = details["cancel"]
             self._active_goal_future = None
             return ExecutionResult(
-                status=ExecutionStatus.TIMED_OUT, details=details, command_messages=1,
+                status=ExecutionStatus.TIMED_OUT,
+                details=details,
+                command_messages=1,
                 goal_accepted=lifecycle.get("goal_accepted"),
                 terminal=bool(lifecycle.get("terminal", False)),
                 safe_to_release=bool(lifecycle.get("safe", False)),
@@ -2354,8 +2477,12 @@ class RosMoveItRuntime:
             details["accepted"] = False
             details["error"] = "gripper_controller did not accept the goal"
             return ExecutionResult(
-                status=ExecutionStatus.REJECTED, details=details, command_messages=0,
-                goal_accepted=False, terminal=True, safe_to_release=True,
+                status=ExecutionStatus.REJECTED,
+                details=details,
+                command_messages=0,
+                goal_accepted=False,
+                terminal=True,
+                safe_to_release=True,
                 action_status="REJECTED",
             )
         self._active_handle = handle
@@ -2412,7 +2539,10 @@ class RosMoveItRuntime:
                         ):
                             lifecycle = self.cancel_active()
                             cancel_lifecycle = lifecycle
-                            if lifecycle.get("terminal") is True and lifecycle.get("safe") is True:
+                            if (
+                                lifecycle.get("terminal") is True
+                                and lifecycle.get("safe") is True
+                            ):
                                 details["contact_limited"] = True
                                 details["contact_opening_m"] = measured_contact
                                 details["cancel"] = lifecycle
@@ -2425,8 +2555,7 @@ class RosMoveItRuntime:
                 break
             self._sleep_fn(self._wait_step_s)
         details["opening_trace"] = [
-            [round(when, 3), round(opening, 6)]
-            for when, opening in opening_trace
+            [round(when, 3), round(opening, 6)] for when, opening in opening_trace
         ]
         if not contact_limited and not result_future.done():
             lifecycle = cancel_lifecycle or self.cancel_active()
@@ -2440,12 +2569,13 @@ class RosMoveItRuntime:
                 "(cancel attempted)"
             )
             return ExecutionResult(
-                status=ExecutionStatus.TIMED_OUT, details=details, command_messages=1,
+                status=ExecutionStatus.TIMED_OUT,
+                details=details,
+                command_messages=1,
                 goal_accepted=True,
                 terminal=lifecycle.get("terminal") is True,
                 safe_to_release=(
-                    lifecycle.get("terminal") is True
-                    and lifecycle.get("safe") is True
+                    lifecycle.get("terminal") is True and lifecycle.get("safe") is True
                 ),
                 cancel_evidence=lifecycle,
             )
@@ -2547,7 +2677,9 @@ class RosMoveItRuntime:
             details.get("contact_limited") is True
             and details["action_status"] in {"CANCELED", "CANCELLED"}
         ):
-            details["error"] = "gripper action did not report SUCCEEDED or safe contact-limited cancellation"
+            details["error"] = (
+                "gripper action did not report SUCCEEDED or safe contact-limited cancellation"
+            )
             return ExecutionResult(
                 status=ExecutionStatus.FAILED,
                 planned_waypoints=2,
@@ -2566,8 +2698,300 @@ class RosMoveItRuntime:
             **common,
         )
 
+    def send_guarded_tcp_pose(
+        self, target: TcpPoseTarget, guard: Mapping[str, object], timeout_s: float
+    ) -> ExecutionResult:
+        """Run a collision-planned target with live contact supervision.
+
+        Returns:
+            Terminal action evidence and sampled contact guard measurements.
+        """
+        from rocobrick.skills.contact import inspect_contact, validate_guard
+
+        validate_guard(guard)
+        if guard["robot_id"] != self.robot_id:
+            raise ValueError("contact guard robot identity mismatch")
+        reason, measured = inspect_contact(self.query_scene_state(0.5), guard)
+        if reason is not None:
+            return ExecutionResult(
+                status=ExecutionStatus.SUCCEEDED,
+                details={"contact_stop_reason": reason, "contact_trace": [measured]},
+                goal_accepted=False,
+                terminal=True,
+                safe_to_release=True,
+                action_status="REJECTED",
+            )
+        goal = self._build_pose_goal(target, self._resolve_factories())
+        goal.planning_options.plan_only = True
+        goal.request.pipeline_id = "pilz_industrial_motion_planner"
+        goal.request.planner_id = "LIN"
+        goal.request.max_velocity_scaling_factor = 0.05
+        goal.request.max_acceleration_scaling_factor = 0.05
+        initial = self.latest_isaac_state()
+        if initial is None or not self._state_fresh():
+            raise RuntimeError("contact planning requires fresh measured joint state")
+        goal.request.start_state.is_diff = False
+        goal.request.start_state.joint_state.name = list(self._joint_names)
+        goal.request.start_state.joint_state.position = [
+            float(initial[name]) for name in JOINT_NAMES
+        ]
+        goal.request.start_state.joint_state.velocity = []
+        decision = strict_action_admission(target)
+        if not decision.accepted or not self.readiness_snapshot().passed:
+            return ExecutionResult(
+                status=ExecutionStatus.REJECTED,
+                details={"error": "contact admission/readiness refused"},
+                terminal=True,
+                safe_to_release=True,
+            )
+        deadline = self._clock_fn() + float(timeout_s)
+        future = self._move_group_client.send_goal_async(goal)
+        self._active_goal_future = future
+        if not self._wait_future(future, deadline):
+            lifecycle = self.cancel_active()
+            return ExecutionResult(
+                status=ExecutionStatus.FAILED,
+                details={"cancel": lifecycle},
+                terminal=lifecycle.get("terminal") is True,
+                safe_to_release=lifecycle.get("safe") is True,
+            )
+        handle = future.result()
+        self._active_goal_future = None
+        if handle is None or not handle.accepted:
+            return ExecutionResult(
+                status=ExecutionStatus.REJECTED,
+                terminal=True,
+                safe_to_release=True,
+                details={"error": "contact plan rejected"},
+            )
+        self._active_handle = handle
+        planned = handle.get_result_async()
+        self._active_result_future = planned
+        if not self._wait_future(planned, deadline):
+            lifecycle = self.cancel_active()
+            return ExecutionResult(
+                status=ExecutionStatus.FAILED,
+                details={"cancel": lifecycle},
+                terminal=lifecycle.get("terminal") is True,
+                safe_to_release=lifecycle.get("safe") is True,
+            )
+        wrapper = planned.result()
+        self._active_handle = None
+        self._active_result_future = None
+        status = _terminal_status_name(
+            wrapper.status, self._resolve_factories().goal_status_type()
+        )
+        count, admitted = self._inspect_trajectory(wrapper.result)
+        if (
+            status != "SUCCEEDED"
+            or wrapper.result.error_code.val != SUCCESS_CODE
+            or not admitted.accepted
+        ):
+            return ExecutionResult(
+                status=ExecutionStatus.FAILED,
+                terminal=True,
+                safe_to_release=True,
+                details={"error": "collision-checked contact plan failed"},
+            )
+        reason, measured = inspect_contact(self.query_scene_state(0.5), guard)
+        if reason is not None:
+            return ExecutionResult(
+                status=ExecutionStatus.SUCCEEDED,
+                terminal=True,
+                safe_to_release=True,
+                details={"contact_stop_reason": reason, "contact_trace": [measured]},
+            )
+        return self._execute_contact_trajectory(
+            wrapper.result.planned_trajectory.joint_trajectory,
+            target,
+            guard,
+            deadline,
+            count,
+        )
+
+    def _execute_contact_trajectory(
+        self, trajectory, target: TcpPoseTarget, guard, deadline, count
+    ):
+        """Execute the admitted path with strict controller tracking tolerances.
+
+        The whole descent runs as ONE supervised action: the guard monitor
+        cancels it in flight on connection or any safety stop, so the
+        endpoint is a bound, never a promise. Speed is capped by the measured
+        Cartesian distance from the live TCP to the target so a full
+        insertion descent cannot outrun the guard sampling period.
+
+        Returns:
+            Monitored terminal action evidence; no endpoint completion retry.
+        """
+        from rocobrick.adapters.moveit.contact_trajectory import (
+            CONTACT_CARTESIAN_SPEED_MPS,
+            contact_minimum_duration_s,
+            contact_trajectory_timing,
+        )
+        from rocobrick.skills.observation import Pose
+        from rocobrick.skills.placement_geometry import pose_error
+
+        factories = self._resolve_factories()
+        if (
+            factories.follow_joint_trajectory_goal_factory is None
+            or self._arm_client is None
+        ):
+            raise RuntimeError("contact trajectory controller is unavailable")
+        times = [
+            float(point.time_from_start.sec) + point.time_from_start.nanosec * 1e-9
+            for point in trajectory.points
+        ]
+        current = self.latest_isaac_state()
+        if (
+            current is None
+            or max(
+                abs(
+                    current[name]
+                    - trajectory.points[0].positions[
+                        list(trajectory.joint_names).index(device)
+                    ]
+                )
+                for name, device in zip(ARM_JOINT_NAMES, self._arm_joint_names)
+            )
+            > 0.002
+        ):
+            raise RuntimeError("contact trajectory start drifted from planned state")
+        start_fk = self.compute_tcp_fk(current, timeout_s=0.5)
+        if start_fk is None:
+            raise RuntimeError("contact trajectory requires a measured TCP start pose")
+        contact_distance_m = math.dist(start_fk[0], tuple(target.position))
+        timing = contact_trajectory_timing(
+            times, minimum_duration_s=contact_minimum_duration_s(contact_distance_m)
+        )
+        goal = factories.follow_joint_trajectory_goal_factory()
+        goal.trajectory.joint_names = list(trajectory.joint_names)
+        for source, time_s in zip(trajectory.points, timing.times_s):
+            point = factories.joint_trajectory_point_factory()
+            point.positions = list(source.positions)
+            point.velocities = [x / timing.scale for x in source.velocities]
+            point.accelerations = [x / timing.scale**2 for x in source.accelerations]
+            point.time_from_start = self._duration_message(time_s, factories)
+            goal.trajectory.points.append(point)
+        # Controller tolerances are deliberately generous for contact moves:
+        # legitimate contact loads and uncompensated gravity droop produce
+        # real joint error that must NOT abort the supervised descent. The
+        # physical truth comes from the live scene monitor (support tilt,
+        # held-object slip, interface force, exact connection), not from
+        # tracking tightness.
+        goal.goal_tolerance = []
+        goal.path_tolerance = []
+        for name in self._arm_joint_names:
+            end = factories.joint_tolerance_factory()
+            end.name = name
+            end.position = 0.03
+            end.velocity = 0.05
+            goal.goal_tolerance.append(end)
+            path = factories.joint_tolerance_factory()
+            path.name = name
+            path.position = 0.05
+            goal.path_tolerance.append(path)
+        goal.goal_time_tolerance = self._duration_message(5.0, factories)
+        send_commands = self._command_count
+        future = self._arm_client.send_goal_async(goal)
+        self._active_goal_future = future
+        if not self._wait_future(future, deadline):
+            lifecycle = self.cancel_active()
+            return ExecutionResult(
+                status=ExecutionStatus.FAILED,
+                details={"cancel": lifecycle},
+                terminal=lifecycle.get("terminal") is True,
+                safe_to_release=lifecycle.get("safe") is True,
+            )
+        handle = future.result()
+        self._active_goal_future = None
+        if handle is None or not handle.accepted:
+            return ExecutionResult(
+                status=ExecutionStatus.REJECTED,
+                terminal=True,
+                safe_to_release=True,
+                details={"error": "arm contact goal rejected"},
+            )
+        self._active_handle = handle
+        self._active_result_future = handle.get_result_async()
+        details = {
+            "planned_waypoints": count,
+            "execution_transport": "arm_follow",
+            "contact_cartesian_distance_m": contact_distance_m,
+            "contact_speed_cap_mps": CONTACT_CARTESIAN_SPEED_MPS,
+            "planned_joint_start": dict(
+                zip(trajectory.joint_names, trajectory.points[0].positions)
+            ),
+            "planned_joint_end": dict(
+                zip(trajectory.joint_names, trajectory.points[-1].positions)
+            ),
+            "measured_joint_start": dict(current),
+            "trajectory_duration_s": timing.duration_s,
+            "goal_tolerance_rad": 0.03,
+            "path_tolerance_rad": 0.05,
+        }
+        outcome = self._await_guarded_action(
+            self._active_result_future, guard, deadline, details, send_commands
+        )
+        # Contact detection may stop before the endpoint. Otherwise require
+        # a fresh measured tool pose to match the requested short target.
+        if (
+            outcome.details.get("contact_stop_reason") is None
+            and outcome.status is ExecutionStatus.SUCCEEDED
+        ):
+            # Require fresh post-result joint feedback before live TCP FK.
+            result_states = self._isaac_state_count
+            while (
+                self._isaac_state_count <= result_states and self._clock_fn() < deadline
+            ):
+                self._spin_fn()
+                self._sleep_fn(0.01)
+            if self._isaac_state_count <= result_states or not self._state_fresh():
+                return replace(
+                    outcome,
+                    status=ExecutionStatus.FAILED,
+                    details={
+                        **outcome.details,
+                        "contact_stop_reason": "missing_fresh_final_state",
+                    },
+                )
+            final = self.latest_isaac_state()
+            fk = self.compute_tcp_fk(final, timeout_s=0.5)
+            if fk is None:
+                return replace(
+                    outcome,
+                    status=ExecutionStatus.FAILED,
+                    details={
+                        **outcome.details,
+                        "contact_stop_reason": "missing_final_fk",
+                    },
+                )
+            measured_pose = Pose(tuple(fk[0]), tuple(fk[1]))
+            expected_pose = Pose(target.position, target.orientation_xyzw)
+            position_error, angle_error = pose_error(measured_pose, expected_pose)
+            updated = {
+                **outcome.details,
+                "final_position_error_m": position_error,
+                "final_orientation_error_rad": angle_error,
+            }
+            # The endpoint bound is the target's own admission tolerance (a
+            # strict bound for descents, a free-space bound for withdrawals);
+            # uncompensated droop must fail honestly, not abort mid-motion.
+            if (
+                position_error > max(0.0005, target.position_tolerance_m)
+                or angle_error > target.orientation_tolerance_rad
+            ):
+                updated["contact_stop_reason"] = "contact_endpoint_not_reached"
+                return replace(outcome, details=updated)
+            return replace(outcome, details=updated)
+        return outcome
+
     def _send_goal(
-        self, kind: str, target: JointTarget | Link6PoseTarget | TcpPoseTarget, timeout_s: float
+        self,
+        kind: str,
+        target: JointTarget | Link6PoseTarget | TcpPoseTarget,
+        timeout_s: float,
+        *,
+        contact_guard: Mapping[str, object] | None = None,
     ) -> ExecutionResult:
         decision = strict_action_admission(target)
         if not decision.accepted:
@@ -2627,6 +3051,11 @@ class RosMoveItRuntime:
         else:
             goal = self._build_pose_goal(target, factories)
         baseline = self.latest_isaac_state()
+        if contact_guard is not None:
+            goal.request.pipeline_id = "pilz_industrial_motion_planner"
+            goal.request.planner_id = "LIN"
+            goal.request.max_velocity_scaling_factor = 0.05
+            goal.request.max_acceleration_scaling_factor = 0.05
         return self._execute_goal(
             goal,
             kind=kind,
@@ -2634,9 +3063,12 @@ class RosMoveItRuntime:
             timeout_s=float(timeout_s),
             baseline=baseline,
             factories=factories,
+            contact_guard=contact_guard,
         )
 
-    def _build_joint_goal(self, target: JointTarget, factories: RosMoveItFactories) -> Any:
+    def _build_joint_goal(
+        self, target: JointTarget, factories: RosMoveItFactories
+    ) -> Any:
         """MoveGroup joint goal: plan_only false, exact arm JointConstraints.
 
         The admitted target carries the canonical arm joint names; the
@@ -2775,6 +3207,7 @@ class RosMoveItRuntime:
         timeout_s: float,
         baseline: Mapping[str, float] | None,
         factories: RosMoveItFactories,
+        contact_guard: Mapping[str, object] | None = None,
     ) -> ExecutionResult:
         """Bounded MoveGroup send; timeout cancels and never reports success."""
         details: dict[str, object] = {"kind": kind}
@@ -2822,6 +3255,10 @@ class RosMoveItRuntime:
         details["accepted"] = True
         self._active_result_future = handle.get_result_async()
         result_future = self._active_result_future
+        if contact_guard is not None:
+            return self._await_guarded_action(
+                result_future, contact_guard, deadline, details, send_commands
+            )
         if not self._wait_future(result_future, deadline):
             details["cancel"] = self.cancel_active()
             lifecycle = details["cancel"]
@@ -2899,14 +3336,117 @@ class RosMoveItRuntime:
             details["error"] = (
                 f"moveit error code {error_code} is not SUCCESS ({SUCCESS_CODE})"
             )
-            return ExecutionResult(status=ExecutionStatus.FAILED, details=details, **common)
+            return ExecutionResult(
+                status=ExecutionStatus.FAILED, details=details, **common
+            )
         if not trajectory_decision.accepted:
             details["error"] = (
                 "planned trajectory failed caller-side waypoint admission"
             )
-            return ExecutionResult(status=ExecutionStatus.FAILED, details=details, **common)
+            return ExecutionResult(
+                status=ExecutionStatus.FAILED, details=details, **common
+            )
         return self._verify_final(
             kind, target, baseline, send_states, send_commands, common, details
+        )
+
+    def _await_guarded_action(
+        self, result_future, guard, deadline, details, send_commands
+    ):
+        """Monitor a live action without post-action pressing dwell or retries.
+
+        Returns:
+            Strict action terminal evidence and the final contact observation.
+        """
+        from rocobrick.skills.contact import allows_recovery, inspect_contact
+
+        trace = []
+        last_sequence = None
+        reason = None
+        lifecycle = None
+        try:
+            while True:
+                scene = self.query_scene_state(
+                    timeout_s=min(0.5, max(0.01, deadline - self._clock_fn()))
+                )
+                sequence = scene.get("sequence")
+                if type(sequence) is not int or (
+                    last_sequence is not None and sequence <= last_sequence
+                ):
+                    raise ValueError("contact observation is stale")
+                last_sequence = sequence
+                reason, measured = inspect_contact(scene, guard)
+                trace.append(measured)
+                if reason is not None:
+                    if not result_future.done():
+                        lifecycle = self.cancel_active()
+                    break
+                if result_future.done():
+                    break
+                if self._clock_fn() >= deadline:
+                    reason = "contact_deadline"
+                    lifecycle = self.cancel_active()
+                    break
+                self._sleep_fn(0.02)
+        except Exception as error:
+            reason = f"contact_feedback_failed: {type(error).__name__}: {error}"
+            lifecycle = self.cancel_active()
+        terminal = result_future.done()
+        status_name = None
+        if terminal:
+            wrapper = result_future.result()
+            status_name = _terminal_status_name(
+                wrapper.status, self._resolve_factories().goal_status_type()
+            )
+            if (
+                status_name == "ABORTED"
+                and details.get("execution_transport") == "arm_follow"
+            ):
+                reason = reason or "contact_tracking_stopped"
+            if status_name == "SUCCEEDED":
+                result_object = getattr(wrapper, "result", None)
+                code = getattr(getattr(result_object, "error_code", None), "val", None)
+                if details.get("execution_transport") == "arm_follow":
+                    if getattr(result_object, "error_code", None) != 0:
+                        reason = "contact_controller_result_failed"
+                elif code != SUCCESS_CODE:
+                    reason = "contact_planner_result_failed"
+                else:
+                    count, admission = self._inspect_trajectory(result_object)
+                    details["planned_waypoints"] = count
+                    if not admission.accepted:
+                        reason = "contact_trajectory_admission_failed"
+        safe = terminal and (lifecycle is None or lifecycle.get("safe") is True)
+        final_state = self.latest_isaac_state()
+        if final_state is not None and details.get("planned_joint_end"):
+            end = details["planned_joint_end"]
+            details["measured_joint_final"] = dict(final_state)
+            details["joint_final_errors"] = {
+                device: final_state[name] - end[device]
+                for name, device in zip(ARM_JOINT_NAMES, self._arm_joint_names)
+            }
+        details.update(
+            contact_trace=trace,
+            contact_stop_reason=reason,
+            contact_mode=guard["mode"],
+            action_status=status_name,
+            cancel=lifecycle or {},
+        )
+        self._active_handle = None
+        self._active_goal_future = None
+        self._active_result_future = None
+        passed = safe and (
+            status_name == "SUCCEEDED" and reason is None or allows_recovery(reason)
+        )
+        return ExecutionResult(
+            status=ExecutionStatus.SUCCEEDED if passed else ExecutionStatus.FAILED,
+            details=details,
+            command_messages=self._command_count - send_commands,
+            goal_accepted=True,
+            terminal=terminal,
+            safe_to_release=safe,
+            action_status=status_name,
+            cancel_evidence=lifecycle or {},
         )
 
     def _inspect_trajectory(self, action_result: Any) -> tuple[int, AdmissionDecision]:
@@ -2980,7 +3520,9 @@ class RosMoveItRuntime:
             canonical = by_device.get(str(key), str(key))
             if canonical in ARM_JOINT_NAMES and canonical not in planned_canonical:
                 planned_canonical[canonical] = float(value)
-        missing_planned = [name for name in ARM_JOINT_NAMES if name not in planned_canonical]
+        missing_planned = [
+            name for name in ARM_JOINT_NAMES if name not in planned_canonical
+        ]
         if missing_planned:
             evidence["attempted"] = False
             evidence["error"] = (
@@ -3025,7 +3567,9 @@ class RosMoveItRuntime:
         except Exception as exc:
             evidence["error"] = f"send_goal_async failed: {type(exc).__name__}: {exc}"
             return evidence
-        if not self._wait_future(future, min(self._clock_fn() + ACCEPT_TIMEOUT_S, deadline)):
+        if not self._wait_future(
+            future, min(self._clock_fn() + ACCEPT_TIMEOUT_S, deadline)
+        ):
             evidence["cancel"] = self.cancel_active()
             self._active_goal_future = None
             evidence["error"] = "arm completion goal was not accepted in time"
@@ -3072,7 +3616,10 @@ class RosMoveItRuntime:
         post_states = self._isaac_state_count - send_states
         post_commands = self._command_count - send_commands
         details["post_state_messages"] = post_states
-        if post_states < MIN_POST_COMMAND_STATES or post_commands < MIN_COMMAND_MESSAGES:
+        if (
+            post_states < MIN_POST_COMMAND_STATES
+            or post_commands < MIN_COMMAND_MESSAGES
+        ):
             details["error"] = (
                 f"insufficient post-command evidence: states={post_states} "
                 f"(< {MIN_POST_COMMAND_STATES}) or commands={post_commands} "
@@ -3207,7 +3754,9 @@ class RosMoveItRuntime:
         try:
             verified = verifier(dict(final))
         except Exception as exc:
-            details["error"] = f"fk verification hook raised: {type(exc).__name__}: {exc}"
+            details["error"] = (
+                f"fk verification hook raised: {type(exc).__name__}: {exc}"
+            )
             return ExecutionResult(
                 status=ExecutionStatus.FAILED, details=details, **common
             )
@@ -3218,9 +3767,7 @@ class RosMoveItRuntime:
             )
         position, quaternion = verified
         position_error = position_error_m(position, target.position)
-        orientation_error = orientation_error_rad(
-            quaternion, target.orientation_xyzw
-        )
+        orientation_error = orientation_error_rad(quaternion, target.orientation_xyzw)
         final_errors = {
             "position_error_m": position_error,
             "orientation_error_rad": orientation_error,
@@ -3228,7 +3775,9 @@ class RosMoveItRuntime:
         details["final_fk_position_m"] = [float(value) for value in position]
         details["final_fk_orientation_xyzw"] = [float(value) for value in quaternion]
         details["target_position_m"] = [float(value) for value in target.position]
-        details["target_orientation_xyzw"] = [float(value) for value in target.orientation_xyzw]
+        details["target_orientation_xyzw"] = [
+            float(value) for value in target.orientation_xyzw
+        ]
         details["position_residual_m"] = [
             float(actual) - float(goal)
             for actual, goal in zip(position, target.position)
@@ -3238,10 +3787,9 @@ class RosMoveItRuntime:
         }
         details["position_tolerance_m"] = float(target.position_tolerance_m)
         details["orientation_tolerance_rad"] = float(target.orientation_tolerance_rad)
-        if (
-            position_error > float(target.position_tolerance_m)
-            or orientation_error > float(target.orientation_tolerance_rad)
-        ):
+        if position_error > float(
+            target.position_tolerance_m
+        ) or orientation_error > float(target.orientation_tolerance_rad):
             details["error"] = (
                 "final live fk did not confirm the requested pose within tolerance"
             )
@@ -3287,7 +3835,9 @@ class RosMoveItRuntime:
                 while not goal_future.done():
                     self._spin_fn()
                     if self._clock_fn() >= deadline:
-                        info["error"] = "goal acceptance did not settle before cancel deadline"
+                        info["error"] = (
+                            "goal acceptance did not settle before cancel deadline"
+                        )
                         return info
                     self._sleep_fn(self._wait_step_s)
                 handle = goal_future.result()
@@ -3441,14 +3991,11 @@ class RosMoveItRobotSession:
             raise ValueError(
                 f"fk_timeout_s must be finite and positive, got {fk_timeout_s!r}"
             )
-        profiles = {
-            robot_id: profile_factory(robot_id) for robot_id in ids
-        }
+        profiles = {robot_id: profile_factory(robot_id) for robot_id in ids}
         for robot_id, profile in profiles.items():
             if profile.robot_id != robot_id:
                 raise ValueError(
-                    f"profile for {robot_id!r} reports robot_id "
-                    f"{profile.robot_id!r}"
+                    f"profile for {robot_id!r} reports robot_id {profile.robot_id!r}"
                 )
         assert_profiles_disjoint(tuple(profiles[robot_id] for robot_id in ids))
         self.node = node
@@ -3495,7 +4042,9 @@ class RosMoveItRobotSession:
             holder["runtime"] = runtime
             return runtime
 
-        create_runtime = runtime_factory if runtime_factory is not None else default_runtime
+        create_runtime = (
+            runtime_factory if runtime_factory is not None else default_runtime
+        )
         self.runtimes: dict[str, RosMoveItRuntime] = {
             robot_id: create_runtime(robot_id, profiles[robot_id]) for robot_id in ids
         }
@@ -3504,6 +4053,7 @@ class RosMoveItRobotSession:
 
             def executor_factory(runtime: RosMoveItRuntime) -> Any:  # noqa: E301
                 return RosMoveItExecutor(runtime)
+
         self.executors: dict[str, Any] = {
             robot_id: executor_factory(self.runtimes[robot_id]) for robot_id in ids
         }
@@ -3531,8 +4081,7 @@ class RosMoveItRobotSession:
             return self.runtimes[robot_id]
         except KeyError as error:
             raise KeyError(
-                f"unknown robot {robot_id!r}; session robots: "
-                f"{list(self.robot_ids)}"
+                f"unknown robot {robot_id!r}; session robots: {list(self.robot_ids)}"
             ) from error
 
     def executor_for(self, robot_id: str) -> Any:
@@ -3541,8 +4090,7 @@ class RosMoveItRobotSession:
             return self.executors[robot_id]
         except KeyError as error:
             raise KeyError(
-                f"unknown robot {robot_id!r}; session robots: "
-                f"{list(self.robot_ids)}"
+                f"unknown robot {robot_id!r}; session robots: {list(self.robot_ids)}"
             ) from error
 
     # -------------------------------------------------------------- readiness
@@ -3603,8 +4151,6 @@ class RosMoveItRobotSession:
             try:
                 runtime.shutdown()
             except Exception as exc:
-                self.shutdown_errors.append(
-                    f"{robot_id}: {type(exc).__name__}: {exc}"
-                )
+                self.shutdown_errors.append(f"{robot_id}: {type(exc).__name__}: {exc}")
             for message in runtime.shutdown_errors:
                 self.shutdown_errors.append(f"{robot_id}: {message}")

@@ -110,6 +110,11 @@ ATTACHED_SCENE_PAYLOAD_KEYS = frozenset({
 })
 
 
+DETACHED_SCENE_PAYLOAD_KEYS = frozenset({
+    "scene_id", "object_id", "link_name", "operation",
+})
+
+
 class OperationKind(StrEnum):
     """Exact operation vocabulary exchanged across the container boundary."""
 
@@ -117,6 +122,7 @@ class OperationKind(StrEnum):
     JOINT_TARGET = "JOINT_TARGET"
     LINK6_POSE = "LINK6_POSE"
     TCP_POSE = "TCP_POSE"
+    GUARDED_TCP_POSE = "GUARDED_TCP_POSE"
     GRIPPER_TARGET = "GRIPPER_TARGET"
     APPLY_PLANNING_SCENE = "APPLY_PLANNING_SCENE"
     ATTACH_PLANNING_SCENE = "ATTACH_PLANNING_SCENE"
@@ -416,6 +422,23 @@ def tcp_pose_operation(
     )
 
 
+def guarded_tcp_operation(
+    target: TcpPoseTarget, guard: Mapping[str, object], timeout_s: float, request_id: str
+) -> RuntimeOperation:
+    """Build a guarded contact target with unchanged TCP admission.
+
+    Returns:
+        A strictly validated robot-scoped guarded TCP operation.
+    """
+    from rocobrick.skills.contact import validate_guard
+
+    admitted = tcp_pose_operation(target, timeout_s, request_id)
+    validate_guard(guard)
+    return RuntimeOperation(OperationKind.GUARDED_TCP_POSE,
+                            {"target": admitted.payload, "guard": dict(guard)},
+                            admitted.timeout_s, admitted.request_id)
+
+
 def gripper_operation(
     target: GripperTarget, timeout_s: float, request_id: str
 ) -> RuntimeOperation:
@@ -485,6 +508,37 @@ def attached_planning_scene_operation(
     )
     if expected != payload["geometry_digest"]:
         raise OperationContractError("attached scene geometry_digest does not match")
+    return RuntimeOperation(
+        kind=OperationKind.ATTACH_PLANNING_SCENE,
+        payload=dict(payload), timeout_s=float(timeout_s), request_id=request_id,
+    )
+
+
+def detached_planning_scene_operation(
+    payload: Mapping[str, object], timeout_s: float, request_id: str
+) -> RuntimeOperation:
+    """Build one strict detach of a robot-attached collision object.
+
+    The object leaves the robot state entirely (MoveIt ``REMOVE`` semantics);
+    the caller republishes it as a world collision object in a separate
+    ``APPLY_PLANNING_SCENE`` update when the placed geometry must stay in
+    the planning scene.
+
+    Returns:
+        The validated detach runtime operation.
+    """
+    if not _is_finite(timeout_s) or float(timeout_s) <= 0.0:
+        raise OperationContractError("timeout_s must be finite and positive")
+    if not isinstance(request_id, str) or not request_id:
+        raise OperationContractError("request_id must be a non-empty string")
+    _require_exact_keys(payload, DETACHED_SCENE_PAYLOAD_KEYS, "detached scene payload")
+    for key in ("scene_id", "object_id", "link_name"):
+        if not isinstance(payload[key], str) or not payload[key]:
+            raise OperationContractError(f"detached scene {key} must be non-empty")
+    if payload["operation"] != "detach":
+        raise OperationContractError(
+            "detached scene operation must be exactly 'detach'"
+        )
     return RuntimeOperation(
         kind=OperationKind.ATTACH_PLANNING_SCENE,
         payload=dict(payload), timeout_s=float(timeout_s), request_id=request_id,

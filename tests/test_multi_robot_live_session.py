@@ -1686,7 +1686,7 @@ def test_early_stop_interrupts_the_host_promptly_with_evidenced_cleanup(tmp_path
     signal_index = runner.events.index(("signal", 2))
     assert stop_index < signal_index
     assert evidence.cleanup["container_stop"] == "exit=0 timed_out=False"
-    assert runner.clock.now == pytest.approx(90.0)
+    assert runner.clock.now == pytest.approx(2.0)
 
 
 def test_an_accepted_early_stop_honors_the_bridge_attestation(tmp_path):
@@ -1711,7 +1711,7 @@ def test_an_accepted_early_stop_honors_the_bridge_attestation(tmp_path):
     assert cleanup["host_evidence"]["commands_applied"] == 0
     assert cleanup["host_orderly_self_exit"] is False
     assert evidence.errors == ()
-    assert runner.clock.now == pytest.approx(90.0)
+    assert runner.clock.now == pytest.approx(2.0)
 
 
 def test_controller_hold_commands_do_not_invalidate_orderly_stop(tmp_path):
@@ -1919,6 +1919,7 @@ def test_the_read_only_whitelist_covers_every_operation_kind():
         "JOINT_TARGET",
         "LINK6_POSE",
         "TCP_POSE",
+        "GUARDED_TCP_POSE",
         "GRIPPER_TARGET",
         "APPLY_PLANNING_SCENE",
         "ATTACH_PLANNING_SCENE",

@@ -846,6 +846,7 @@ class FakeApplyPlanningSceneRequest:
 
 class FakeCollisionObject:
     ADD = 0
+    REMOVE = 1
 
     def __init__(self) -> None:
         self.header = SimpleNamespace(frame_id="")

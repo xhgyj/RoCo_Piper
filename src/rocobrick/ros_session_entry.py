@@ -56,7 +56,9 @@ from rocobrick.isaac_backend import (
     OperationRejected,
     RuntimeOperation,
     RuntimeOperationResult,
+    DETACHED_SCENE_PAYLOAD_KEYS,
     attached_planning_scene_operation,
+    detached_planning_scene_operation,
     planning_scene_update_from_payload,
     scene_query_from_payload,
     target_for_operation,
@@ -522,7 +524,8 @@ def filter_scene_state(document: Mapping, query: Mapping) -> dict[str, object]:
     if "robot_id" in document:
         filtered["robot_id"] = document["robot_id"]
     for key in (
-        "session_id", "manifest_sha256", "sequence", "robot_sequence", "tcp_pose"
+        "session_id", "manifest_sha256", "sequence", "robot_sequence", "tcp_pose",
+        "placement_interfaces",
     ):
         if key in document:
             filtered[key] = document[key]
@@ -701,6 +704,34 @@ def perform_operation(
             )
         if operation.kind is OperationKind.ATTACH_PLANNING_SCENE:
             try:
+                if set(map(str, operation.payload)) == set(DETACHED_SCENE_PAYLOAD_KEYS):
+                    detached_operation = detached_planning_scene_operation(
+                        operation.payload, operation.timeout_s, operation.request_id
+                    )
+                    outcome = runtime.detach_attached_planning_scene(
+                        detached_operation.payload,
+                        timeout_s=detached_operation.timeout_s,
+                    )
+                    passed = outcome.get("passed") is True
+                    record = {
+                        "motion_sent": False,
+                        "goals_sent": 0,
+                        "passed": passed,
+                        "detached_object_id": outcome.get("detached_object_id"),
+                        "detached_link": outcome.get("detached_link"),
+                        "readback_confirmed": (
+                            outcome.get("readback_confirmed") is True
+                        ),
+                        "details": _jsonable(dict(outcome)),
+                    }
+                    return RuntimeOperationResult(
+                        request_id=operation.request_id,
+                        kind=operation.kind,
+                        passed=passed,
+                        execution=record,
+                        evidence={**evidence, "motion_sent": False},
+                        error=None if passed else str(outcome.get("error")),
+                    )
                 attached_operation = attached_planning_scene_operation(
                     operation.payload, operation.timeout_s, operation.request_id
                 )
@@ -764,6 +795,30 @@ def perform_operation(
                 execution={"motion_sent": False, "scene_state": filtered},
                 evidence=evidence,
                 error=None,
+            )
+        if operation.kind is OperationKind.GUARDED_TCP_POSE:
+            from rocobrick.isaac_backend import tcp_pose_target_from_payload
+            from rocobrick.skills.contact import validate_guard
+
+            if set(operation.payload) != {"target", "guard"}:
+                raise OperationContractError("guarded TCP payload keys mismatch")
+            guard = validate_guard(operation.payload["guard"])
+            if guard["robot_id"] != runtime.robot_id:
+                raise OperationContractError("guarded TCP robot identity mismatch")
+            target = tcp_pose_target_from_payload(operation.payload["target"])
+            outcome = runtime.send_guarded_tcp_pose(target, guard, operation.timeout_s)
+            record = execution_record(outcome)
+            contact_passed = (
+                str(outcome.status.value) == "SUCCEEDED" and outcome.terminal is True
+                and outcome.safe_to_release is True
+                and bool(outcome.details.get("contact_trace"))
+            )
+            record["is_success"] = contact_passed
+            return RuntimeOperationResult(
+                request_id=operation.request_id, kind=operation.kind,
+                passed=contact_passed, execution=record,
+                evidence={**evidence, "motion_sent": outcome.command_messages > 0},
+                error=None if record["is_success"] else "guarded contact motion stopped",
             )
         target = target_for_operation(operation)
         if isinstance(target, JointTarget):

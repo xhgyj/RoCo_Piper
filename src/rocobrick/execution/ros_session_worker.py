@@ -66,7 +66,7 @@ def terminal_safe(result: RosSessionResult) -> bool:
         if not isinstance(execution, Mapping):
             return False
         kind = record.get("kind")
-        if kind in {"JOINT_TARGET", "LINK6_POSE", "TCP_POSE", "GRIPPER_TARGET"}:
+        if kind in {"JOINT_TARGET", "LINK6_POSE", "TCP_POSE", "GUARDED_TCP_POSE", "GRIPPER_TARGET"}:
             if execution.get("terminal") is not True:
                 return False
             if execution.get("safe_to_release") is not True:
