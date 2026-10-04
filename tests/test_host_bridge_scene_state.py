@@ -234,6 +234,7 @@ def test_happy_path_document_structure(bridge_module) -> None:
         "connections": {PAIR_KEY: False},
         "gripper": {"gripper_joint1": 0.01, "gripper_joint2": -0.01},
         "opening_m": 0.02,
+        "scene_digest": document["scene_digest"],
     }
     assert "opening_error" not in document
 

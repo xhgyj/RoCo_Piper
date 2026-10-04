@@ -947,7 +947,7 @@ def test_start_proves_every_robot_ready_in_one_host_and_one_container(tmp_path):
     # ONE container running the A3 dual launch for BOTH robots.
     assert len(runner.container_names) == 1
     container_script = runner.commands[2][0][-1]
-    assert "robot_ids:=piper_0,piper_1" in container_script
+    assert "robot_ids:=piper_0,piper_1" not in container_script
     assert "use_sim_time:=true" in container_script
     assert "config_output_dir:=/session/dual-robot-config" in container_script
     assert DUAL_LAUNCH_PACKAGE in container_script

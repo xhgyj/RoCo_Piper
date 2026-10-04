@@ -60,11 +60,43 @@ PLACE_DOWN_PROGRAM = SkillProgram(
         SkillPhase("transport", ActionType.TRANSPORT, "measured_pose"),
         SkillPhase("align", ActionType.ALIGN, "measured_alignment"),
         SkillPhase("insert_segments", ActionType.INSERT, "force_pose_envelope"),
-        SkillPhase("confirm_connection", ActionType.VERIFY_CONNECTION, "observable_connection"),
+        SkillPhase(
+            "confirm_connection", ActionType.VERIFY_CONNECTION, "observable_connection"
+        ),
         SkillPhase("release", ActionType.RELEASE, "measured_gripper"),
         SkillPhase("confirm_release", ActionType.RELEASE, "observable_release"),
-        SkillPhase("publish_assembled", ActionType.VERIFY_CONNECTION, "connection_and_release"),
-        SkillPhase("retreat", ActionType.RETREAT, "measured_pose"),
+        SkillPhase(
+            "publish_assembled", ActionType.VERIFY_CONNECTION, "connection_and_release"
+        ),
+        SkillPhase("handoff_transport", ActionType.RETREAT, "handoff_terminal_safe"),
+    ),
+)
+
+PLACE_UP_PROGRAM = SkillProgram(
+    SkillType.PLACE_UP,
+    (
+        SkillPhase("transport", ActionType.TRANSPORT, "measured_pose"),
+        SkillPhase("align", ActionType.ALIGN, "measured_alignment"),
+        SkillPhase("insert_ascent", ActionType.INSERT, "force_pose_envelope"),
+        SkillPhase(
+            "confirm_connection", ActionType.VERIFY_CONNECTION, "observable_connection"
+        ),
+        SkillPhase("release", ActionType.RELEASE, "measured_gripper"),
+        SkillPhase("confirm_release", ActionType.RELEASE, "observable_release"),
+        SkillPhase(
+            "publish_assembled", ActionType.VERIFY_CONNECTION, "connection_and_release"
+        ),
+        SkillPhase("handoff_transport", ActionType.RETREAT, "handoff_terminal_safe"),
+    ),
+)
+SUPPORT_TOP_PROGRAM = SkillProgram(
+    SkillType.SUPPORT_TOP,
+    (
+        SkillPhase("reach_support", ActionType.TRANSPORT, "measured_pose"),
+        SkillPhase("maintain_support", ActionType.INSERT, "support_handoff_required"),
+        SkillPhase(
+            "confirm_support", ActionType.VERIFY_CONNECTION, "observable_support"
+        ),
     ),
 )
 
@@ -73,6 +105,8 @@ PROGRAMS = {
     SkillType.TRANSIT: TRANSIT_PROGRAM,
     SkillType.WAIT: WAIT_PROGRAM,
     SkillType.PLACE_DOWN: PLACE_DOWN_PROGRAM,
+    SkillType.PLACE_UP: PLACE_UP_PROGRAM,
+    SkillType.SUPPORT_TOP: SUPPORT_TOP_PROGRAM,
 }
 
 

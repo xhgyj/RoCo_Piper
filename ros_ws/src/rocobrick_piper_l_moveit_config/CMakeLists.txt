@@ -10,3 +10,8 @@ install(
   DIRECTORY config launch urdf
   DESTINATION share/${PROJECT_NAME}
 )
+
+install(
+  PROGRAMS scripts/dual_joint_state_aggregator.py
+  DESTINATION lib/${PROJECT_NAME}
+)

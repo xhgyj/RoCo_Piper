@@ -80,9 +80,12 @@ ALLOWED_ROCOBRICK = {
     "rocobrick.isaac_snapshot_host_adapter",
     "rocobrick.skills.pick",
     "rocobrick.skills.place_down",
+    "rocobrick.skills.place_up",
+    "rocobrick.skills.support_top",
     "rocobrick.plan.structure_scene",
     "rocobrick.robot_operation_executor",
     "rocobrick.robot_operation_runner",
+    "rocobrick.unified_runtime_facade",
 }
 BANNED_RUNTIME_PREFIXES = (
     "rclpy",

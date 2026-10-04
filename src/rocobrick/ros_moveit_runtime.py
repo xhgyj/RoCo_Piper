@@ -107,6 +107,7 @@ from rocobrick.robot_runtime_profile import (
     RobotRuntimeProfile,
     assert_profiles_disjoint,
 )
+from rocobrick.unified_readiness import UnifiedDualArmReadiness
 
 PLANNING_GROUP = "arm"
 # MoveGroup group for project-calibrated TCP goals (SRDF chain arm_tcp).
@@ -470,6 +471,8 @@ def robot_scene_view(
         view["session_id"] = document["session_id"]
     if "manifest_sha256" in document:
         view["manifest_sha256"] = document["manifest_sha256"]
+    if "scene_digest" in document:
+        view["scene_digest"] = document["scene_digest"]
     if "sequence" in document:
         view["sequence"] = document["sequence"]
     if "sequence" in block:
@@ -4058,12 +4061,96 @@ class RosMoveItRobotSession:
             robot_id: executor_factory(self.runtimes[robot_id]) for robot_id in ids
         }
 
+        from rocobrick.coordinated_ros_runtime import CoordinatedMoveItPlanRuntime
+        from rocobrick.unified_ros_runtime import UnifiedDualArmRuntime
+
+        self._coordinated_runtime = None
+        if set(ids) == {"piper_0", "piper_1"}:
+            self._coordinated_runtime = CoordinatedMoveItPlanRuntime(
+                node,
+                joint_binding={
+                    robot_id: self.runtimes[robot_id].arm_joint_names
+                    for robot_id in ids
+                },
+                factories=factories,
+                clock=self._clock_fn,
+                spin=self._spin_fn,
+                sleep=self._sleep_fn,
+                wait_step_s=self._wait_step_s,
+            )
+        self._unified_runtime = (
+            UnifiedDualArmRuntime(self, self._coordinated_runtime)
+            if self._coordinated_runtime is not None
+            else None
+        )
+
+    def unified_readiness(
+        self, request, *, probe_scene: bool = True
+    ) -> UnifiedDualArmReadiness:
+        """Evaluate one shared combined-planner readiness snapshot."""
+        if tuple(request.robots) != self.robot_ids:
+            raise ValueError("unified request robots do not match session")
+        runtime = self._coordinated_runtime
+        if runtime is None:
+            raise RuntimeError("unified dual-arm runtime is not configured")
+        runtime.register()
+        shared = self.runtimes[self.robot_ids[0]].query_scene_state(1.0)
+        robots = shared.get("robots")
+        if not isinstance(robots, Mapping) or set(robots) != set(self.robot_ids):
+            raise RuntimeError("shared scene snapshot does not cover all robots")
+        digest = shared.get("scene_digest")
+        if digest != request.scene_digest:
+            raise RuntimeError("shared scene digest does not match request")
+        sequence = shared.get("sequence")
+        if type(sequence) is not int or sequence < 0:
+            raise RuntimeError("shared scene sequence is invalid")
+        sim_time = shared.get("sim_time_s")
+        if not isinstance(sim_time, (int, float)):
+            raise RuntimeError("shared scene simulation time is invalid")
+        controller_ready: dict[str, bool] = {}
+        state_complete = True
+        clock_increasing = True
+        for robot_id in self.robot_ids:
+            robot = self.runtimes[robot_id]
+            state_complete = state_complete and robot.latest_isaac_state() is not None
+            controller_ready[robot_id] = robot.readiness_snapshot().controllers_active
+        return UnifiedDualArmReadiness(
+            robots=self.robot_ids,
+            clock_increasing=clock_increasing,
+            combined_joint_state_complete=state_complete,
+            scene_snapshot_fresh=True,
+            scene_digest_match=True,
+            combined_move_group_ready=runtime.ready(),
+            controllers_ready=controller_ready,
+        )
+
+    def coordinated_readiness(self, request) -> dict[str, object]:
+        """Build strict readiness evidence for one combined request.
+
+        Returns:
+            Combined participant, scene, and action readiness evidence.
+        """
+        if tuple(request.robots) != self.robot_ids:
+            raise ValueError("coordinated request robots do not match session")
+        readiness = self.unified_readiness(request)
+        if not readiness.passed:
+            raise RuntimeError("unified dual-arm readiness failed")
+        return readiness.serialize()
+
+    def coordinated_plan_runtime(self):
+        """Return the combined MoveIt plan-only transport."""
+        if self._coordinated_runtime is None:
+            raise RuntimeError("combined MoveIt runtime requires both Piper robots")
+        return self._coordinated_runtime
+
     # ------------------------------------------------------------ registration
 
     def register(self) -> None:
         """Register every robot's subscriptions and clients exactly once."""
         self.register_subscriptions()
         self.register_clients()
+        if self._coordinated_runtime is not None:
+            self._coordinated_runtime.register()
 
     def register_subscriptions(self) -> None:
         for runtime in self.runtimes.values():

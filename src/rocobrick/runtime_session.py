@@ -55,6 +55,12 @@ from typing import Protocol
 from uuid import uuid4
 
 from rocobrick.compat import StrEnum
+from rocobrick.coordinated_layer import CoordinatedLayerGroup
+from rocobrick.coordinated_session import (
+    CoordinatedSessionRequest,
+    CoordinatedSessionResult,
+    parse_coordinated_request,
+)
 from rocobrick.isaac_backend import (
     OperationContractError,
     OperationKind,
@@ -1356,7 +1362,7 @@ class IsaacMoveItSession:
 
 MULTI_ROBOT_SESSION_SCHEMA = "rocobrick-multi-robot-live-session/v1"
 DUAL_LAUNCH_PACKAGE = "rocobrick_piper_l_moveit_config"
-DUAL_LAUNCH_FILE = "dual_move_group.launch.py"
+DUAL_LAUNCH_FILE = "dual_arm_move_group.launch.py"
 DUAL_LAUNCH_RELPATH = Path(
     f"ros_ws/src/{DUAL_LAUNCH_PACKAGE}/launch/{DUAL_LAUNCH_FILE}"
 )
@@ -1373,7 +1379,7 @@ fi
 source /workspace/ros_ws/install/setup.bash
 set -u
 exec ros2 launch %(package)s %(launch_file)s \\
-  robot_ids:=%(robots)s use_sim_time:=true \\
+  use_sim_time:=true \\
   config_output_dir:=%(config_dir)s
 """
 GENERATED_CONFIG_FILES = (
@@ -1646,6 +1652,8 @@ def build_global_scene_document(
         **({"session_id": view["session_id"]} if "session_id" in view else {}),
         **({"manifest_sha256": view["manifest_sha256"]}
            if "manifest_sha256" in view else {}),
+        **({"scene_digest": view["scene_digest"]}
+           if "scene_digest" in view else {}),
         **({"sequence": view["sequence"]} if "sequence" in view else {}),
         **({"placement_interfaces": view["placement_interfaces"]}
            if "placement_interfaces" in view else {}),
@@ -2533,7 +2541,6 @@ class MultiRobotIsaacMoveItSession:
             "launch",
             DUAL_LAUNCH_PACKAGE,
             DUAL_LAUNCH_FILE,
-            f"robot_ids:={','.join(self.config.robot_ids)}",
             "use_sim_time:=true",
             "config_output_dir:="
             f"{CONTAINER_SESSION_MOUNT}/{self.config.config_output_subdir}",
@@ -2880,6 +2887,42 @@ class MultiRobotIsaacMoveItSession:
 
     # ------------------------------------------------------ motion dispatch
 
+    def execute_successor_pre_phase(
+        self, request: CoordinatedSessionRequest
+    ) -> CoordinatedSessionResult:
+        """Dispatch one unified successor pre-phase to the child ROS session."""
+        self._require_ready("execute_successor_pre_phase")
+        if request.robots != self.config.robot_ids:
+            raise MultiRobotSessionError(
+                "successor pre-phase robots do not match session robots"
+            )
+        directory = self.session_dir / "coordinated"
+        request_path = directory / f"{request.coordination_id}-request.json"
+        result_path = directory / f"{request.coordination_id}-result.json"
+        _write_json_atomic(request_path, request.serialize())
+        outcome = self.runner.run(
+            self._session_child_argv(request_path, result_path),
+            timeout_s=self.config.operation_timeout_s + CHILD_EXEC_MARGIN_S,
+        )
+        if outcome.timed_out or not result_path.is_file():
+            raise self._fail(
+                "successor_pre_phase",
+                "child coordinated session did not produce a result",
+            )
+        try:
+            result = CoordinatedSessionResult.parse(
+                json.loads(result_path.read_text(encoding="utf-8"))
+            )
+        except (OSError, ValueError) as error:
+            raise self._fail(
+                "successor_pre_phase", f"coordinated result is invalid: {error}"
+            ) from error
+        if result.coordination_id != request.coordination_id or result.robots != request.robots:
+            raise self._fail(
+                "successor_pre_phase", "coordinated result identity mismatch"
+            )
+        return result
+
     def run_motion_operation(
         self, robot_id: str, operation: RuntimeOperation
     ) -> Mapping[str, object]:
@@ -2964,7 +3007,76 @@ class MultiRobotIsaacMoveItSession:
             self._write_evidence()
             raise
 
-    # ------------------------------------------------------ motion cancellation
+    def plan_coordinated_layer(
+        self,
+        group: CoordinatedLayerGroup,
+        operations: tuple[object, ...],
+    ) -> Mapping[str, object]:
+        """Plan one task-C pre-phase layer through the combined MoveIt group.
+
+        This method only proves free-space/pre-contact arrival. It never runs
+        SUPPORT_TOP, PLACE_UP, gripper, insertion, release, or retreat contact
+        phases. Every original operation id receives independent evidence.
+        """
+        self._require_ready("execute_coordinated_layer")
+        if len(operations) != 2:
+            raise MultiRobotSessionError("coordinated layer requires two operations")
+        observations = {
+            robot_id: self.observe_sync(robot_id) for robot_id in group.robot_ids
+        }
+        digest_values = {
+            str(document.get("scene_digest"))
+            for document in observations.values()
+            if document.get("scene_digest")
+        }
+        if len(digest_values) != 1:
+            raise MultiRobotSessionError(
+                "coordinated layer requires one shared scene digest"
+            )
+        pre_phase_targets = getattr(group, "pre_phase_targets", None)
+        if not isinstance(pre_phase_targets, Mapping):
+            raise MultiRobotSessionError(
+                "coordinated layer requires geometry-derived pre_phase_targets"
+            )
+        targets = {
+            robot_id: dict(pre_phase_targets[robot_id])
+            for robot_id in group.robot_ids
+            if robot_id in pre_phase_targets
+        }
+        if set(targets) != set(group.robot_ids):
+            raise MultiRobotSessionError(
+                "coordinated layer pre_phase_targets do not cover participants"
+            )
+        request = CoordinatedSessionRequest(
+            coordination_id=f"layer-{uuid4().hex[:12]}",
+            robots=group.robot_ids,
+            scene_digest=next(iter(digest_values)),
+            planning_group="dual_arm",
+            plan_only=True,
+            timeout_s=self.config.operation_timeout_s,
+            targets=targets,
+        )
+        from rocobrick.coordinated_session_entry import perform_coordinated_plan
+
+        result = perform_coordinated_plan(self, request)
+        if not result.passed:
+            return {
+                operation.operation_id: {
+                    "operation_id": operation.operation_id,
+                    "robot_id": operation.executor_robot_id,
+                    "status": "FAILED",
+                    "passed": False,
+                    "terminal": True,
+                    "motion_sent": False,
+                    "evidence": {"coordinated_plan": result.serialize()},
+                    "reason": result.error or "coordinated pre-phase failed",
+                }
+                for operation in operations
+            }
+        raise MultiRobotSessionError(
+            "coordinated plan-only evidence is not executable pre-phase proof"
+        )
+
 
     def cancel_motion_operation(self, operation_id: str) -> Mapping[str, object]:
         """Signal one running motion child and wait for its strict result."""

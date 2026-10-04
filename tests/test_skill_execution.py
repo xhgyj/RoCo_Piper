@@ -30,7 +30,7 @@ async def test_place_down_publishes_assembled_only_after_connection_and_release(
     backend = Backend()
     result = await execute_skill(plan.tasks["foundation:left"], "run-1", backend, store.apply)
     assert result.assembled
-    assert result.retreat_confirmed
+    assert not result.retreat_confirmed
     assert [event.event_type for event in result.events] == [EventType.TASK_ASSEMBLED]
     assert backend.requested.index("confirm_connection") < backend.requested.index("confirm_release")
 
@@ -44,10 +44,7 @@ async def test_retreat_failure_is_reported_after_assembly_without_revoking_it(pa
     )
     assert result.assembled
     assert not result.retreat_confirmed
-    assert [event.event_type for event in result.events] == [
-        EventType.TASK_ASSEMBLED,
-        EventType.RETREAT_FAILED,
-    ]
+    assert [event.event_type for event in result.events] == [EventType.TASK_ASSEMBLED]
 
 
 @pytest.mark.asyncio

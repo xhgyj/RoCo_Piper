@@ -53,6 +53,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 from typing import Protocol
 
+from rocobrick.coordinated_layer import coordinated_layer_group
 from rocobrick.multi_robot_scheduler import (
     CancelEvidence,
     JSONValue,
@@ -61,10 +62,26 @@ from rocobrick.multi_robot_scheduler import (
 )
 from rocobrick.operation_state_ledger import OperationStateLedger
 from rocobrick.robot_operation_plan import RobotOperation
+from rocobrick.skills.observation import (
+    Pose,
+    _pose,
+    parse_pick_observation,
+    parse_place_observation,
+)
+from rocobrick.skills.placement_geometry import interface_place_up_targets
+from rocobrick.skills.targets import (
+    _tcp_pose_target,
+    world_orientation_to_base,
+    world_position_to_base,
+)
 from rocobrick.transit_adapter import (
     MotionExecution,
     TransitContext,
     resolve_transit_target,
+)
+from rocobrick.unified_dual_arm_runtime import (
+    SuccessorPrePhaseEvidence,
+    SuccessorPrePhaseRequest,
 )
 
 SCENE_STATE_SCHEMA = "rocobrick-scene-state/v1"
@@ -74,14 +91,18 @@ WAIT = "WAIT"
 PICK = "PICK"
 TRANSIT = "TRANSIT"
 PLACE_DOWN = "PLACE_DOWN"
-MOTION_SKILLS = frozenset({PICK, TRANSIT, PLACE_DOWN})
+PLACE_UP = "PLACE_UP"
+SUPPORT_TOP = "SUPPORT_TOP"
+MOTION_SKILLS = frozenset({PICK, TRANSIT, PLACE_DOWN, PLACE_UP, SUPPORT_TOP})
 
 LABEL_REAL_SCENE_OBSERVATION = "real_scene_observation"
 LABEL_WAIT_DURATION_CONFIRMED = "wait_duration_confirmed"
-WAIT_EVIDENCE_LABELS = frozenset({
-    LABEL_REAL_SCENE_OBSERVATION,
-    LABEL_WAIT_DURATION_CONFIRMED,
-})
+WAIT_EVIDENCE_LABELS = frozenset(
+    {
+        LABEL_REAL_SCENE_OBSERVATION,
+        LABEL_WAIT_DURATION_CONFIRMED,
+    }
+)
 
 REASON_CAPABILITY_UNAVAILABLE = "CAPABILITY_UNAVAILABLE"
 REASON_ROBOT_NOT_VALIDATED = "ROBOT_NOT_VALIDATED"
@@ -95,20 +116,40 @@ REASON_STRUCTURAL_FACT_UNSTABLE = "WAIT_STRUCTURAL_FACT_UNSTABLE"
 REASON_OPERATION_ALREADY_ACTIVE = "OPERATION_ALREADY_ACTIVE"
 REASON_CANCELLED = "CANCELLED"
 
-_REF_KEYS = frozenset({
-    "kind",
-    "physical_instance_id",
-    "connection_id",
-    "robot_id",
-})
+_REF_KEYS = frozenset(
+    {
+        "kind",
+        "physical_instance_id",
+        "connection_id",
+        "robot_id",
+    }
+)
 _REF_KINDS = frozenset({"robot_current", "robot_home", "part", "connection"})
 _PICK_KEYS = frozenset({"physical_instance_id"})
 _TRANSIT_KEYS = frozenset({"from", "to", "carrying_physical_instance_id"})
-_PLACE_DOWN_KEYS = frozenset({
-    "connection_id",
-    "upper_physical_instance_id",
-    "lower_physical_instance_id",
-})
+_PLACE_DOWN_KEYS = frozenset(
+    {
+        "connection_id",
+        "upper_physical_instance_id",
+        "lower_physical_instance_id",
+    }
+)
+_PLACE_UP_KEYS = frozenset(
+    {
+        "connection_id",
+        "upper_physical_instance_id",
+        "lower_physical_instance_id",
+        "support_robot_id",
+    }
+)
+_SUPPORT_TOP_KEYS = frozenset(
+    {
+        "connection_id",
+        "upper_physical_instance_id",
+        "lower_physical_instance_id",
+        "placement_robot_id",
+    }
+)
 _WAIT_PARAMETER_KEYS = frozenset({"observation", "duration_s"})
 _OBSERVATION_KEYS = frozenset({"kind", "fact", "physical_instance_id"})
 
@@ -293,9 +334,7 @@ def _reference_valid(value: object, executor_robot_id: str) -> bool:
     if kind == "robot_current":
         return connection is None and physical is None and robot is None
     if kind == "robot_home":
-        return (
-            connection is None and physical is None and robot == executor_robot_id
-        )
+        return connection is None and physical is None and robot == executor_robot_id
     if kind == "part":
         return _text(physical) and connection is None and robot is None
     return _text(connection) and physical is None and robot is None
@@ -326,12 +365,19 @@ def _target_valid(skill: str, target: object, executor_robot_id: str) -> bool:
         if carrying is not None and not _text(carrying):
             return False
         return all(
-            _reference_valid(target[key], executor_robot_id)
-            for key in ("from", "to")
+            _reference_valid(target[key], executor_robot_id) for key in ("from", "to")
         )
     if skill == PLACE_DOWN:
         return set(target) == _PLACE_DOWN_KEYS and all(
             _text(target[key]) for key in _PLACE_DOWN_KEYS
+        )
+    if skill == PLACE_UP:
+        return set(target) == _PLACE_UP_KEYS and all(
+            _text(target[key]) for key in _PLACE_UP_KEYS
+        )
+    if skill == SUPPORT_TOP:
+        return set(target) == _SUPPORT_TOP_KEYS and all(
+            _text(target[key]) for key in _SUPPORT_TOP_KEYS
         )
     return False
 
@@ -442,9 +488,7 @@ def _observation(
     if not isinstance(document, Mapping):
         raise _ObservationError("observation is not an object")
     if document.get("schema") != SCENE_STATE_SCHEMA:
-        raise _ObservationError(
-            f"observation schema must be {SCENE_STATE_SCHEMA!r}"
-        )
+        raise _ObservationError(f"observation schema must be {SCENE_STATE_SCHEMA!r}")
     if _finite_number(document.get("sim_time_s")) is None:
         raise _ObservationError("shared sim_time_s is not a finite number")
     bricks = document.get("bricks")
@@ -460,8 +504,7 @@ def _observation(
         raise _ObservationError(f"robots[{robot_id!r}] block is missing")
     if block.get("robot_id") != robot_id:
         raise _ObservationError(
-            f"robots[{robot_id!r}] block is owned by "
-            f"{block.get('robot_id')!r}"
+            f"robots[{robot_id!r}] block is owned by {block.get('robot_id')!r}"
         )
     sim_time = _finite_number(block.get("sim_time_s"))
     if sim_time is None:
@@ -512,14 +555,76 @@ def _aabb_stable(reference: _Aabb, current: _Aabb, tolerance_m: float) -> bool:
     )
 
 
-class SkillOperationExecutor:
-    """Zero-motion :class:`RobotOperationExecutor` implementation (A7).
+def _pose_from_mapping(value: object) -> Pose:
+    """Parse one interface rigid pose.
 
-    The executor is constructed with the validated plan robot ids and one
-    injected per-robot read-only observation transport. It sends no motion,
-    writes no runtime document and imports no runtime/session/skill module;
-    the scheduler owns result validation and serialization.
+    Returns:
+        The validated rigid pose.
     """
+    if not isinstance(value, Mapping):
+        raise ValueError("interface pose is missing")
+    return _pose(value, "interface pose")
+
+
+def _tcp_target_mapping(target: object, robot_id: str) -> Mapping[str, object]:
+    """Serialize one calibrated TCP target.
+
+    Returns:
+        A JSON-safe pre-phase target mapping.
+    """
+    required = (
+        "position",
+        "orientation_xyzw",
+        "runtime_model_sha256",
+        "source_sha256",
+        "position_tolerance_m",
+        "orientation_tolerance_rad",
+    )
+    if any(not hasattr(target, name) for name in required):
+        raise ValueError("pre-phase target is not a calibrated TcpPoseTarget")
+    return {
+        "kind": "pre_phase",
+        "tcp_pose": {
+            "position": tuple(target.position),
+            "orientation_xyzw": tuple(target.orientation_xyzw),
+            "tip_link": f"{robot_id}_rocobrick_tcp",
+            "frame_id": f"{robot_id}_base_link",
+            "runtime_model_sha256": target.runtime_model_sha256,
+            "source_sha256": target.source_sha256,
+            "position_tolerance_m": target.position_tolerance_m,
+            "orientation_tolerance_rad": target.orientation_tolerance_rad,
+        },
+    }
+
+
+def _support_pre_phase_target(
+    observation, context: TransitContext
+) -> Mapping[str, object]:
+    """Derive support TCP pose above a measured upper brick.
+
+    Returns:
+        A geometry-derived pre-phase target mapping.
+    """
+    minimum = observation.aabb_min
+    maximum = observation.aabb_max
+    world = (
+        (minimum[0] + maximum[0]) / 2.0,
+        (minimum[1] + maximum[1]) / 2.0,
+        maximum[2] - context.params.support_press_m,
+    )
+    target = _tcp_pose_target(
+        world_position_to_base(world, context.base),
+        world_orientation_to_base(
+            observation.tcp_pose.orientation_xyzw, context.base
+        ),
+        context.provenance,
+        context.params,
+    )
+    return _tcp_target_mapping(target, observation.robot_id)
+
+
+class SkillOperationExecutor:
+    """Zero-motion :class:`RobotOperationExecutor` implementation (A7)."""
 
     def __init__(
         self,
@@ -534,6 +639,10 @@ class SkillOperationExecutor:
         transit_contexts: Mapping[str, TransitContext] | None = None,
         pick_backends: Mapping[str, object] | None = None,
         place_backends: Mapping[str, object] | None = None,
+        place_up_backends: Mapping[str, object] | None = None,
+        support_backends: Mapping[str, object] | None = None,
+        coordinated_layer_transport: object | None = None,
+        pre_phase_runtime: object | None = None,
         state_ledger: OperationStateLedger | None = None,
     ) -> None:
         """Validate the robot set, transport and bounded polling knobs.
@@ -552,10 +661,19 @@ class SkillOperationExecutor:
             aabb_tolerance_m: Maximum allowed absolute AABB corner delta for
                 the structural fact to count as stable.
 
-        Raises:
-            ValueError: If the robot ids are empty, duplicated or malformed,
-                the transport exposes no callable ``observe``, or a numeric
-                knob is out of range.
+        Returns:
+            Constructor state is stored after validating transport boundaries.
+
+        Args:
+            coordinated_layer_transport: Optional layer-level transport.
+            pre_phase_runtime: Unified successor pre-phase runtime.
+            transit_adapters: Per-robot free-space adapters.
+            transit_contexts: Per-robot calibrated target contexts.
+            pick_backends: Per-robot PICK handlers.
+            place_backends: Per-robot PLACE_DOWN handlers.
+            place_up_backends: Per-robot PLACE_UP handlers.
+            support_backends: Per-robot SUPPORT_TOP handlers.
+            state_ledger: Optional confirmed physical-state ledger.
         """
         if (
             isinstance(robot_ids, (str, bytes, bytearray))
@@ -575,13 +693,9 @@ class SkillOperationExecutor:
             )
         self._robot_ids = validated
         self._observation_transport = observation_transport
-        self._poll_interval_s = _positive_number(
-            poll_interval_s, "poll_interval_s"
-        )
+        self._poll_interval_s = _positive_number(poll_interval_s, "poll_interval_s")
         self._wait_timeout_s = _positive_number(wait_timeout_s, "wait_timeout_s")
-        self._cancel_timeout_s = _positive_number(
-            cancel_timeout_s, "cancel_timeout_s"
-        )
+        self._cancel_timeout_s = _positive_number(cancel_timeout_s, "cancel_timeout_s")
         self._aabb_tolerance_m = _non_negative_number(
             aabb_tolerance_m, "aabb_tolerance_m"
         )
@@ -589,6 +703,10 @@ class SkillOperationExecutor:
         self._transit_contexts = dict(transit_contexts or {})
         self._pick_backends = dict(pick_backends or {})
         self._place_backends = dict(place_backends or {})
+        self._place_up_backends = dict(place_up_backends or {})
+        self._support_backends = dict(support_backends or {})
+        self._coordinated_layer_transport = coordinated_layer_transport
+        self._pre_phase_runtime = pre_phase_runtime
         self._state_ledger = state_ledger
         self._active: dict[str, _ActiveOperation] = {}
         self._finished: dict[str, bool] = {}
@@ -601,6 +719,290 @@ class SkillOperationExecutor:
             The robot ids in constructor order.
         """
         return self._robot_ids
+
+    async def execute_layer(
+        self, operations: Sequence[RobotOperation]
+    ) -> Mapping[str, object]:
+        """Execute an eligible layer through one coordinated transport.
+
+        Returns:
+            One strict result per original operation id.
+        """
+        group = coordinated_layer_group(tuple(operations))
+        if group is None:
+            raise ValueError("layer is not an eligible coordinated operation group")
+        transport = self._coordinated_layer_transport
+        execute = getattr(transport, "execute_layer", None)
+        if not callable(execute):
+            raise RuntimeError("coordinated layer transport is unavailable")
+        observations: dict[str, Mapping[str, object]] = {}
+        for robot_id in group.robot_ids:
+            observations[robot_id] = await self._observe_or_cancel(
+                robot_id,
+                asyncio.Event(),
+            ) or {}
+        targets = self._derive_coordinated_targets(group, observations)
+        group = replace(group, pre_phase_targets=targets)
+        raw = execute(group, tuple(operations))
+        if inspect.isawaitable(raw):
+            raw = await raw
+        if not isinstance(raw, Mapping):
+            raise TypeError("coordinated layer transport must return a mapping")
+        return raw
+
+    def _derive_coordinated_targets(
+        self,
+        group: object,
+        observations: Mapping[str, Mapping[str, object]],
+    ) -> Mapping[str, Mapping[str, object]]:
+        """Derive geometry-backed TCP targets for a coordinated pre-phase."""
+        if not hasattr(group, "robot_ids"):
+            raise ValueError("coordinated group identity is unavailable")
+        targets: dict[str, Mapping[str, object]] = {}
+        for robot_id in group.robot_ids:
+            context = self._transit_contexts.get(robot_id)
+            if context is None:
+                raise ValueError(f"no calibrated context for {robot_id}")
+            document = observations.get(robot_id)
+            block = (
+                document.get("robots", {}).get(robot_id)
+                if isinstance(document, Mapping)
+                else None
+            )
+            tcp = block.get("tcp_pose") if isinstance(block, Mapping) else None
+            if not isinstance(tcp, Mapping):
+                raise ValueError(f"missing measured TCP pose for {robot_id}")
+            pose = parse_pick_observation(
+                document,
+                robot_id=robot_id,
+                physical_instance_id=group.upper_physical_instance_id,
+                session_id=str(document.get("session_id", "")),
+                manifest_sha256=str(document.get("manifest_sha256", "")),
+            )
+            if robot_id == group.robot_ids[1]:
+                targets[robot_id] = _support_pre_phase_target(pose, context)
+                continue
+            upper = parse_place_observation(
+                document,
+                robot_id=robot_id,
+                upper_physical_instance_id=group.upper_physical_instance_id,
+                lower_physical_instance_id=group.lower_physical_instance_id,
+                session_id=pose.session_id,
+                manifest_sha256=pose.manifest_sha256,
+            )
+            interfaces = upper.interfaces
+            pair = "|".join(
+                sorted(
+                    (
+                        group.upper_physical_instance_id,
+                        group.lower_physical_instance_id,
+                    )
+                )
+            )
+            interface = (
+                interfaces.get("pairs", {}).get(pair)
+                if isinstance(interfaces, Mapping)
+                else None
+            )
+            if not isinstance(interface, Mapping):
+                raise ValueError("coordinated pre-phase lacks interface geometry")
+            targets_data, _, _ = interface_place_up_targets(
+                upper.upper.object_pose,
+                _pose_from_mapping(interface.get("lower_to_upper")),
+                upper.lower.object_pose,
+                upper.lower.tcp_pose,
+                upper.lower.opening_m,
+                context.base,
+                context.provenance,
+                context.params,
+                yaw_symmetries=tuple(
+                    interface.get("allowed_upper_yaw_quarter_turns", (0,))
+                ),
+            )
+            targets[robot_id] = _tcp_target_mapping(targets_data.preplace, robot_id)
+        return targets
+
+    async def execute_pre_phase(
+        self, request: SuccessorPrePhaseRequest
+    ) -> SuccessorPrePhaseEvidence:
+        """Derive successor targets from live state and call unified runtime."""
+        runtime = self._pre_phase_runtime
+        execute = getattr(runtime, "execute_pre_phase", None)
+        if not callable(execute):
+            return SuccessorPrePhaseEvidence(
+                predecessor_operation_id=request.predecessor_operation_id,
+                successor_operation_ids=request.successor_operation_ids,
+                participants=request.participants,
+                scene_digest=request.scene_digest,
+                planned=False,
+                executed=False,
+                terminal=False,
+                safe=False,
+                resource_transfer_confirmed=False,
+                evidence={"pre_phase_error": "unified runtime unavailable"},
+                terminal_cleanup=request.terminal_cleanup,
+                reason="unified dual-arm runtime unavailable",
+            )
+        enriched = request
+        if request.successor_operations:
+            observations = {
+                robot_id: await self._observe_or_cancel(robot_id, asyncio.Event()) or {}
+                for robot_id in request.participants
+            }
+            targets = self._derive_successor_targets(request, observations)
+            successors = tuple(
+                replace(
+                    operation,
+                    parameters={**operation.parameters, "pre_phase_targets": targets},
+                )
+                for operation in request.successor_operations
+            )
+            enriched = replace(request, successor_operations=successors)
+        raw = execute(enriched)
+        if inspect.isawaitable(raw):
+            raw = await raw
+        if not isinstance(raw, SuccessorPrePhaseEvidence):
+            return SuccessorPrePhaseEvidence(
+                predecessor_operation_id=request.predecessor_operation_id,
+                successor_operation_ids=request.successor_operation_ids,
+                participants=request.participants,
+                scene_digest=request.scene_digest,
+                planned=False,
+                executed=False,
+                terminal=False,
+                safe=False,
+                resource_transfer_confirmed=False,
+                evidence={"pre_phase_error": "invalid unified runtime evidence"},
+                terminal_cleanup=request.terminal_cleanup,
+                reason="unified runtime returned invalid evidence",
+            )
+        return raw
+
+    def _derive_successor_targets(
+        self,
+        request: SuccessorPrePhaseRequest,
+        observations: Mapping[str, Mapping[str, object]],
+    ) -> Mapping[str, Mapping[str, object]]:
+        """Derive geometry-backed targets for any supported successor skill."""
+        targets: dict[str, Mapping[str, object]] = {}
+        for operation in request.successor_operations:
+            target = operation.target.values if operation.target is not None else {}
+            robot_id = operation.executor_robot_id
+            context = self._transit_contexts.get(robot_id)
+            document = observations.get(robot_id)
+            if context is None or not isinstance(document, Mapping):
+                raise ValueError(f"successor pre-phase lacks context for {robot_id}")
+            session_id = str(document.get("session_id", ""))
+            manifest_sha = str(document.get("manifest_sha256", ""))
+            if operation.skill in {"PICK", "TRANSIT"}:
+                physical_id = target.get("physical_instance_id")
+                destination = target.get("to")
+                if isinstance(destination, Mapping):
+                    physical_id = destination.get("physical_instance_id")
+                if not isinstance(physical_id, str) or not physical_id:
+                    raise ValueError(
+                        f"successor {operation.operation_id} lacks part target geometry"
+                    )
+                sample = parse_pick_observation(
+                    document,
+                    robot_id=robot_id,
+                    physical_instance_id=physical_id,
+                    session_id=session_id,
+                    manifest_sha256=manifest_sha,
+                )
+                from rocobrick.skills.targets import transit_target
+
+                target_obj = transit_target(
+                    sample.aabb_min,
+                    sample.aabb_max,
+                    context.base,
+                    context.provenance,
+                    context.params,
+                )
+                targets[robot_id] = _tcp_target_mapping(target_obj, robot_id)
+                continue
+            if operation.skill == "SUPPORT_TOP":
+                upper_id = target.get("upper_physical_instance_id")
+                if not isinstance(upper_id, str) or not upper_id:
+                    raise ValueError("SUPPORT_TOP lacks upper geometry identity")
+                sample = parse_pick_observation(
+                    document,
+                    robot_id=robot_id,
+                    physical_instance_id=upper_id,
+                    session_id=session_id,
+                    manifest_sha256=manifest_sha,
+                )
+                targets[robot_id] = _support_pre_phase_target(sample, context)
+                continue
+            if operation.skill in {"PLACE_DOWN", "PLACE_UP"}:
+                upper_id = target.get("upper_physical_instance_id")
+                lower_id = target.get("lower_physical_instance_id")
+                if not all(
+                    isinstance(item, str) and item
+                    for item in (upper_id, lower_id)
+                ):
+                    raise ValueError(
+                        f"{operation.skill} lacks pair geometry identity"
+                    )
+                sample = parse_place_observation(
+                    document,
+                    robot_id=robot_id,
+                    upper_physical_instance_id=upper_id,
+                    lower_physical_instance_id=lower_id,
+                    session_id=session_id,
+                    manifest_sha256=manifest_sha,
+                )
+                interfaces = sample.interfaces
+                pair = "|".join(sorted((upper_id, lower_id)))
+                interface = (
+                    interfaces.get("pairs", {}).get(pair)
+                    if isinstance(interfaces, Mapping)
+                    else None
+                )
+                if not isinstance(interface, Mapping):
+                    raise ValueError(f"{operation.skill} lacks interface geometry")
+                connection_pose = _pose_from_mapping(
+                    interface.get("lower_to_upper")
+                )
+                yaw_symmetries = tuple(
+                    interface.get("allowed_upper_yaw_quarter_turns", (0,))
+                )
+                if operation.skill == "PLACE_UP":
+                    targets_obj, _, _ = interface_place_up_targets(
+                        sample.upper.object_pose,
+                        connection_pose,
+                        sample.lower.object_pose,
+                        sample.lower.tcp_pose,
+                        sample.lower.opening_m,
+                        context.base,
+                        context.provenance,
+                        context.params,
+                        yaw_symmetries=yaw_symmetries,
+                    )
+                else:
+                    from rocobrick.skills.placement_geometry import (
+                        interface_place_targets,
+                    )
+
+                    targets_obj, _, _ = interface_place_targets(
+                        sample.lower.object_pose,
+                        connection_pose,
+                        sample.upper.object_pose,
+                        sample.upper.tcp_pose,
+                        sample.upper.opening_m,
+                        context.base,
+                        context.provenance,
+                        context.params,
+                        yaw_symmetries=yaw_symmetries,
+                    )
+                targets[robot_id] = _tcp_target_mapping(
+                    targets_obj.preplace, robot_id
+                )
+                continue
+            raise ValueError(f"unsupported successor pre-phase skill {operation.skill!r}")
+        if set(targets) != set(request.participants):
+            raise ValueError("successor pre-phase targets do not cover participants")
+        return targets
 
     async def execute(self, operation: RobotOperation) -> OperationExecution:
         """Execute one validated operation without ever sending motion.
@@ -616,9 +1018,7 @@ class SkillOperationExecutor:
         """
         robot_id = operation.executor_robot_id
         if operation.operation_id in self._active:
-            return self._failed(
-                operation, REASON_OPERATION_ALREADY_ACTIVE
-            )
+            return self._failed(operation, REASON_OPERATION_ALREADY_ACTIVE)
         if robot_id not in self._robot_ids:
             return self._failed(
                 operation,
@@ -645,6 +1045,14 @@ class SkillOperationExecutor:
             if skill == PLACE_DOWN and robot_id in self._place_backends:
                 return await self._run_motion_operation(
                     operation, lambda: self._place_down(operation, robot_id)
+                )
+            if skill == PLACE_UP and robot_id in self._place_up_backends:
+                return await self._run_motion_operation(
+                    operation, lambda: self._place_up(operation, robot_id)
+                )
+            if skill == SUPPORT_TOP and robot_id in self._support_backends:
+                return await self._run_motion_operation(
+                    operation, lambda: self._support_top(operation, robot_id)
                 )
             return self._failed(operation, REASON_CAPABILITY_UNAVAILABLE)
         if skill != WAIT:
@@ -740,12 +1148,22 @@ class SkillOperationExecutor:
                     )
                 },
             )
-        if record.skill == PLACE_DOWN:
-            backend = self._place_backends.get(record.robot_id)
+        if record.skill in {PLACE_DOWN, PLACE_UP, SUPPORT_TOP}:
+            backends = {
+                PLACE_DOWN: self._place_backends,
+                PLACE_UP: self._place_up_backends,
+                SUPPORT_TOP: self._support_backends,
+            }
+            backend = backends[record.skill].get(record.robot_id)
             cancel_place = getattr(backend, "cancel", None)
             if not callable(cancel_place):
-                return CancelEvidence(operation_id=operation_id, acknowledged=False,
-                                      terminal=False, safe=False, evidence={})
+                return CancelEvidence(
+                    operation_id=operation_id,
+                    acknowledged=False,
+                    terminal=False,
+                    safe=False,
+                    evidence={},
+                )
             raw = await cancel_place(operation_id)
             return CancelEvidence(
                 operation_id=operation_id,
@@ -845,14 +1263,14 @@ class SkillOperationExecutor:
         target_values = operation.target.values if operation.target is not None else {}
         destination = target_values.get("to")
         destination_kind = (
-            destination.get("kind")
-            if isinstance(destination, Mapping)
-            else None
+            destination.get("kind") if isinstance(destination, Mapping) else None
         )
         carrying = target_values.get("carrying_physical_instance_id")
         if carrying is not None:
             if not isinstance(carrying, str) or not carrying:
-                return self._failed(operation, "TARGET_INVALID: carrying_physical_instance_id")
+                return self._failed(
+                    operation, "TARGET_INVALID: carrying_physical_instance_id"
+                )
             if self._state_ledger is None:
                 return self._failed(operation, "CARRYING_STATE_UNAVAILABLE")
             holding = self._state_ledger.observe(robot_id, f"holding:{carrying}")
@@ -864,7 +1282,8 @@ class SkillOperationExecutor:
             return self._failed(operation, "CARRYING_TRANSIT_UNAVAILABLE")
         if self._state_ledger is not None:
             active_holding = [
-                key for key in self._state_ledger.snapshot(robot_id)
+                key
+                for key in self._state_ledger.snapshot(robot_id)
                 if key.startswith("holding:")
             ]
             if active_holding:
@@ -882,13 +1301,13 @@ class SkillOperationExecutor:
         target_values = operation.target.values if operation.target is not None else {}
         destination = target_values.get("to")
         destination_kind = (
-            destination.get("kind")
-            if isinstance(destination, Mapping)
-            else None
+            destination.get("kind") if isinstance(destination, Mapping) else None
         )
         if result.passed and result.terminal and result.safe_to_release:
             final_scene = await self._observe_or_cancel(robot_id, asyncio.Event())
-            if final_scene is None or not isinstance(final_scene.get("bricks"), Mapping):
+            if final_scene is None or not isinstance(
+                final_scene.get("bricks"), Mapping
+            ):
                 evidence["transit_scene_feedback_confirmed"] = False
                 return OperationExecution(
                     operation_id=operation.operation_id,
@@ -936,7 +1355,9 @@ class SkillOperationExecutor:
             reason=result.reason or "TRANSIT_ACTION_FAILED",
         )
 
-    async def _pick(self, operation: RobotOperation, robot_id: str) -> OperationExecution:
+    async def _pick(
+        self, operation: RobotOperation, robot_id: str
+    ) -> OperationExecution:
         """Execute PICK from the current pose directly to pregrasp.
 
         A direct PICK plan treats the former empty TRANSIT as part of the
@@ -1023,6 +1444,93 @@ class SkillOperationExecutor:
             return self._failed(operation, "PLACE_DOWN_RESULT_INVALID")
         return result
 
+    async def _place_up(
+        self, operation: RobotOperation, robot_id: str
+    ) -> OperationExecution:
+        """Execute PLACE_UP with carrying and support gates before motion.
+
+        The ledger must confirm this robot holds the moving LOWER part, and
+        must confirm the target's support robot actively supports the fixed
+        UPPER part; either missing fact refuses the operation before any
+        motion command runs.
+
+        Returns:
+            The backend's operation execution, or a closed failure.
+        """
+        handler = self._place_up_backends.get(robot_id)
+        execute = getattr(handler, "execute", None)
+        if not callable(execute):
+            return self._failed(operation, "PLACE_UP_HANDLER_INVALID")
+        values = operation.target.values if operation.target is not None else {}
+        lower = values.get("lower_physical_instance_id")
+        upper = values.get("upper_physical_instance_id")
+        support_robot = values.get("support_robot_id")
+        if self._state_ledger is None or not all(
+            isinstance(item, str) and item for item in (lower, upper, support_robot)
+        ):
+            return self._failed(operation, "PLACE_UP_CARRYING_UNCONFIRMED")
+        if self._state_ledger.owner_of_object(lower) != robot_id:
+            return self._failed(
+                operation,
+                "PLACE_UP_CARRYING_UNCONFIRMED: the ledger does not confirm "
+                f"{robot_id} holding {lower!r}",
+            )
+        if self._state_ledger.observe(support_robot, f"supporting:{upper}") is None:
+            return self._failed(
+                operation,
+                "PLACE_UP_SUPPORT_UNCONFIRMED: the ledger does not confirm "
+                f"{support_robot!r} supporting {upper!r}",
+            )
+        execution_operation = operation
+        if self._state_ledger.observe(robot_id, "robot_at_place_region") is None:
+            execution_operation = replace(
+                operation,
+                preconditions=tuple(
+                    item
+                    for item in operation.preconditions
+                    if item != "robot_at_place_region"
+                ),
+            )
+        try:
+            result = await execute(execution_operation)
+        except Exception as error:
+            return self._failed(operation, f"PLACE_UP_HANDLER_FAILED: {error}")
+        if (
+            not isinstance(result, OperationExecution)
+            or result.operation_id != operation.operation_id
+            or result.robot_id != robot_id
+        ):
+            return self._failed(operation, "PLACE_UP_RESULT_INVALID")
+        return result
+
+    async def _support_top(
+        self, operation: RobotOperation, robot_id: str
+    ) -> OperationExecution:
+        """Execute SUPPORT_TOP: stabilize the fixed upper part from below/side.
+
+        The backend owns the support grasp, its stability evidence and the
+        ``supporting:<upper>`` ledger confirmation; a failed support keeps the
+        placement gate closed (PLACE_UP refuses without the support fact).
+
+        Returns:
+            The backend's operation execution, or a closed failure.
+        """
+        handler = self._support_backends.get(robot_id)
+        execute = getattr(handler, "execute", None)
+        if not callable(execute):
+            return self._failed(operation, "SUPPORT_TOP_HANDLER_INVALID")
+        try:
+            result = await execute(operation)
+        except Exception as error:
+            return self._failed(operation, f"SUPPORT_TOP_HANDLER_FAILED: {error}")
+        if (
+            not isinstance(result, OperationExecution)
+            or result.operation_id != operation.operation_id
+            or result.robot_id != robot_id
+        ):
+            return self._failed(operation, "SUPPORT_TOP_RESULT_INVALID")
+        return result
+
     async def _wait(
         self,
         operation: RobotOperation,
@@ -1088,9 +1596,7 @@ class SkillOperationExecutor:
         if document is None:
             return self._cancelled(operation)
         try:
-            first = _observation(
-                robot_id, parameters.physical_instance_id, document
-            )
+            first = _observation(robot_id, parameters.physical_instance_id, document)
         except _ObservationError:
             return self._failed(operation, REASON_OBSERVATION_UNAVAILABLE)
         previous = first
@@ -1108,9 +1614,7 @@ class SkillOperationExecutor:
             # Polling sleep only: it is never itself evidence of the wait.
             await asyncio.sleep(self._poll_interval_s)
             try:
-                document = await self._observe_or_cancel(
-                    robot_id, record.cancel_event
-                )
+                document = await self._observe_or_cancel(robot_id, record.cancel_event)
             except asyncio.CancelledError:
                 raise
             except Exception:
@@ -1125,12 +1629,8 @@ class SkillOperationExecutor:
                 return self._failed(operation, REASON_OBSERVATION_UNAVAILABLE)
             if current.sim_time_s < previous.sim_time_s:
                 return self._failed(operation, REASON_OBSERVATION_STAGNANT)
-            if not _aabb_stable(
-                first.aabb, current.aabb, self._aabb_tolerance_m
-            ):
-                return self._failed(
-                    operation, REASON_STRUCTURAL_FACT_UNSTABLE
-                )
+            if not _aabb_stable(first.aabb, current.aabb, self._aabb_tolerance_m):
+                return self._failed(operation, REASON_STRUCTURAL_FACT_UNSTABLE)
             previous = current
             polls += 1
         if record.cancel_event.is_set():
@@ -1195,9 +1695,7 @@ class SkillOperationExecutor:
         except BaseException:
             observe_task.cancel()
             cancel_task.cancel()
-            await asyncio.gather(
-                observe_task, cancel_task, return_exceptions=True
-            )
+            await asyncio.gather(observe_task, cancel_task, return_exceptions=True)
             raise
         if observe_task in done:
             cancel_task.cancel()

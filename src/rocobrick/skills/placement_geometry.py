@@ -135,6 +135,83 @@ def interface_place_targets(
     return targets, desired_upper, held
 
 
+def interface_place_up_targets(
+    upper_world: Pose,
+    lower_to_upper: Pose,
+    measured_lower: Pose,
+    measured_tcp: Pose,
+    measured_opening_m: float,
+    base: RobotBaseFrame,
+    provenance: TcpProvenance,
+    params: SkillParams,
+    yaw_symmetries: tuple[int, ...] = (0,),
+) -> tuple[PlaceTargets, Pose, Pose]:
+    """Solve the upward insertion targets from the FIXED upper interface.
+
+    The mirror of :func:`interface_place_targets`: the executor grips the
+    LOWER part and inserts it upward into the UPPER part stabilized by the
+    support robot. The desired lower pose is
+    ``T_world_upper * T_upper_lower`` with ``T_upper_lower =
+    inverse(T_lower_upper)``; the tool pose composes that with the measured
+    ``T_lower_tcp``. Offsets follow the upper brick's stud axis and the
+    ascent bound sits ABOVE the seated depth by ``place_press_m`` (a bound
+    the live monitor cancels, not a press to hold).
+
+    Returns:
+        Tool targets, desired lower pose and measured lower-to-TCP transform.
+    """
+    held = compose(inverse(measured_lower), measured_tcp)
+    if not yaw_symmetries or any(
+        type(k) is not int or k not in range(4) for k in yaw_symmetries
+    ):
+        raise ValueError("invalid verified shape symmetry group")
+    nominal_lower = compose(upper_world, inverse(lower_to_upper))
+    candidates = [
+        compose(
+            nominal_lower,
+            Pose(
+                (0.0, 0.0, 0.0),
+                (0.0, 0.0, math.sin(k * math.pi / 4), math.cos(k * math.pi / 4)),
+            ),
+        )
+        for k in yaw_symmetries
+    ]
+    desired_lower = min(
+        candidates,
+        key=lambda candidate: pose_error(compose(candidate, held), measured_tcp)[1],
+    )
+    desired_tcp = compose(desired_lower, held)
+    normal = _quat_rotate_vector(upper_world.orientation_xyzw, (0.0, 0.0, 1.0))
+    if normal[2] <= 0.0:
+        raise ValueError("upward insertion axis is not upward; unsupported")
+    orientation = world_orientation_to_base(desired_tcp.orientation_xyzw, base)
+
+    def target(offset: float):
+        world = tuple(
+            desired_tcp.position_xyz[i] + normal[i] * offset for i in range(3)
+        )
+        return _tcp_pose_target(
+            world_position_to_base(world, base), orientation, provenance, params
+        )
+
+    release = pad_separation_to_logical_opening(
+        measured_opening_m + params.open_extra_m
+    )
+    low = max(0.0, release - min(params.free_window_slop_m, params.open_extra_m * 0.25))
+    high = min(0.1, release + params.free_window_slop_m)
+    targets = PlaceTargets(
+        preplace=target(-params.place_standoff_m),
+        contact=target(params.place_press_m),
+        retreat=target(-params.place_retreat_height_m),
+        release_opening_m=release,
+        release_expected_window_m=(low, high),
+        upper_span_m=measured_opening_m,
+        closing_yaw_deg=0.0,
+        contact_world_z_m=desired_tcp.position_xyz[2],
+    )
+    return targets, desired_lower, held
+
+
 def offset_pose_target(target, normal_world, distance: float, base: RobotBaseFrame):
     """Offset a tool target along a measured stud axis.
 

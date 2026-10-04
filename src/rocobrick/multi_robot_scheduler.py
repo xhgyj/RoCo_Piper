@@ -28,12 +28,17 @@ import dataclasses
 import inspect
 import math
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Protocol
 
 from rocobrick.compat import StrEnum
+from rocobrick.coordinated_layer import coordinated_layer_group
 from rocobrick.robot_operation_plan import RobotOperation, RobotOperationPlan
+from rocobrick.unified_dual_arm_runtime import (
+    SuccessorPrePhaseEvidence,
+    SuccessorPrePhaseRequest,
+)
 
 JSONValue = None | bool | int | float | str | list["JSONValue"] | dict[str, "JSONValue"]
 
@@ -221,6 +226,15 @@ class RobotOperationExecutor(Protocol):
 
         Returns:
             The terminal :class:`OperationExecution` for ``operation``.
+        """
+
+    async def execute_layer(
+        self, operations: Sequence[RobotOperation]
+    ) -> Mapping[str, object]:
+        """Optionally execute one same-layer coordinated transport group.
+
+        Returns:
+            A mapping keyed by operation id with formal operation results.
         """
 
     async def cancel(self, operation_id: str) -> CancelEvidence:
@@ -805,6 +819,16 @@ class MultiRobotScheduler:
             layer_status, layer_results = await self._run_layer(
                 plan, layer_index, operation_ids, executor, canceler, state
             )
+            handoff_ok = await self._run_layer_handoffs(
+                plan,
+                layer_index,
+                operation_ids,
+                layer_results,
+                executor,
+                state,
+            )
+            if not handoff_ok:
+                layer_status = OperationStatus.FAILED
             state.results.update(layer_results)
             if layer_status is OperationStatus.CONFIRMED:
                 confirmed.update(
@@ -858,6 +882,18 @@ class MultiRobotScheduler:
         canceler: OperationCanceler | RobotOperationExecutor | None,
         state: _RunState,
     ) -> tuple[OperationStatus, dict[str, OperationResult]]:
+        coordinated = coordinated_layer_group(
+            tuple(plan.operations[operation_id] for operation_id in operation_ids)
+        )
+        if coordinated is not None:
+            return await self._run_coordinated_layer(
+                plan,
+                layer_index,
+                operation_ids,
+                executor,
+                canceler,
+                state,
+            )
         results: dict[str, OperationResult] = {}
         running: dict[str, asyncio.Task[object]] = {}
         order = {
@@ -955,6 +991,8 @@ class MultiRobotScheduler:
                 continue
             released = False
             if _is_confirmation(result):
+                if result.evidence.get("handoff_required") is True:
+                    continue
                 state.release(operation, "terminal confirmation")
                 released = True
             elif _cancel_releases(result.cancel) and result.motion_sent is not True:
@@ -978,6 +1016,155 @@ class MultiRobotScheduler:
             else OperationStatus.FAILED,
             results,
         )
+
+    async def _run_coordinated_layer(
+        self,
+        plan: RobotOperationPlan,
+        layer_index: int,
+        operation_ids: tuple[str, ...],
+        executor: RobotOperationExecutor | OperationExecutor,
+        canceler: OperationCanceler | RobotOperationExecutor | None,
+        state: _RunState,
+    ) -> tuple[OperationStatus, dict[str, OperationResult]]:
+        """Dispatch one eligible layer through a single shared transport.
+
+        Returns:
+            Layer status and one result for every original operation id.
+        """
+        operations = tuple(
+            plan.operations[operation_id] for operation_id in operation_ids
+        )
+        results: dict[str, OperationResult] = {}
+        for operation in operations:
+            conflict = state.acquire(operation)
+            if conflict is not None:
+                result = _failure_result(
+                    operation,
+                    f"resource unavailable before coordinated dispatch: {conflict}",
+                )
+                results[operation.operation_id] = result
+                state.mark_failure(result.reason or "coordinated resource conflict")
+        if results:
+            return OperationStatus.FAILED, results
+        dispatch = getattr(executor, "execute_layer", None)
+        if not callable(dispatch):
+            reason = (
+                "coordinated layer requires executor.execute_layer; "
+                "independent operation dispatch is forbidden"
+            )
+            for operation in operations:
+                results[operation.operation_id] = _failure_result(operation, reason)
+                state.note_attention(operation.operation_id)
+            state.mark_failure(reason)
+            return OperationStatus.FAILED, results
+        try:
+            raw = dispatch(operations)
+            if inspect.isawaitable(raw):
+                raw = await raw
+            if not isinstance(raw, Mapping):
+                raise TypeError("coordinated execute_layer must return a mapping")
+            for operation in operations:
+                value = raw.get(operation.operation_id)
+                results[operation.operation_id] = self._evaluate_value(
+                    value, operation, plan
+                )
+        except Exception as exc:  # noqa: BLE001 - preserve layer failure evidence
+            reason = f"coordinated layer dispatch failed: {exc!r}"
+            for operation in operations:
+                results[operation.operation_id] = _failure_result(operation, reason)
+                state.note_attention(operation.operation_id)
+            state.mark_failure(reason)
+        for operation in operations:
+            result = results[operation.operation_id]
+            if _is_confirmation(result):
+                if result.evidence.get("handoff_required") is True:
+                    continue
+                state.release(operation, "coordinated terminal confirmation")
+                results[operation.operation_id] = dataclasses.replace(
+                    result, resources_released=True
+                )
+            elif _requires_attention(result):
+                state.note_attention(operation.operation_id)
+        confirmed = bool(results) and all(
+            _is_confirmation(item) for item in results.values()
+        )
+        return (
+            OperationStatus.CONFIRMED if confirmed else OperationStatus.FAILED,
+            results,
+        )
+
+    async def _run_layer_handoffs(
+        self,
+        plan: RobotOperationPlan,
+        layer_index: int,
+        operation_ids: tuple[str, ...],
+        results: dict[str, OperationResult],
+        executor: object,
+        state: _RunState,
+    ) -> bool:
+        """Complete explicit skill-to-next-transport handoffs before release."""
+        next_operations = (
+            tuple(
+                plan.operations[next_id]
+                for next_id in plan.execution_layers[layer_index + 1]
+            )
+            if layer_index + 1 < len(plan.execution_layers)
+            else ()
+        )
+        pre_phase = getattr(executor, "execute_pre_phase", None)
+        passed = True
+        for operation_id in operation_ids:
+            result = results.get(operation_id)
+            if result is None or not _is_confirmation(result):
+                continue
+            if result.evidence.get("handoff_required") is not True:
+                continue
+            if not callable(pre_phase):
+                state.mark_failure(
+                    f"operation {operation_id} requires successor pre-phase runtime"
+                )
+                state.note_attention(operation_id)
+                passed = False
+                continue
+            operation = plan.operations[operation_id]
+            successor_ids = tuple(item.operation_id for item in next_operations)
+            participants = tuple(
+                sorted(
+                    {
+                        operation.executor_robot_id,
+                        *(participant for item in next_operations for participant in item.participants),
+                    }
+                )
+            )
+            request = SuccessorPrePhaseRequest(
+                predecessor_operation_id=operation_id,
+                successor_operation_ids=successor_ids,
+                predecessor_state=dict(result.evidence),
+                successor_operations=next_operations,
+                participants=participants,
+                scene_digest=str(result.evidence.get("scene_digest", "pre-phase-scene")),
+                resources=tuple(operation.resources),
+                terminal_cleanup=not bool(next_operations),
+            )
+            raw = pre_phase(request)
+            if inspect.isawaitable(raw):
+                raw = await raw
+            if not isinstance(raw, SuccessorPrePhaseEvidence) or raw.predecessor_operation_id != operation_id or not raw.passed:
+                state.mark_failure(
+                    f"operation {operation_id} successor pre-phase did not reach terminal-safe state"
+                )
+                state.note_attention(operation_id)
+                passed = False
+                continue
+            evidence = dict(result.evidence)
+            evidence["handoff_confirmed"] = dict(raw.evidence)
+            results[operation_id] = dataclasses.replace(result, evidence=evidence)
+            operation = plan.operations[operation_id]
+            state.release(operation, "terminal-safe next-transport handoff")
+            results[operation_id] = dataclasses.replace(
+                results[operation_id], resources_released=True
+            )
+        return passed
 
     def _evaluate_task(
         self,
@@ -1050,6 +1237,10 @@ class MultiRobotScheduler:
                 label
                 for label in _required_evidence(plan, operation)
                 if not _evidence_present(execution.evidence, label)
+                and not (
+                    execution.evidence.get("handoff_required") is True
+                    and label == "retreat_confirmed"
+                )
             ]
             if missing:
                 return _failure_result(
@@ -1067,7 +1258,7 @@ class MultiRobotScheduler:
                 evidence=dict(execution.evidence),
                 reason=execution.reason,
                 resources=operation.resources,
-                resources_released=True,
+                resources_released=execution.evidence.get("handoff_required") is not True,
             )
         if execution.status in (
             OperationStatus.FAILED,

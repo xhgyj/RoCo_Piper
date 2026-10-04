@@ -499,6 +499,21 @@ def _compose_scene_poses(parent: Mapping, child: Mapping) -> dict:
     })
 
 
+def scene_snapshot_digest(document: Mapping[str, object]) -> str:
+    """Return a deterministic digest for one shared scene snapshot."""
+    payload = {
+        "schema": document.get("schema"),
+        "sim_time_s": document.get("sim_time_s"),
+        "sequence": document.get("sequence"),
+        "manifest_sha256": document.get("manifest_sha256"),
+        "bricks": document.get("bricks"),
+        "connections": document.get("connections"),
+        "robots": document.get("robots"),
+    }
+    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
 def build_scene_state_document(
     sim_time_s: float,
     brick_aabbs: Mapping[str, tuple[Sequence[float], Sequence[float]]],
@@ -626,10 +641,11 @@ def build_scene_state_document(
         for robot_id, raw in robot_tcp_poses.items():
             robots_document[robot_id]["tcp_pose"] = _scene_rigid_pose(raw)
             robots_document[robot_id]["sequence"] = sequence
-    if robots_document:
-        document["robots"] = robots_document
     if gripper_positions is None and not robots_document:
         raise ValueError("gripper_positions or robot_grippers is required")
+    if robots_document:
+        document["robots"] = robots_document
+    document["scene_digest"] = scene_snapshot_digest(document)
     return document
 
 

@@ -10,6 +10,8 @@ from rocobrick.models import ActionType, SkillType
 from rocobrick.skill_execution import TaskRef, execute_skill
 from rocobrick.skills import (
     PICK_PROGRAM,
+    PLACE_UP_PROGRAM,
+    SUPPORT_TOP_PROGRAM,
     TRANSIT_PROGRAM,
     WAIT_PROGRAM,
     PhaseResult,
@@ -58,14 +60,21 @@ def test_program_registry_covers_the_executable_skills() -> None:
         SkillType.TRANSIT,
         SkillType.WAIT,
         SkillType.PLACE_DOWN,
+        SkillType.PLACE_UP,
+        SkillType.SUPPORT_TOP,
     }
     assert program_for(SkillType.TRANSIT) is TRANSIT_PROGRAM
     assert program_for(SkillType.WAIT) is WAIT_PROGRAM
     assert program_for(SkillType.PICK) is PICK_PROGRAM
-    assert [phase.phase_id for phase in TRANSIT_PROGRAM.phases] == [
-        "reach_transit"
-    ]
+    assert program_for(SkillType.PLACE_UP) is PLACE_UP_PROGRAM
+    assert program_for(SkillType.SUPPORT_TOP) is SUPPORT_TOP_PROGRAM
+    assert [phase.phase_id for phase in TRANSIT_PROGRAM.phases] == ["reach_transit"]
     assert [phase.phase_id for phase in WAIT_PROGRAM.phases] == ["hold"]
+    assert [phase.phase_id for phase in SUPPORT_TOP_PROGRAM.phases] == [
+        "reach_support",
+        "maintain_support",
+        "confirm_support",
+    ]
 
 
 def test_program_for_unknown_skill_raises_capability_error() -> None:
@@ -89,16 +98,10 @@ def test_execute_skill_runs_the_transit_program_for_a_bare_task_ref() -> None:
 
     backend = ConfirmBackend()
     task = SimpleNamespace(task_id="skill-0-TRANSIT", skill=SkillType.TRANSIT)
-    outcome = asyncio.run(
-        execute_skill(task, "run-1", backend, lambda event: None)
-    )
+    outcome = asyncio.run(execute_skill(task, "run-1", backend, lambda event: None))
     assert outcome.task_id == "skill-0-TRANSIT"
-    assert [result.phase.phase_id for result in outcome.phases] == [
-        "reach_transit"
-    ]
-    assert all(
-        result.status is PhaseStatus.CONFIRMED for result in outcome.phases
-    )
+    assert [result.phase.phase_id for result in outcome.phases] == ["reach_transit"]
+    assert all(result.status is PhaseStatus.CONFIRMED for result in outcome.phases)
     assert backend.requested == ["reach_transit"]
 
 
@@ -107,8 +110,6 @@ def test_execute_skill_runs_the_wait_program_for_a_bare_task_ref() -> None:
 
     backend = ConfirmBackend()
     task = SimpleNamespace(task_id="skill-1-WAIT", skill=SkillType.WAIT)
-    outcome = asyncio.run(
-        execute_skill(task, "run-1", backend, lambda event: None)
-    )
+    outcome = asyncio.run(execute_skill(task, "run-1", backend, lambda event: None))
     assert [result.phase.phase_id for result in outcome.phases] == ["hold"]
     assert backend.requested == ["hold"]

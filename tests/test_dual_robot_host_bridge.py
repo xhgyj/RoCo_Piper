@@ -772,6 +772,7 @@ def test_dual_scene_document_shape(bridge_module) -> None:
                 "opening_m": 0.04,
             },
         },
+        "scene_digest": document["scene_digest"],
     }
     assert "gripper" not in document
     assert "opening_m" not in document

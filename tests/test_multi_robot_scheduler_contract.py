@@ -25,6 +25,10 @@ from rocobrick.robot_operation_plan import (
     ScheduledOperation,
     parse_robot_operation_plan,
 )
+from rocobrick.unified_dual_arm_runtime import (
+    SuccessorPrePhaseEvidence,
+    SuccessorPrePhaseRequest,
+)
 from rocobrick.robot_operation_runner import (
     RUN_SCHEMA,
     OperationPlanRunner,
@@ -156,6 +160,24 @@ class StrictExecutor:
             raise outcome
         self.events.append(("end", operation.operation_id))
         return outcome
+
+    async def execute_pre_phase(
+        self, request: SuccessorPrePhaseRequest
+    ) -> SuccessorPrePhaseEvidence:
+        """Return terminal-safe successor pre-phase evidence."""
+        return SuccessorPrePhaseEvidence(
+            predecessor_operation_id=request.predecessor_operation_id,
+            successor_operation_ids=request.successor_operation_ids,
+            participants=request.participants,
+            scene_digest=request.scene_digest,
+            planned=True,
+            executed=True,
+            terminal=True,
+            safe=True,
+            resource_transfer_confirmed=True,
+            evidence={"pre_phase": True},
+            terminal_cleanup=request.terminal_cleanup,
+        )
 
     async def cancel(self, operation_id: str) -> object:
         self.cancelled.append(operation_id)
@@ -499,7 +521,66 @@ def test_identity_and_consistency_fail_closed() -> None:
     assert "ExecutionContractError" in (raised.operations["a"].reason or "")
 
 
-def test_resources_released_only_after_confirmation() -> None:
+def test_handoff_releases_resources_only_after_terminal_safe_transfer() -> None:
+    """A deferred skill keeps its lease until the next transport handoff."""
+    first = _operation("a", "piper_0", resources=("robot:piper_0",))
+    second = _operation("b", "piper_0", resources=("robot:piper_0",))
+    plan = _plan([first, second], [["a"], ["b"]])
+    executor = StrictExecutor(
+        outcomes={
+            "a": lambda op: _execution(
+                op,
+                evidence={"handoff_required": True},
+            )
+        }
+    )
+    result = asyncio.run(schedule(plan, executor))
+    assert result.passed
+    assert result.operations["a"].resources_released is True
+    assert result.operations["a"].evidence["handoff_confirmed"]["pre_phase"] is True
+    assert result.resources[0].released is True
+
+
+class FailingPrePhaseExecutor(StrictExecutor):
+    """Executor whose successor pre-phase never proves terminal safety."""
+
+    async def execute_pre_phase(
+        self, request: SuccessorPrePhaseRequest
+    ) -> SuccessorPrePhaseEvidence:
+        return SuccessorPrePhaseEvidence(
+            predecessor_operation_id=request.predecessor_operation_id,
+            successor_operation_ids=request.successor_operation_ids,
+            participants=request.participants,
+            scene_digest=request.scene_digest,
+            planned=False,
+            executed=False,
+            terminal=False,
+            safe=False,
+            resource_transfer_confirmed=False,
+            evidence={"pre_phase": False},
+            terminal_cleanup=request.terminal_cleanup,
+            reason="pre-phase blocked",
+        )
+
+
+def test_failed_handoff_keeps_previous_resources_held() -> None:
+    """A failed next-transport handoff cannot release the prior lease."""
+    first = _operation("a", "piper_0", resources=("robot:piper_0",))
+    second = _operation("b", "piper_0", resources=("robot:piper_0",))
+    plan = _plan([first, second], [["a"], ["b"]])
+    result = asyncio.run(
+        schedule(
+            plan,
+            FailingPrePhaseExecutor(
+                outcomes={"a": lambda op: _execution(op, evidence={"handoff_required": True})}
+            ),
+        )
+    )
+    assert not result.passed
+    assert result.resources[0].released is False
+    assert result.operations["a"].resources_released is False
+
+
     plan = _plan(
         [_operation("a", "piper_0"), _operation("b", "piper_0")],
         [["a"], ["b"]],

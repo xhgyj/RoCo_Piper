@@ -560,14 +560,10 @@ def test_example1_structure_preflight_is_audited_and_never_dispatches(
     )
     _assert_no_session(session_guard)
 
-    # The valid inputs must validate, never claim success, and never dispatch.
+    # The valid inputs must validate, report PREFLIGHT_ONLY, and never dispatch.
     assert line.get("run_dir") == str(run_dir), line
-    assert code != 0, line
-    assert line.get("status") != "EXECUTED", line
-    assert line.get("status") not in REJECTION_STATUSES, (
-        "valid structure inputs were rejected instead of validated: "
-        f"{line.get('reason')!r}"
-    )
+    assert code == 0, line
+    assert line.get("status") == "PREFLIGHT_ONLY", line
     assert line.get("passed") is False, line
 
     evidence_dir = _assert_early_exit_evidence(line, run_dir)
@@ -753,7 +749,8 @@ def test_preflight_inputs_record_explicit_start_evidence(
         inputs = _read_json(evidence_dir / "preflight.json")["inputs"]
         record = inputs["records"]["structure_start"]
         if label == "real-start":
-            assert code == EXIT_CODES[RunStatus.EXECUTION_NOT_IMPLEMENTED], line
+            assert code == 0, line
+            assert line["status"] == "PREFLIGHT_ONLY", line
         else:
             # An EMPTY initial structure cannot assemble the example1 goal.
             _assert_rejected(code, line)

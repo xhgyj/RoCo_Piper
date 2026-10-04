@@ -488,15 +488,13 @@ def test_place_executes_all_phases_and_commits_placement() -> None:
         "GRIPPER_TARGET",  # release
         "ATTACH_PLANNING_SCENE",  # detach
         "APPLY_PLANNING_SCENE",  # world_placed
-        "TCP_POSE",  # retreat
     ]
-    for label in ("connection_confirmed", "release_confirmed", "retreat_confirmed"):
-        assert isinstance(result.evidence[label], dict)
-        assert result.evidence[label]["samples"] >= 3
-    assert result.evidence["retreat_confirmed"]["tcp_rise_m"] == pytest.approx(0.05)
+    assert result.evidence["handoff_required"] is True
+    assert "retreat_confirmed" not in result.evidence
     placed = ledger.observe(ROBOT, f"placed:{UPPER}")
     assert placed is not None
     assert placed.evidence["connection_id"] == "conn-1"
+    assert placed.evidence["handoff_required"] is True
     assert ledger.owner_of_object(UPPER) is None
     assert ledger.observe(ROBOT, f"holding:{UPPER}") is None
 

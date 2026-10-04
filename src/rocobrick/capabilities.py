@@ -30,6 +30,26 @@ CAPABILITIES = {
     ),
     SkillType.HANDOVER: SkillCapability(SkillType.HANDOVER, False, ()),
     SkillType.SUPPORT_BOTTOM: SkillCapability(SkillType.SUPPORT_BOTTOM, False, ()),
-    SkillType.PLACE_UP: SkillCapability(SkillType.PLACE_UP, False, ()),
-    SkillType.SUPPORT_TOP: SkillCapability(SkillType.SUPPORT_TOP, False, ()),
+    SkillType.PLACE_UP: SkillCapability(
+        SkillType.PLACE_UP,
+        True,
+        (
+            ActionType.TRANSPORT,
+            ActionType.ALIGN,
+            ActionType.INSERT,
+            ActionType.VERIFY_CONNECTION,
+            ActionType.RELEASE,
+            ActionType.RETREAT,
+        ),
+    ),
+    SkillType.SUPPORT_TOP: SkillCapability(
+        SkillType.SUPPORT_TOP,
+        True,
+        (
+            ActionType.TRANSPORT,
+            ActionType.ALIGN,
+            ActionType.INSERT,
+            ActionType.VERIFY_CONNECTION,
+        ),
+    ),
 }

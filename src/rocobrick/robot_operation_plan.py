@@ -9,12 +9,20 @@ Wire shape ``robot-operation-plan/v1`` (frozen):
   ``executor_robot_id``, ``participants``, ``role_bindings``, ``target``,
   ``parameters``, ``preconditions``, ``effects``, ``resources``,
   ``evidence_requirements``;
-* skills: ``PICK``, ``TRANSIT``, ``WAIT``, ``PLACE_DOWN``;
+* skills: ``PICK``, ``TRANSIT``, ``WAIT``, ``PLACE_DOWN``, ``PLACE_UP``,
+  ``SUPPORT_TOP``;
 * target shapes: ``PICK`` is ``{physical_instance_id}``; ``TRANSIT`` is
   ``{from, to, carrying_physical_instance_id}`` where ``from``/``to`` are
   references ``{kind, physical_instance_id, connection_id, robot_id}``;
   ``PLACE_DOWN`` is ``{connection_id, upper_physical_instance_id,
-  lower_physical_instance_id}``; ``WAIT`` has a ``null`` target;
+  lower_physical_instance_id}``; ``PLACE_UP`` is ``{connection_id,
+  upper_physical_instance_id, lower_physical_instance_id, support_robot_id}``
+  -- the executor grips the LOWER part and inserts it upward into the UPPER
+  part while ``support_robot_id`` stabilizes the upper part; ``SUPPORT_TOP``
+  is ``{connection_id, upper_physical_instance_id,
+  lower_physical_instance_id, placement_robot_id}`` -- the executor
+  stabilizes the UPPER part for the named placement robot's upward
+  insertion; ``WAIT`` has a ``null`` target;
 * resource vocabulary: ``robot:<robot_id>``, ``part:<physical_instance_id>``,
   ``connection:<connection_id>``.
 
@@ -62,39 +70,45 @@ from dataclasses import dataclass
 from rocobrick.stap_contract import StapContractError, StapPlan, parse_stap_plan
 
 ROBOT_OPERATION_PLAN_SCHEMA = "robot-operation-plan/v1"
-SKILLS = frozenset({"PICK", "TRANSIT", "WAIT", "PLACE_DOWN"})
+SKILLS = frozenset({"PICK", "TRANSIT", "WAIT", "PLACE_DOWN", "PLACE_UP", "SUPPORT_TOP"})
 
-_TOP = frozenset({
-    "schema",
-    "plan_id",
-    "source_plan_id",
-    "robots",
-    "operations",
-    "dependencies",
-    "execution_layers",
-    "planned_schedule",
-    "evidence_requirements",
-})
-_OP = frozenset({
-    "operation_id",
-    "source_task_id",
-    "skill",
-    "executor_robot_id",
-    "participants",
-    "role_bindings",
-    "target",
-    "parameters",
-    "preconditions",
-    "effects",
-    "resources",
-    "evidence_requirements",
-})
+_TOP = frozenset(
+    {
+        "schema",
+        "plan_id",
+        "source_plan_id",
+        "robots",
+        "operations",
+        "dependencies",
+        "execution_layers",
+        "planned_schedule",
+        "evidence_requirements",
+    }
+)
+_OP = frozenset(
+    {
+        "operation_id",
+        "source_task_id",
+        "skill",
+        "executor_robot_id",
+        "participants",
+        "role_bindings",
+        "target",
+        "parameters",
+        "preconditions",
+        "effects",
+        "resources",
+        "evidence_requirements",
+    }
+)
 _REF = frozenset({"kind", "physical_instance_id", "connection_id", "robot_id"})
-_DEPENDENCY = frozenset({
-    "predecessor_operation_id",
-    "successor_operation_id",
-    "reason",
-})
+_DEPENDENCY = frozenset(
+    {
+        "predecessor_operation_id",
+        "successor_operation_id",
+        "reason",
+    }
+)
 _SCHEDULE_ENTRY = frozenset({"operation_id", "robot_id"})
 _EVIDENCE_ENTRY = frozenset({"operation_id", "evidence"})
 _REF_KINDS = frozenset({"robot_current", "robot_home", "part", "connection"})
@@ -210,12 +224,38 @@ def _target(
             item["carrying_physical_instance_id"],
             f"{path}.target.carrying_physical_instance_id",
         )
+    elif skill == "PLACE_DOWN":
+        expected = frozenset(
+            {
+                "connection_id",
+                "upper_physical_instance_id",
+                "lower_physical_instance_id",
+            }
+        )
+        _keys(item, expected, f"{path}.target")
+        for key in sorted(expected):
+            _text(item[key], f"{path}.target.{key}")
+    elif skill == "PLACE_UP":
+        expected = frozenset(
+            {
+                "connection_id",
+                "upper_physical_instance_id",
+                "lower_physical_instance_id",
+                "support_robot_id",
+            }
+        )
+        _keys(item, expected, f"{path}.target")
+        for key in sorted(expected):
+            _text(item[key], f"{path}.target.{key}")
     else:
-        expected = frozenset({
-            "connection_id",
-            "upper_physical_instance_id",
-            "lower_physical_instance_id",
-        })
+        expected = frozenset(
+            {
+                "connection_id",
+                "upper_physical_instance_id",
+                "lower_physical_instance_id",
+                "placement_robot_id",
+            }
+        )
         _keys(item, expected, f"{path}.target")
         for key in sorted(expected):
             _text(item[key], f"{path}.target.{key}")
@@ -254,15 +294,35 @@ def _resources(
         else:
             connection = values["connection_id"]
             connections.add(connection)
-            parts.update((
-                values["upper_physical_instance_id"],
-                values["lower_physical_instance_id"],
-            ))
-            required.update({
-                f"connection:{connection}",
-                f"part:{values['upper_physical_instance_id']}",
-                f"part:{values['lower_physical_instance_id']}",
-            })
+            parts.update(
+                (
+                    values["upper_physical_instance_id"],
+                    values["lower_physical_instance_id"],
+                )
+            )
+            required.update(
+                {
+                    f"connection:{connection}",
+                    f"part:{values['upper_physical_instance_id']}",
+                    f"part:{values['lower_physical_instance_id']}",
+                }
+            )
+            if skill == "PLACE_UP":
+                partner = values["support_robot_id"]
+                if set(participants) != {participants[0], partner}:
+                    raise RobotOperationPlanError(
+                        f"{path}.participants must be exactly the executor "
+                        f"{participants[0]!r} and support robot {partner!r}"
+                    )
+            elif skill == "SUPPORT_TOP":
+                partner = values["placement_robot_id"]
+                parts.discard(values["lower_physical_instance_id"])
+                required.discard(f"part:{values['lower_physical_instance_id']}")
+                if set(participants) != {participants[0]}:
+                    raise RobotOperationPlanError(
+                        f"{path}.participants must contain only support executor "
+                        f"{participants[0]!r}; placement robot {partner!r} is target metadata"
+                    )
     for item in items:
         kind, separator, name = item.partition(":")
         if not separator or kind not in _RESOURCE_KINDS or not name:
@@ -346,17 +406,20 @@ def _operation_connections(operation: RobotOperation) -> tuple[str, ...]:
             for key in ("from", "to")
             if values[key]["kind"] == "connection"
         )
-    if operation.skill == "PLACE_DOWN":
+    if operation.skill in {"PLACE_DOWN", "PLACE_UP", "SUPPORT_TOP"}:
         return (values["connection_id"],)
     return ()
 
 
 def _bind_connections(operations: Mapping[str, RobotOperation]) -> None:
-    """Ground every connection id in plan-local PLACE_DOWN pair structure."""
+    """Ground every connection id in plan-local placement pair structure."""
     pairs: dict[str, tuple[str, str]] = {}
     labels: dict[tuple[str, str], str] = {}
     for operation in operations.values():
-        if operation.skill != "PLACE_DOWN" or operation.target is None:
+        if (
+            operation.skill not in {"PLACE_DOWN", "PLACE_UP", "SUPPORT_TOP"}
+            or operation.target is None
+        ):
             continue
         values = operation.target.values
         pair = (
@@ -382,7 +445,7 @@ def _bind_connections(operations: Mapping[str, RobotOperation]) -> None:
             if connection not in pairs:
                 raise RobotOperationPlanError(
                     f"operation {operation.operation_id!r} references connection "
-                    f"{connection!r} that no PLACE_DOWN target grounds"
+                    f"{connection!r} that no placement target grounds"
                 )
 
 
@@ -421,9 +484,9 @@ def _bind_place_down(
             f"operation {operation.operation_id!r} PLACE_DOWN references an "
             "unknown goal part"
         )
-    if (
-        lower_part.z != upper_part.z - 1
-        or (lower_part.x, lower_part.y) != (upper_part.x, upper_part.y)
+    if lower_part.z != upper_part.z - 1 or (lower_part.x, lower_part.y) != (
+        upper_part.x,
+        upper_part.y,
     ):
         raise RobotOperationPlanError(
             f"operation {operation.operation_id!r} PLACE_DOWN lower part {lower!r} "
@@ -546,8 +609,7 @@ def parse_robot_operation_plan(payload, *, source_plan=None):
     if stap is not None:
         if sid != stap.plan_id:
             raise RobotOperationPlanError(
-                f"source_plan_id {sid!r} does not equal source plan_id "
-                f"{stap.plan_id!r}"
+                f"source_plan_id {sid!r} does not equal source plan_id {stap.plan_id!r}"
             )
         if set(robots) != set(stap.robots):
             raise RobotOperationPlanError(
@@ -597,6 +659,32 @@ def parse_robot_operation_plan(payload, *, source_plan=None):
                 f"{path}.role_bindings must bind the executor and every participant"
             )
         target = _target(skill, item["target"], path, executor)
+        if target is not None and skill in {"PLACE_UP", "SUPPORT_TOP"}:
+            partner_key = (
+                "support_robot_id" if skill == "PLACE_UP" else "placement_robot_id"
+            )
+            partner = target.values[partner_key]
+            if partner == executor:
+                raise RobotOperationPlanError(
+                    f"{path}.target.{partner_key} must be the collaborating robot, "
+                    f"not the executor {executor!r}"
+                )
+            if partner not in robots:
+                raise RobotOperationPlanError(
+                    f"{path}.target.{partner_key} {partner!r} is not a plan robot"
+                )
+            if skill == "PLACE_UP":
+                if set(participants) != {executor, partner}:
+                    raise RobotOperationPlanError(
+                        f"{path}.participants must be exactly the executor "
+                        f"{executor!r} and support robot {partner!r}"
+                    )
+            else:
+                if set(participants) != {executor}:
+                    raise RobotOperationPlanError(
+                        f"{path}.participants must contain only support executor "
+                        f"{executor!r}; placement robot {partner!r} is target metadata"
+                    )
         operations[operation_id] = RobotOperation(
             operation_id,
             source_task_id,
@@ -630,9 +718,7 @@ def parse_robot_operation_plan(payload, *, source_plan=None):
             or successor not in operations
             or (predecessor, successor) in seen_pairs
         ):
-            raise RobotOperationPlanError(
-                f"{path} is not a valid operation dependency"
-            )
+            raise RobotOperationPlanError(f"{path} is not a valid operation dependency")
         seen_pairs.add((predecessor, successor))
         dependencies.append(
             OperationDependency(
@@ -662,9 +748,7 @@ def parse_robot_operation_plan(payload, *, source_plan=None):
     for slot, value in enumerate(_arr(root["planned_schedule"], "planned_schedule")):
         used: set[str] = set()
         entries: list[ScheduledOperation] = []
-        for entry_index, entry in enumerate(
-            _arr(value, f"planned_schedule[{slot}]")
-        ):
+        for entry_index, entry in enumerate(_arr(value, f"planned_schedule[{slot}]")):
             path = f"planned_schedule[{slot}][{entry_index}]"
             item = _obj(entry, path)
             _keys(item, _SCHEDULE_ENTRY, path)
@@ -718,9 +802,7 @@ def parse_robot_operation_plan(payload, *, source_plan=None):
         operation_id = _text(item["operation_id"], path + ".operation_id")
         label = _text(item["evidence"], path + ".evidence")
         if operation_id not in operations or operation_id in seen_evidence:
-            raise RobotOperationPlanError(
-                f"{path} operation is unknown or duplicated"
-            )
+            raise RobotOperationPlanError(f"{path} operation is unknown or duplicated")
         if label not in operations[operation_id].evidence_requirements:
             raise RobotOperationPlanError(
                 f"{path} evidence {label!r} is not declared by operation "

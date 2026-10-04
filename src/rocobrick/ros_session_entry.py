@@ -70,6 +70,11 @@ from rocobrick.moveit_contract import (
     TcpPoseTarget,
 )
 from rocobrick.moveit_execution import ExecutionResult, is_success
+from rocobrick.coordinated_session_entry import perform_coordinated_plan
+from rocobrick.coordinated_session import (
+    CoordinatedSessionRequest,
+    parse_coordinated_request,
+)
 
 SUMMARY_SCHEMA = "rocobrick-runtime-operation-summary/v1"
 SESSION_SUMMARY_SCHEMA = "rocobrick-ros-session-summary/v1"
@@ -414,10 +419,21 @@ def load_request(path: Path) -> RuntimeOperation:
     return RuntimeOperation.parse(document)
 
 
+def _load_request_document(path: Path) -> object:
+    """Load one JSON request document without selecting a session schema."""
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
 def load_session_request(path: Path) -> RosSessionRequest:
     """Load and strictly parse the robot-session request document."""
-    document = json.loads(path.read_text(encoding="utf-8"))
+    document = _load_request_document(path)
     return RosSessionRequest.parse(document)
+
+
+def load_coordinated_request(path: Path) -> CoordinatedSessionRequest:
+    """Load and strictly parse the independent coordinated envelope."""
+    document = _load_request_document(path)
+    return parse_coordinated_request(document)
 
 
 def write_result(path: Path, result: object) -> None:
@@ -1272,9 +1288,32 @@ def _main_operation(args: argparse.Namespace) -> int:
 
 
 def _main_session(args: argparse.Namespace, robots: tuple[str, ...]) -> int:
-    """Multi-robot session mode: per-robot readiness plus robot-routed ops."""
+    """Multi-robot session mode: route old and coordinated envelopes separately."""
     try:
-        request = load_session_request(args.request)
+        document = _load_request_document(args.request)
+        if isinstance(document, Mapping) and document.get("schema") == (
+            "rocobrick-coordinated-moveit-request/v1"
+        ):
+            coordinated = parse_coordinated_request(document)
+            if coordinated.robots != robots:
+                raise ValueError(
+                    f"coordinated request robots {list(coordinated.robots)} do not "
+                    f"match --robots {list(robots)}"
+                )
+            session = background = node = None
+            thread: threading.Thread | None = None
+            try:
+                session, background, thread, node = _spin_up_session(
+                    args.node_name, robots, min(FK_TIMEOUT_S, coordinated.timeout_s)
+                )
+                result = perform_coordinated_plan(session, coordinated)
+            finally:
+                if session is not None:
+                    _spin_down_session(session, background, thread, node)
+            write_result(args.result, result)
+            print(json.dumps(result.serialize(), sort_keys=True), flush=True)
+            return 0 if result.passed else 1
+        request = RosSessionRequest.parse(document)
     except (OSError, OperationContractError, ValueError) as error:
         result = _fallback_session_result(
             f"request could not be loaded: {error}", robots=robots

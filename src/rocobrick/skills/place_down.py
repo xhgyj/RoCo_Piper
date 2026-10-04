@@ -1139,37 +1139,11 @@ class PlaceDownHandler:
                     terminal=result.terminal,
                     motion_sent=motion_sent,
                 )
-            retreat = tcp_pose_operation(
-                targets.retreat, 60.0, f"{operation.operation_id}:retreat"
-            )
-            result = await self._dispatch(operation, "retreat", retreat)
-            evidence.update(result.evidence)
-            motion_sent = motion_sent or result.motion_sent
-            if not result.passed:
-                return self._failed(
-                    operation,
-                    result.reason or "retreat failed",
-                    evidence,
-                    terminal=result.terminal,
-                    motion_sent=motion_sent,
-                )
-            # The retreat rise is anchored at the LAST release observation
-            # (TCP at contact height): every post-retreat observation is
-            # compared against that anchor, so a TCP that simply stayed up
-            # can never fake a rise.
-            retreat_samples = [release_samples[-1]]
-            for _ in range(2):
-                await asyncio.sleep(self._poll_interval_s)
-                retreat_samples.append(await observe())
-            evidence["retreat_confirmed"] = verify_place_bricks(
-                retreat_samples,
-                position_tolerance_m=context.params.still_tolerance_m,
-                orientation_tolerance_rad=(
-                    context.params.follow_orientation_tolerance_rad
-                ),
-                require_connected=True,
-                minimum_tcp_rise_m=(context.params.place_retreat_height_m * 0.5),
-            )
+            evidence["handoff_required"] = True
+            evidence["retreat_deferred"] = {
+                "reason": "next transport owns departure from the placement interface",
+                "anchor": "last_release_observation",
+            }
             if not self._ledger.revoke(
                 robot_id, f"holding:{upper_id}", "PLACE_DOWN_CONFIRMED"
             ):
@@ -1183,7 +1157,7 @@ class PlaceDownHandler:
                     "lower_physical_instance_id": lower_id,
                     "connection_confirmed": dict(evidence["connection_confirmed"]),
                     "release_confirmed": dict(evidence["release_confirmed"]),
-                    "retreat_confirmed": dict(evidence["retreat_confirmed"]),
+                    "handoff_required": True,
                 },
             )
             return OperationExecution(

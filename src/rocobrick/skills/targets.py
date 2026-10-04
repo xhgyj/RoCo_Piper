@@ -117,6 +117,10 @@ class SkillParams:
     # noise. Larger offsets get one measured correction; the in-flight
     # support guard bounds any descent that still cannot engage.
     place_interface_align_tolerance_m: float = 0.0025
+    # Non-grasping SUPPORT_TOP TCP penetration into the measured upper brick
+    # support surface. PhysX contact converts this bounded position demand into
+    # downward support force; no gripper action is involved.
+    support_press_m: float = 0.001
 
     def __post_init__(self) -> None:
         bounds = {
@@ -142,6 +146,7 @@ class SkillParams:
             "place_retreat_height_m": (0.0, math.inf),
             "place_align_tolerance_m": (0.0, 0.01),
             "place_interface_align_tolerance_m": (0.0, 0.01),
+            "support_press_m": (0.0, 0.005),
         }
         for name, value in vars(self).items():
             if isinstance(value, bool) or not isinstance(value, (int, float)):

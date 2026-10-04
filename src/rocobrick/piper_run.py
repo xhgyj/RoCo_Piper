@@ -157,6 +157,7 @@ ASSEMBLY_EVIDENCE_LABELS = (
     "release_confirmed",
     "retreat_confirmed",
 )
+UPWARD_TASK_SKILL = "PLACE_UP"
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -418,7 +419,6 @@ def build_parser() -> argparse.ArgumentParser:
             "structure inputs, then executed through the real multi-robot "
             "session; scene paths default into the run directory"
         ),
-
     )
     return parser
 
@@ -451,8 +451,7 @@ def _prepare_run_dir(requested: Path | None) -> Path:
             requested.mkdir(parents=True, exist_ok=False)
         except FileExistsError as error:
             raise _RunDirError(
-                f"run directory {requested} already exists; refusing to "
-                "overwrite it",
+                f"run directory {requested} already exists; refusing to overwrite it",
                 requested,
             ) from error
         except OSError as error:
@@ -570,9 +569,7 @@ def _tcp_evidence_from_artifact(
     pinned_files = artifact["inputs"]["pinned_files"]
     return {
         "robot_model": artifact["model"],
-        "pinned_sources": {
-            entry["path"]: entry["sha256"] for entry in pinned_files
-        },
+        "pinned_sources": {entry["path"]: entry["sha256"] for entry in pinned_files},
         "items": artifact["evidence"],
     }
 
@@ -617,18 +614,15 @@ def _rederive_tcp(tcp_record: dict[str, object]) -> TcpContract:
     if artifact.get("passed") is not True:
         raise _TcpGateError(
             RunStatus.TCP_CONTRACT_INVALID,
-            "the TCP binding artifact records passed=false; its own audit "
-            "failed",
+            "the TCP binding artifact records passed=false; its own audit failed",
         )
     serialized = artifact.get("tcp_contract")
-    if (
-        not isinstance(serialized, Mapping)
-        or not isinstance(serialized.get("status"), str)
+    if not isinstance(serialized, Mapping) or not isinstance(
+        serialized.get("status"), str
     ):
         raise _TcpGateError(
             RunStatus.TCP_CONTRACT_INVALID,
-            "the TCP binding artifact carries no serialized "
-            "tcp_contract.status string",
+            "the TCP binding artifact carries no serialized tcp_contract.status string",
         )
     tcp_record["serialized_status"] = serialized["status"]
     tcp_record["serialized_blockers"] = serialized.get("blockers")
@@ -711,7 +705,7 @@ def _derive_pick_collision_filter(
             physical_id = target.get("physical_instance_id")
             if isinstance(physical_id, str) and physical_id:
                 physical_ids.add(physical_id)
-        elif skill == "PLACE_DOWN" and isinstance(target, Mapping):
+        elif skill in {"PLACE_DOWN", "PLACE_UP"} and isinstance(target, Mapping):
             for name in (
                 "upper_physical_instance_id",
                 "lower_physical_instance_id",
@@ -753,7 +747,7 @@ def _derive_observation_connection_pairs(
         return ()
     pairs: set[tuple[str, str]] = set()
     for operation in operations:
-        if not isinstance(operation, Mapping) or operation.get("skill") != "PLACE_DOWN":
+        if not isinstance(operation, Mapping) or operation.get("skill") not in {"PLACE_DOWN", "PLACE_UP"}:
             continue
         if operation.get("executor_robot_id") not in robot_ids:
             continue
@@ -823,8 +817,7 @@ def _create_session(
             args, robot_ids
         ),
         verify_plan_robots=not (
-            args.robot_operation_plan_path is not None
-            and args.plan_path is None
+            args.robot_operation_plan_path is not None and args.plan_path is None
         ),
     )
     return MultiRobotIsaacMoveItSession(
@@ -920,36 +913,31 @@ def _authorize_tcp_dispatch(
                 f"{len(runtime_candidates)}"
             )
         runtime_sha = runtime_candidates[0]["sha256"]
-        if (
-            not isinstance(contract, TcpContract)
-            or contract.transform is None
-        ):
-            raise ValueError(
-                "the verified re-derived TCP contract has no transform"
-            )
+        if not isinstance(contract, TcpContract) or contract.transform is None:
+            raise ValueError("the verified re-derived TCP contract has no transform")
         calibration_sha = contract.transform.sha256
         if (
             not isinstance(calibration_sha, str)
             or re.fullmatch(r"^[0-9a-f]{64}$", calibration_sha) is None
         ):
             raise ValueError(
-                "the re-derived TCP calibration transform has no valid "
-                "SHA-256 digest"
+                "the re-derived TCP calibration transform has no valid SHA-256 digest"
             )
         tcp_authorization["runtime_asset_sha256"] = runtime_sha
         tcp_authorization["calibration_artifact_sha256"] = calibration_sha
     except Exception as error:
         extraction_error = (
-            "TCP capability authorization inputs could not be verified: "
-            f"{error}"
+            f"TCP capability authorization inputs could not be verified: {error}"
         )
 
     if extraction_error is not None:
         tcp_authorization["reason"] = extraction_error
-        recorder.append_event({
-            "phase": "tcp_authorization",
-            **tcp_authorization,
-        })
+        recorder.append_event(
+            {
+                "phase": "tcp_authorization",
+                **tcp_authorization,
+            }
+        )
         return (
             RunStatus.UNRESOLVED_TCP,
             extraction_error,
@@ -979,37 +967,39 @@ def _authorize_tcp_dispatch(
         ):
             raise ValueError("authorize_tcp returned a malformed decision")
         checks_copy = dict(checks)
-        tcp_authorization.update({
-            "decision": "ALLOW" if allowed is True else "DENY",
-            "allowed": allowed,
-            "status": status,
-            "reason": reason,
-            "checks": checks_copy,
-        })
-    except Exception as error:
-        authorization_error = (
-            "TCP capability authorization failed closed: "
-            f"{error}"
+        tcp_authorization.update(
+            {
+                "decision": "ALLOW" if allowed is True else "DENY",
+                "allowed": allowed,
+                "status": status,
+                "reason": reason,
+                "checks": checks_copy,
+            }
         )
+    except Exception as error:
+        authorization_error = f"TCP capability authorization failed closed: {error}"
         tcp_authorization["reason"] = authorization_error
-        recorder.append_event({
-            "phase": "tcp_authorization",
-            **tcp_authorization,
-        })
+        recorder.append_event(
+            {
+                "phase": "tcp_authorization",
+                **tcp_authorization,
+            }
+        )
         return (
             RunStatus.UNRESOLVED_TCP,
             authorization_error,
         )
 
-    recorder.append_event({
-        "phase": "tcp_authorization",
-        **tcp_authorization,
-    })
+    recorder.append_event(
+        {
+            "phase": "tcp_authorization",
+            **tcp_authorization,
+        }
+    )
     if tcp_authorization["allowed"] is not True:
         return (
             RunStatus.UNRESOLVED_TCP,
-            "TCP capability authorization denied: "
-            f"{tcp_authorization['reason']}",
+            f"TCP capability authorization denied: {tcp_authorization['reason']}",
         )
     return runtime_sha, calibration_sha
 
@@ -1034,10 +1024,7 @@ def _json_value(value: object) -> object:
     if isinstance(value, Enum):
         return value.value
     if is_dataclass(value) and not isinstance(value, type):
-        return {
-            str(key): _json_value(item)
-            for key, item in asdict(value).items()
-        }
+        return {str(key): _json_value(item) for key, item in asdict(value).items()}
     if isinstance(value, Path):
         return str(value)
     if isinstance(value, Mapping):
@@ -1048,9 +1035,7 @@ def _json_value(value: object) -> object:
         return value
     if isinstance(value, float) and math.isfinite(value):
         return value
-    raise TypeError(
-        f"evidence value of type {type(value).__name__} is not JSON-safe"
-    )
+    raise TypeError(f"evidence value of type {type(value).__name__} is not JSON-safe")
 
 
 def _evidence_document(evidence: object, name: str) -> dict[str, object]:
@@ -1105,18 +1090,13 @@ def _readiness_rejection(
     Returns:
         ``None`` only when every robot is proven ready, otherwise the reason.
     """
-    if (
-        document.get("passed") is not True
-        or document.get("all_ready") is not True
-    ):
+    if document.get("passed") is not True or document.get("all_ready") is not True:
         return (
             "the session readiness evidence does not report passed=True and "
             f"all_ready=True: {dict(document)}"
         )
     reported = document.get("robots")
-    if not isinstance(reported, (list, tuple)) or list(reported) != list(
-        robots
-    ):
+    if not isinstance(reported, (list, tuple)) or list(reported) != list(robots):
         return (
             f"the readiness evidence robots {reported!r} are not exactly the "
             f"plan robots {list(robots)}"
@@ -1134,9 +1114,7 @@ def _readiness_rejection(
     for robot in robots:
         entry = by_robot.get(robot)
         if not isinstance(entry, Mapping):
-            return (
-                f"the readiness evidence carries no report for robot {robot!r}"
-            )
+            return f"the readiness evidence carries no report for robot {robot!r}"
         if entry.get("passed") is not True:
             return f"robot {robot!r} is not ready: {dict(entry)}"
     return None
@@ -1169,8 +1147,7 @@ def _cleanup_passed(document: Mapping[str, object]) -> bool:
         return False
     leftovers = cleanup.get("leftovers")
     if isinstance(leftovers, Mapping) and (
-        leftovers.get("session_containers")
-        or leftovers.get("session_processes")
+        leftovers.get("session_containers") or leftovers.get("session_processes")
     ):
         return False
     return True
@@ -1204,21 +1181,23 @@ def _plan_failure_reason(document: Mapping[str, object]) -> str:
 
 
 def _place_down_upper_part(operation: object) -> str | None:
-    """Return the upper part a PLACE_DOWN operation targets, when declared.
-
-    Args:
-        operation: One parsed external ``RobotOperation`` (duck-typed).
+    """Return the placed/moving part targeted by PLACE_DOWN or PLACE_UP.
 
     Returns:
-        The non-empty ``upper_physical_instance_id`` of the operation target,
-        or ``None`` when the operation carries no such target value.
+        The upper part for PLACE_DOWN, or the lower moving part for PLACE_UP.
     """
     target = getattr(operation, "target", None)
     values = getattr(target, "values", None)
     if not isinstance(values, Mapping):
         return None
-    upper = values.get("upper_physical_instance_id")
-    return upper if isinstance(upper, str) and upper else None
+    skill = getattr(operation, "skill", None)
+    key = (
+        "lower_physical_instance_id"
+        if skill == "PLACE_UP"
+        else "upper_physical_instance_id"
+    )
+    value = values.get(key)
+    return value if isinstance(value, str) and value else None
 
 
 def _evidence_label_proven(evidence: object, label: str) -> bool:
@@ -1271,9 +1250,7 @@ def _pending_assembly_effect_check(
     tasks = getattr(stap_plan, "tasks", None)
     operations = getattr(operation_plan, "operations", None)
     run_operations = run_document.get("operations")
-    run_operations = (
-        run_operations if isinstance(run_operations, Mapping) else {}
-    )
+    run_operations = run_operations if isinstance(run_operations, Mapping) else {}
     document: dict[str, object] = {
         "schema": ASSEMBLY_EFFECT_SCHEMA,
         "required_evidence_labels": list(ASSEMBLY_EVIDENCE_LABELS),
@@ -1316,15 +1293,17 @@ def _pending_assembly_effect_check(
         matching = [
             operation
             for operation in operations.values()
-            if getattr(operation, "skill", None) == PENDING_TASK_SKILL
+            if getattr(operation, "skill", None)
+            in {PENDING_TASK_SKILL, UPWARD_TASK_SKILL}
             and getattr(operation, "source_task_id", None) == task_id
             and getattr(operation, "executor_robot_id", None) == robot_id
             and _place_down_upper_part(operation) == part_id
         ]
         if len(matching) != 1:
             entry["reason"] = (
-                f"the external plan has {len(matching)} {PENDING_TASK_SKILL} "
-                f"operations for STAP task {task_name!r} (part {part_id!r} on "
+                f"the external plan has {len(matching)} PLACE_DOWN/PLACE_UP "
+                f"placement operations for STAP task "
+                f"{task_name!r} (part {part_id!r} on "
                 f"robot {robot_id!r}); exactly one is required"
             )
             missing.append(task_name)
@@ -1334,9 +1313,7 @@ def _pending_assembly_effect_check(
         operation_id = getattr(operation, "operation_id", None)
         entry["operation_id"] = operation_id
         result = (
-            run_operations.get(operation_id)
-            if isinstance(operation_id, str)
-            else None
+            run_operations.get(operation_id) if isinstance(operation_id, str) else None
         )
         if not isinstance(result, Mapping):
             entry["reason"] = (
@@ -1437,7 +1414,10 @@ def _robot_operation_plan_phase(
     )
     from rocobrick.skills.pick import PickHandler
     from rocobrick.skills.place_down import PlaceDownHandler
+    from rocobrick.skills.place_up import PlaceUpHandler
+    from rocobrick.skills.support_top import SupportTopHandler
     from rocobrick.tcp_contract import EXPECTED_RUNTIME_MODEL_SHA256
+    from rocobrick.unified_runtime_facade import UnifiedDualArmRuntimeFacade
 
     plan_record: dict[str, object] = {
         "path": str(args.robot_operation_plan_path),
@@ -1460,107 +1440,109 @@ def _robot_operation_plan_phase(
         # The original bytes are captured verbatim into the run directory and
         # the capture is what gets parsed, so the audited copy and the parsed
         # bytes can never diverge.
-        recorder.capture_input(
-            PLAN_CAPTURE_NAME, args.robot_operation_plan_path
-        )
+        recorder.capture_input(PLAN_CAPTURE_NAME, args.robot_operation_plan_path)
         raw = (recorder.directory / PLAN_CAPTURE_NAME).read_bytes()
     except OSError as error:
         reason = f"the robot operation plan is unreadable: {error}"
         plan_record["error"] = reason
-        recorder.append_event({
-            "phase": "robot_operation_plan",
-            "status": "REJECTED",
-            "reason": reason,
-        })
+        recorder.append_event(
+            {
+                "phase": "robot_operation_plan",
+                "status": "REJECTED",
+                "reason": reason,
+            }
+        )
         return RunStatus.INVALID_INPUT, reason
     plan_record["sha256"] = sha256(raw).hexdigest()
     plan_record["bytes"] = len(raw)
     try:
         payload = json.loads(raw.decode("utf-8"))
     except (UnicodeDecodeError, ValueError) as error:
-        reason = (
-            f"the robot operation plan is not valid UTF-8 JSON: {error}"
-        )
+        reason = f"the robot operation plan is not valid UTF-8 JSON: {error}"
         plan_record["error"] = reason
-        recorder.append_event({
-            "phase": "robot_operation_plan",
-            "status": "REJECTED",
-            "reason": reason,
-            "sha256": plan_record["sha256"],
-        })
+        recorder.append_event(
+            {
+                "phase": "robot_operation_plan",
+                "status": "REJECTED",
+                "reason": reason,
+                "sha256": plan_record["sha256"],
+            }
+        )
         return RunStatus.INVALID_INPUT, reason
     try:
-        operation_plan = parse_robot_operation_plan(
-            payload, source_plan=stap_plan
-        )
+        operation_plan = parse_robot_operation_plan(payload, source_plan=stap_plan)
     except RobotOperationPlanError as error:
         reason = (
             f"the robot operation plan failed strict validation against the "
             f"STAP binding: {error}"
         )
         plan_record["error"] = reason
-        recorder.append_event({
-            "phase": "robot_operation_plan",
-            "status": "REJECTED",
-            "reason": reason,
-            "sha256": plan_record["sha256"],
-        })
-        return RunStatus.INVALID_INPUT, reason
-    plan_record.update({
-        "schema": operation_plan.schema,
-        "plan_id": operation_plan.plan_id,
-        "source_plan_id": operation_plan.source_plan_id,
-        "robots": list(operation_plan.robots),
-        "operations": [
+        recorder.append_event(
             {
-                "operation_id": operation.operation_id,
-                "source_task_id": operation.source_task_id,
-                "skill": operation.skill,
-                "executor_robot_id": operation.executor_robot_id,
-                "participants": list(operation.participants),
-                "resources": list(operation.resources),
-                "evidence_requirements": list(
-                    operation.evidence_requirements
-                ),
-                "target": (
-                    dict(operation.target.values)
-                    if operation.target is not None
-                    else None
-                ),
+                "phase": "robot_operation_plan",
+                "status": "REJECTED",
+                "reason": reason,
+                "sha256": plan_record["sha256"],
             }
-            for operation in operation_plan.operations.values()
-        ],
-        "execution_layers": [
-            list(layer) for layer in operation_plan.execution_layers
-        ],
-        "planned_schedule": [
-            [
+        )
+        return RunStatus.INVALID_INPUT, reason
+    plan_record.update(
+        {
+            "schema": operation_plan.schema,
+            "plan_id": operation_plan.plan_id,
+            "source_plan_id": operation_plan.source_plan_id,
+            "robots": list(operation_plan.robots),
+            "operations": [
                 {
-                    "operation_id": item.operation_id,
-                    "robot_id": item.robot_id,
+                    "operation_id": operation.operation_id,
+                    "source_task_id": operation.source_task_id,
+                    "skill": operation.skill,
+                    "executor_robot_id": operation.executor_robot_id,
+                    "participants": list(operation.participants),
+                    "resources": list(operation.resources),
+                    "evidence_requirements": list(operation.evidence_requirements),
+                    "target": (
+                        dict(operation.target.values)
+                        if operation.target is not None
+                        else None
+                    ),
                 }
-                for item in slot
-            ]
-            for slot in operation_plan.planned_schedule
-        ],
-        "validated": True,
-    })
+                for operation in operation_plan.operations.values()
+            ],
+            "execution_layers": [
+                list(layer) for layer in operation_plan.execution_layers
+            ],
+            "planned_schedule": [
+                [
+                    {
+                        "operation_id": item.operation_id,
+                        "robot_id": item.robot_id,
+                    }
+                    for item in slot
+                ]
+                for slot in operation_plan.planned_schedule
+            ],
+            "validated": True,
+        }
+    )
     record["checks"]["robot_operation_plan_validated"] = True
     record["checks"]["robot_operation_plan_cross_bound"] = True
-    recorder.append_event({
-        "phase": "robot_operation_plan",
-        "status": "VALIDATED",
-        "schema": operation_plan.schema,
-        "plan_id": operation_plan.plan_id,
-        "source_plan_id": operation_plan.source_plan_id,
-        "robots": list(operation_plan.robots),
-        "operation_ids": list(operation_plan.operations),
-        "execution_layers": [
-            list(layer) for layer in operation_plan.execution_layers
-        ],
-        "sha256": plan_record["sha256"],
-        "captured_path": plan_record["captured_path"],
-    })
+    recorder.append_event(
+        {
+            "phase": "robot_operation_plan",
+            "status": "VALIDATED",
+            "schema": operation_plan.schema,
+            "plan_id": operation_plan.plan_id,
+            "source_plan_id": operation_plan.source_plan_id,
+            "robots": list(operation_plan.robots),
+            "operation_ids": list(operation_plan.operations),
+            "execution_layers": [
+                list(layer) for layer in operation_plan.execution_layers
+            ],
+            "sha256": plan_record["sha256"],
+            "captured_path": plan_record["captured_path"],
+        }
+    )
 
     authorized = _authorize_tcp_dispatch(args, record, recorder, contract)
     if isinstance(authorized[0], RunStatus):
@@ -1598,52 +1580,54 @@ def _robot_operation_plan_phase(
                 operation_plan.robots,
             )
         except Exception as error:
-            reason = (
-                f"the multi-robot session could not be created: {error}"
-            )
-            recorder.append_event({
-                "phase": "runtime_start",
-                "status": "FAILED",
-                "reason": reason,
-                "session_dir": None,
-            })
-            runtime_terminal = (RunStatus.RUNTIME_START_FAILED, reason)
-        if runtime_terminal is None:
-            recorder.append_event({
-                "phase": "runtime_start",
-                "status": "STARTING",
-                "session_dir": str(session.session_dir),
-            })
-            try:
-                readiness = session.start()
-            except Exception as error:
-                reason = (
-                    f"the multi-robot session failed to start: {error}"
-                )
-                recorder.append_event({
+            reason = f"the multi-robot session could not be created: {error}"
+            recorder.append_event(
+                {
                     "phase": "runtime_start",
                     "status": "FAILED",
                     "reason": reason,
+                    "session_dir": None,
+                }
+            )
+            runtime_terminal = (RunStatus.RUNTIME_START_FAILED, reason)
+        if runtime_terminal is None:
+            recorder.append_event(
+                {
+                    "phase": "runtime_start",
+                    "status": "STARTING",
                     "session_dir": str(session.session_dir),
-                })
+                }
+            )
+            try:
+                readiness = session.start()
+            except Exception as error:
+                reason = f"the multi-robot session failed to start: {error}"
+                recorder.append_event(
+                    {
+                        "phase": "runtime_start",
+                        "status": "FAILED",
+                        "reason": reason,
+                        "session_dir": str(session.session_dir),
+                    }
+                )
                 runtime_terminal = (RunStatus.RUNTIME_START_FAILED, reason)
             else:
                 try:
-                    readiness_document = _evidence_document(
-                        readiness, "readiness"
-                    )
+                    readiness_document = _evidence_document(readiness, "readiness")
                 except (TypeError, ValueError) as error:
                     reason = (
                         "the multi-robot session readiness evidence is not "
                         f"serializable: {error}"
                     )
                     run_document["readiness_rejection"] = reason
-                    recorder.append_event({
-                        "phase": "runtime_start",
-                        "status": "FAILED",
-                        "reason": reason,
-                        "session_dir": str(session.session_dir),
-                    })
+                    recorder.append_event(
+                        {
+                            "phase": "runtime_start",
+                            "status": "FAILED",
+                            "reason": reason,
+                            "session_dir": str(session.session_dir),
+                        }
+                    )
                     runtime_terminal = (
                         RunStatus.RUNTIME_START_FAILED,
                         reason,
@@ -1654,28 +1638,30 @@ def _robot_operation_plan_phase(
                     )
                     if rejection is not None:
                         run_document["readiness_rejection"] = rejection
-                        recorder.append_event({
-                            "phase": "runtime_start",
-                            "status": "FAILED",
-                            "reason": rejection,
-                            "readiness": readiness_document,
-                            "session_dir": str(session.session_dir),
-                        })
+                        recorder.append_event(
+                            {
+                                "phase": "runtime_start",
+                                "status": "FAILED",
+                                "reason": rejection,
+                                "readiness": readiness_document,
+                                "session_dir": str(session.session_dir),
+                            }
+                        )
                         runtime_terminal = (
                             RunStatus.RUNTIME_START_FAILED,
                             rejection,
                         )
                     else:
-                        record["checks"][
-                            "robot_operation_plan_readiness_passed"
-                        ] = True
-                        recorder.append_event({
-                            "phase": "runtime_start",
-                            "status": "READY",
-                            "passed": True,
-                            "readiness": readiness_document,
-                            "session_dir": str(session.session_dir),
-                        })
+                        record["checks"]["robot_operation_plan_readiness_passed"] = True
+                        recorder.append_event(
+                            {
+                                "phase": "runtime_start",
+                                "status": "READY",
+                                "passed": True,
+                                "readiness": readiness_document,
+                                "session_dir": str(session.session_dir),
+                            }
+                        )
         if runtime_terminal is None:
             try:
                 if hasattr(session, "run_motion_operation"):
@@ -1697,8 +1683,10 @@ def _robot_operation_plan_phase(
                     state_ledger = OperationStateLedger(operation_plan.robots)
                     pick_backends = {}
                     place_backends = {}
+                    place_up_backends = {}
+                    support_backends = {}
                     if any(
-                        item.skill in ("PICK", "PLACE_DOWN")
+                        item.skill in ("PICK", "PLACE_DOWN", "PLACE_UP", "SUPPORT_TOP")
                         for item in operation_plan.operations.values()
                     ):
                         from rocobrick.isaac_snapshot_host_adapter import (
@@ -1707,7 +1695,7 @@ def _robot_operation_plan_phase(
 
                         if args.scene_manifest is None:
                             raise RuntimeError(
-                                "PICK/PLACE_DOWN requires a scene manifest"
+                                "PICK/PLACE/SUPPORT operations require a scene manifest"
                             )
                         manifest = load_scene_snapshot_manifest(args.scene_manifest)
                         if any(
@@ -1733,8 +1721,7 @@ def _robot_operation_plan_phase(
                             # FIRST measured interface contact, withdraws and
                             # fails closed; it never publishes a placed state.
                             place_probe = (
-                                os.environ.get("ROCOBRICK_PLACE_CONTACT_PROBE")
-                                == "1"
+                                os.environ.get("ROCOBRICK_PLACE_CONTACT_PROBE") == "1"
                             )
                             place_backends = {
                                 robot_id: PlaceDownHandler(
@@ -1748,6 +1735,36 @@ def _robot_operation_plan_phase(
                                 )
                                 for robot_id in operation_plan.robots
                             }
+                        if any(
+                            item.skill == "PLACE_UP"
+                            for item in operation_plan.operations.values()
+                        ):
+                            place_up_backends = {
+                                robot_id: PlaceUpHandler(
+                                    session,
+                                    state_ledger,
+                                    session_id=args.host_instance_id,
+                                    manifest_sha256=manifest.manifest_sha256,
+                                    motion_transport=session,
+                                    context=transit_contexts[robot_id],
+                                )
+                                for robot_id in operation_plan.robots
+                            }
+                        if any(
+                            item.skill == "SUPPORT_TOP"
+                            for item in operation_plan.operations.values()
+                        ):
+                            support_backends = {
+                                robot_id: SupportTopHandler(
+                                    session,
+                                    state_ledger,
+                                    session_id=args.host_instance_id,
+                                    manifest_sha256=manifest.manifest_sha256,
+                                    motion_transport=session,
+                                    context=transit_contexts[robot_id],
+                                )
+                                for robot_id in operation_plan.robots
+                            }
                     executor = SkillOperationExecutor(
                         operation_plan.robots,
                         session,
@@ -1755,15 +1772,15 @@ def _robot_operation_plan_phase(
                         transit_contexts=transit_contexts,
                         pick_backends=pick_backends,
                         place_backends=place_backends,
+                        place_up_backends=place_up_backends,
+                        pre_phase_runtime=UnifiedDualArmRuntimeFacade(session),
                         state_ledger=state_ledger,
                     )
                 else:
                     # Keep the narrow observation-only injection seam used by
                     # offline tests and legacy callers. Real sessions expose
                     # run_motion_operation and always take the branch above.
-                    executor = SkillOperationExecutor(
-                        operation_plan.robots, session
-                    )
+                    executor = SkillOperationExecutor(operation_plan.robots, session)
                 runner = OperationPlanRunner(
                     plan=operation_plan,
                     executor=executor,
@@ -1777,34 +1794,30 @@ def _robot_operation_plan_phase(
                     scheduler_result, readiness=readiness_document
                 )
                 run_document["scheduler_ran"] = True
-                run_document["scheduler_passed"] = bool(
-                    scheduler_result.passed
-                )
+                run_document["scheduler_passed"] = bool(scheduler_result.passed)
             except Exception as error:
                 reason = (
                     "the robot operation plan run failed before a result was "
                     f"produced: {error}"
                 )
-                recorder.append_event({
-                    "phase": "robot_operation_plan_run",
-                    "status": "FAILED",
-                    "reason": reason,
-                })
+                recorder.append_event(
+                    {
+                        "phase": "robot_operation_plan_run",
+                        "status": "FAILED",
+                        "reason": reason,
+                    }
+                )
                 runtime_terminal = (RunStatus.EXECUTION_FAILED, reason)
             else:
-                record["checks"][
-                    "robot_operation_plan_scheduler_ran"
-                ] = True
-                record["checks"][
-                    "robot_operation_plan_scheduler_passed"
-                ] = bool(scheduler_result.passed)
+                record["checks"]["robot_operation_plan_scheduler_ran"] = True
+                record["checks"]["robot_operation_plan_scheduler_passed"] = bool(
+                    scheduler_result.passed
+                )
     finally:
         if session is not None:
             try:
                 stop_evidence = session.stop()
-                cleanup_document = _evidence_document(
-                    stop_evidence, "cleanup"
-                )
+                cleanup_document = _evidence_document(stop_evidence, "cleanup")
                 cleanup_passed = _cleanup_passed(cleanup_document)
             except Exception as error:  # noqa: BLE001 - cleanup is audited
                 cleanup_document = {
@@ -1813,15 +1826,15 @@ def _robot_operation_plan_phase(
                 }
                 cleanup_passed = False
             record["runtime"] = cleanup_document
-            record["checks"][
-                "robot_operation_plan_cleanup_passed"
-            ] = cleanup_passed
-            recorder.append_event({
-                "phase": "runtime_stop",
-                "status": "STOPPED" if cleanup_passed else "FAILED",
-                "cleanup_passed": cleanup_passed,
-                "cleanup": cleanup_document,
-            })
+            record["checks"]["robot_operation_plan_cleanup_passed"] = cleanup_passed
+            recorder.append_event(
+                {
+                    "phase": "runtime_stop",
+                    "status": "STOPPED" if cleanup_passed else "FAILED",
+                    "cleanup_passed": cleanup_passed,
+                    "cleanup": cleanup_document,
+                }
+            )
             if not cleanup_passed and runtime_terminal is None:
                 runtime_terminal = (
                     RunStatus.EXECUTION_FAILED,
@@ -1871,16 +1884,18 @@ def _robot_operation_plan_phase(
     record["checks"]["robot_operation_plan_pending_tasks_confirmed"] = (
         assembly_effects_passed
     )
-    recorder.append_event({
-        "phase": "stap_assembly_effects",
-        "status": "CONFIRMED" if assembly_effects_passed else "FAILED",
-        "passed": assembly_effects_passed,
-        "pending_task_ids": assembly_effects.get("pending_task_ids"),
-        "evidenced_task_ids": assembly_effects.get("evidenced_task_ids"),
-        "missing_task_ids": assembly_effects.get("missing_task_ids"),
-        "tasks": assembly_effects.get("tasks"),
-        "reason": assembly_effects.get("reason"),
-    })
+    recorder.append_event(
+        {
+            "phase": "stap_assembly_effects",
+            "status": "CONFIRMED" if assembly_effects_passed else "FAILED",
+            "passed": assembly_effects_passed,
+            "pending_task_ids": assembly_effects.get("pending_task_ids"),
+            "evidenced_task_ids": assembly_effects.get("evidenced_task_ids"),
+            "missing_task_ids": assembly_effects.get("missing_task_ids"),
+            "tasks": assembly_effects.get("tasks"),
+            "reason": assembly_effects.get("reason"),
+        }
+    )
 
     if runtime_terminal is not None:
         terminal = runtime_terminal
@@ -1901,39 +1916,37 @@ def _robot_operation_plan_phase(
         )
     else:
         terminal = None
-    recorder.append_event({
-        "phase": "robot_operation_plan_run",
-        "status": "CONFIRMED" if terminal is None else str(terminal[0]),
-        "scheduler_ran": bool(run_document.get("scheduler_ran")),
-        "scheduler_passed": bool(run_document.get("scheduler_passed")),
-        "pending_stap_tasks_confirmed": assembly_effects_passed,
-        "missing_assembly_task_ids": assembly_effects.get(
-            "missing_task_ids"
-        ),
-        "readiness_passed": bool(
-            record["checks"].get("robot_operation_plan_readiness_passed")
-        ),
-        "cleanup_passed": cleanup_passed,
-        "motion_sent": motion_sent,
-        "operations": {
-            operation_id: {
-                "status": item.get("status"),
-                "passed": item.get("passed"),
-                "terminal": item.get("terminal"),
-                "motion_sent": item.get("motion_sent"),
-                "reason": item.get("reason"),
-            }
-            for operation_id, item in (
-                operations_document.items()
-                if isinstance(operations_document, Mapping)
-                else ()
-            )
-            if isinstance(item, Mapping)
-        },
-        "unsafe_terminals": list(
-            run_document.get("unsafe_terminals") or ()
-        ),
-    })
+    recorder.append_event(
+        {
+            "phase": "robot_operation_plan_run",
+            "status": "CONFIRMED" if terminal is None else str(terminal[0]),
+            "scheduler_ran": bool(run_document.get("scheduler_ran")),
+            "scheduler_passed": bool(run_document.get("scheduler_passed")),
+            "pending_stap_tasks_confirmed": assembly_effects_passed,
+            "missing_assembly_task_ids": assembly_effects.get("missing_task_ids"),
+            "readiness_passed": bool(
+                record["checks"].get("robot_operation_plan_readiness_passed")
+            ),
+            "cleanup_passed": cleanup_passed,
+            "motion_sent": motion_sent,
+            "operations": {
+                operation_id: {
+                    "status": item.get("status"),
+                    "passed": item.get("passed"),
+                    "terminal": item.get("terminal"),
+                    "motion_sent": item.get("motion_sent"),
+                    "reason": item.get("reason"),
+                }
+                for operation_id, item in (
+                    operations_document.items()
+                    if isinstance(operations_document, Mapping)
+                    else ()
+                )
+                if isinstance(item, Mapping)
+            },
+            "unsafe_terminals": list(run_document.get("unsafe_terminals") or ()),
+        }
+    )
     return terminal
 
 
@@ -2083,9 +2096,7 @@ def _mutation_detail(
     """
     if read_error is not None:
         return read_error
-    changed = sorted(
-        name for name in before if before[name] != after.get(name)
-    )
+    changed = sorted(name for name in before if before[name] != after.get(name))
     return f"the original inputs changed on disk: {changed}"
 
 
@@ -2111,21 +2122,19 @@ def _structure_carrier_summary(
     parts = getattr(carrier, "goal_parts", None)
     task_evidence: list[dict[str, object]] = []
     if isinstance(tasks, Mapping):
-        for task_id, task in sorted(
-            tasks.items(), key=lambda item: str(item[0])
-        ):
-            task_evidence.append({
-                "task_id": str(task_id),
-                "physical_instance_id": getattr(
-                    task, "physical_instance_id", None
-                ),
-                "skill": _json_value(getattr(task, "skill", None)),
-                "primary_robot": getattr(task, "primary_robot", None),
-                "supporting_robot": getattr(task, "supporting_robot", None),
-                "initial_supports": sorted(
-                    getattr(task, "initial_supports", ()) or ()
-                ),
-            })
+        for task_id, task in sorted(tasks.items(), key=lambda item: str(item[0])):
+            task_evidence.append(
+                {
+                    "task_id": str(task_id),
+                    "physical_instance_id": getattr(task, "physical_instance_id", None),
+                    "skill": _json_value(getattr(task, "skill", None)),
+                    "primary_robot": getattr(task, "primary_robot", None),
+                    "supporting_robot": getattr(task, "supporting_robot", None),
+                    "initial_supports": sorted(
+                        getattr(task, "initial_supports", ()) or ()
+                    ),
+                }
+            )
     return {
         "authoritative": False,
         "authorization": None,
@@ -2233,12 +2242,8 @@ def _run_robot_operation_plan_primary(
         "plan_path": None,
         "plan_id": None,
         "task_id": None,
-        "structure_goal_path": (
-            str(goal_path) if goal_path is not None else None
-        ),
-        "structure_start_path": (
-            str(start_path) if start_path is not None else None
-        ),
+        "structure_goal_path": (str(goal_path) if goal_path is not None else None),
+        "structure_start_path": (str(start_path) if start_path is not None else None),
         "motion_geometry": None,
         "inputs": None,
         "binding": None,
@@ -2301,10 +2306,7 @@ def _run_robot_operation_plan_primary(
             if entry["present"] is not True or entry["captured_path"] is None:
                 terminal = (
                     RunStatus.INVALID_INPUT,
-                    str(
-                        entry["error"]
-                        or f"the {name} input could not be captured"
-                    ),
+                    str(entry["error"] or f"the {name} input could not be captured"),
                 )
                 break
             digest_before[name] = str(entry["sha256"])
@@ -2322,12 +2324,8 @@ def _run_robot_operation_plan_primary(
         # EMPTY too. An absent start keeps sha256=None: no digest is ever
         # invented for bytes that were never read.
         start_entry["start_provided"] = start_path is not None
-        start_entry["start_empty"] = (
-            start_path is None
-            or (
-                start_entry["present"] is True
-                and start_entry["blank"] is True
-            )
+        start_entry["start_empty"] = start_path is None or (
+            start_entry["present"] is True and start_entry["blank"] is True
         )
         if start_entry["present"] is True:
             if start_entry["blank"] is False:
@@ -2338,12 +2336,8 @@ def _run_robot_operation_plan_primary(
                     )
                 else:
                     start_path_for_builder = start_path
-                    digest_before["structure_start"] = str(
-                        start_entry["sha256"]
-                    )
-                    original_paths["structure_start"] = Path(
-                        str(start_entry["path"])
-                    )
+                    digest_before["structure_start"] = str(start_entry["sha256"])
+                    original_paths["structure_start"] = Path(str(start_entry["path"]))
         elif start_entry["error"] is not None:
             terminal = (RunStatus.INVALID_INPUT, str(start_entry["error"]))
         for name, path, capture_name in (
@@ -2354,42 +2348,46 @@ def _run_robot_operation_plan_primary(
             ),
             ("config", args.config_path, CONFIG_CAPTURE_NAME),
         ):
-            _, entry = _capture_input_record(
-                recorder, name, path, capture_name
-            )
+            _, entry = _capture_input_record(recorder, name, path, capture_name)
             input_records[name] = entry
             if entry["captured_path"] is not None and path is not None:
                 digest_before[name] = str(entry["sha256"])
                 original_paths[name] = path
-    recorder.append_event({
-        "phase": "immutable_input",
-        "status": "OK" if terminal is None else "FAILED",
-        "mode": STRUCTURE_ONLY_MODE,
-        "reason": terminal[1] if terminal is not None else None,
-        "inputs": input_records,
-    })
+    recorder.append_event(
+        {
+            "phase": "immutable_input",
+            "status": "OK" if terminal is None else "FAILED",
+            "mode": STRUCTURE_ONLY_MODE,
+            "reason": terminal[1] if terminal is not None else None,
+            "inputs": input_records,
+        }
+    )
 
     # Phase 1b: INPUT_ALIASING. The named original inputs must stay distinct
     # files; two roles resolving to one file would let one byte stream serve
     # two audited roles, and is rejected strictly before the binder, the TCP
     # gate and any session can exist.
-    resolved_input_paths, alias_reason = _audit_input_aliasing((
-        ("robot_operation_plan", plan_path),
-        ("structure_goal", goal_path),
-        ("structure_start", start_path),
-        ("scene_manifest", args.scene_manifest),
-        ("config", args.config_path),
-    ))
+    resolved_input_paths, alias_reason = _audit_input_aliasing(
+        (
+            ("robot_operation_plan", plan_path),
+            ("structure_goal", goal_path),
+            ("structure_start", start_path),
+            ("scene_manifest", args.scene_manifest),
+            ("config", args.config_path),
+        )
+    )
     checks["inputs_non_aliasing"] = alias_reason is None
     if alias_reason is not None and terminal is None:
         terminal = (RunStatus.INVALID_INPUT, alias_reason)
-    recorder.append_event({
-        "phase": "input_aliasing",
-        "status": "FAILED" if alias_reason is not None else "OK",
-        "mode": STRUCTURE_ONLY_MODE,
-        "reason": alias_reason,
-        "resolved_paths": resolved_input_paths,
-    })
+    recorder.append_event(
+        {
+            "phase": "input_aliasing",
+            "status": "FAILED" if alias_reason is not None else "OK",
+            "mode": STRUCTURE_ONLY_MODE,
+            "reason": alias_reason,
+            "resolved_paths": resolved_input_paths,
+        }
+    )
 
     # Phase 2: the external plan is validated with no STAP source plan and is
     # never repaired, reordered, or synthesized into one.
@@ -2414,9 +2412,7 @@ def _run_robot_operation_plan_primary(
                 )
     if terminal is None and payload is not None:
         try:
-            operation_plan = parse_robot_operation_plan(
-                payload, source_plan=None
-            )
+            operation_plan = parse_robot_operation_plan(payload, source_plan=None)
         except RobotOperationPlanError as error:
             terminal = (
                 RunStatus.INVALID_INPUT,
@@ -2424,80 +2420,89 @@ def _run_robot_operation_plan_primary(
                 f"validation without a STAP source plan: {error}",
             )
     if operation_plan is None:
-        plan_record["error"] = (
-            terminal[1] if terminal is not None else "not validated"
+        plan_record["error"] = terminal[1] if terminal is not None else "not validated"
+        recorder.append_event(
+            {
+                "phase": "robot_operation_plan",
+                "status": "REJECTED",
+                "mode": STRUCTURE_ONLY_MODE,
+                "reason": plan_record["error"],
+                "sha256": plan_record["sha256"],
+                "bytes": plan_record["bytes"],
+                "source_plan_bound": False,
+            }
         )
-        recorder.append_event({
-            "phase": "robot_operation_plan",
-            "status": "REJECTED",
-            "mode": STRUCTURE_ONLY_MODE,
-            "reason": plan_record["error"],
-            "sha256": plan_record["sha256"],
-            "bytes": plan_record["bytes"],
-            "source_plan_bound": False,
-        })
     else:
-        plan_record.update({
-            "schema": operation_plan.schema,
-            "plan_id": operation_plan.plan_id,
-            "source_plan_id": operation_plan.source_plan_id,
-            "robots": list(operation_plan.robots),
-            "operations": [
-                {
-                    "operation_id": operation.operation_id,
-                    "source_task_id": operation.source_task_id,
-                    "skill": operation.skill,
-                    "executor_robot_id": operation.executor_robot_id,
-                    "participants": list(operation.participants),
-                    "resources": list(operation.resources),
-                    "evidence_requirements": list(
-                        operation.evidence_requirements
-                    ),
-                    "target": (
-                        dict(operation.target.values)
-                        if operation.target is not None
-                        else None
-                    ),
-                }
-                for operation in operation_plan.operations.values()
-            ],
-            "execution_layers": [
-                list(layer) for layer in operation_plan.execution_layers
-            ],
-            "planned_schedule": [
-                [
+        plan_record.update(
+            {
+                "schema": operation_plan.schema,
+                "plan_id": operation_plan.plan_id,
+                "source_plan_id": operation_plan.source_plan_id,
+                "robots": list(operation_plan.robots),
+                "operations": [
                     {
-                        "operation_id": item.operation_id,
-                        "robot_id": item.robot_id,
+                        "operation_id": operation.operation_id,
+                        "source_task_id": operation.source_task_id,
+                        "skill": operation.skill,
+                        "executor_robot_id": operation.executor_robot_id,
+                        "participants": list(operation.participants),
+                        "resources": list(operation.resources),
+                        "evidence_requirements": list(operation.evidence_requirements),
+                        "target": (
+                            dict(operation.target.values)
+                            if operation.target is not None
+                            else None
+                        ),
                     }
-                    for item in slot
-                ]
-                for slot in operation_plan.planned_schedule
-            ],
-            "validated": True,
-        })
+                    for operation in operation_plan.operations.values()
+                ],
+                "execution_layers": [
+                    list(layer) for layer in operation_plan.execution_layers
+                ],
+                "planned_schedule": [
+                    [
+                        {
+                            "operation_id": item.operation_id,
+                            "robot_id": item.robot_id,
+                        }
+                        for item in slot
+                    ]
+                    for slot in operation_plan.planned_schedule
+                ],
+                "validated": True,
+            }
+        )
         checks["robot_operation_plan_validated"] = True
         direct_dispatch = direct_dispatch and all(
-            operation.skill in {"TRANSIT", "WAIT", "PICK", "PLACE_DOWN"}
+            operation.skill in {
+                "TRANSIT",
+                "WAIT",
+                "PICK",
+                "PLACE_DOWN",
+                "PLACE_UP",
+                "SUPPORT_TOP",
+            }
             for operation in operation_plan.operations.values()
         )
         checks["direct_runtime_skills_supported"] = direct_dispatch
-        recorder.append_event({
-            "phase": "robot_operation_plan",
-            "status": "VALIDATED",
-            "mode": STRUCTURE_ONLY_MODE,
-            "schema": operation_plan.schema,
-            "plan_id": operation_plan.plan_id,
-            "source_plan_id": operation_plan.source_plan_id,
-            "robots": list(operation_plan.robots),
-            "operation_ids": list(operation_plan.operations),
-            "execution_layers": [
-                list(layer) for layer in operation_plan.execution_layers
-            ],
-            "sha256": plan_record["sha256"],
-            "captured_path": plan_record["captured_path"],
-            "source_plan_bound": False,
-        })
+        recorder.append_event(
+            {
+                "phase": "robot_operation_plan",
+                "status": "VALIDATED",
+                "mode": STRUCTURE_ONLY_MODE,
+                "schema": operation_plan.schema,
+                "plan_id": operation_plan.plan_id,
+                "source_plan_id": operation_plan.source_plan_id,
+                "robots": list(operation_plan.robots),
+                "operation_ids": list(operation_plan.operations),
+                "execution_layers": [
+                    list(layer) for layer in operation_plan.execution_layers
+                ],
+                "sha256": plan_record["sha256"],
+                "captured_path": plan_record["captured_path"],
+                "source_plan_bound": False,
+            }
+        )
 
     # Phase 3: STRUCTURE_SCENE binding, still strictly before any TCP
     # re-derivation and any session creation.
@@ -2510,8 +2515,7 @@ def _run_robot_operation_plan_primary(
                 payload,
                 manifest=(
                     args.scene_manifest
-                    if args.scene_manifest is not None
-                    and args.scene_manifest.is_file()
+                    if args.scene_manifest is not None and args.scene_manifest.is_file()
                     else None
                 ),
             )
@@ -2526,9 +2530,7 @@ def _run_robot_operation_plan_primary(
             binding_accepted = True
             normalized = _json_value(raw_metadata)
             metadata: dict[str, object] = (
-                normalized
-                if isinstance(normalized, dict)
-                else {"metadata": normalized}
+                normalized if isinstance(normalized, dict) else {"metadata": normalized}
             )
             summary = _structure_carrier_summary(carrier, metadata)
             record["structure"] = summary
@@ -2545,23 +2547,25 @@ def _run_robot_operation_plan_primary(
                 "structure": metadata,
             }
             checks["structure_scene_validated"] = True
-            recorder.append_event({
-                "phase": "structure_scene",
-                "status": "VALIDATED",
-                "mode": STRUCTURE_ONLY_MODE,
-                "goal_path": str(goal_path),
-                "start_path": metadata.get("start_path"),
-                "binding": metadata.get("binding"),
-                "plan_id": summary["plan_id"],
-                "robots": summary["robots"],
-                "goal_part_ids": summary["goal_part_ids"],
-                "initial_instance_ids": metadata.get("initial_instance_ids"),
-                "placed_instance_ids": metadata.get("placed_instance_ids"),
-                "goal_sha256": metadata.get("goal_sha256"),
-                "start_sha256": metadata.get("start_sha256"),
-                "manifest_sha256": metadata.get("manifest_sha256"),
-                "authoritative": False,
-            })
+            recorder.append_event(
+                {
+                    "phase": "structure_scene",
+                    "status": "VALIDATED",
+                    "mode": STRUCTURE_ONLY_MODE,
+                    "goal_path": str(goal_path),
+                    "start_path": metadata.get("start_path"),
+                    "binding": metadata.get("binding"),
+                    "plan_id": summary["plan_id"],
+                    "robots": summary["robots"],
+                    "goal_part_ids": summary["goal_part_ids"],
+                    "initial_instance_ids": metadata.get("initial_instance_ids"),
+                    "placed_instance_ids": metadata.get("placed_instance_ids"),
+                    "goal_sha256": metadata.get("goal_sha256"),
+                    "start_sha256": metadata.get("start_sha256"),
+                    "manifest_sha256": metadata.get("manifest_sha256"),
+                    "authoritative": False,
+                }
+            )
     if binding_accepted is False:
         record["binding"] = {
             "accepted": False,
@@ -2570,32 +2574,34 @@ def _run_robot_operation_plan_primary(
             "authoritative_stap": None,
             "structure": None,
         }
-        recorder.append_event({
-            "phase": "structure_scene",
-            "status": "REJECTED",
-            "mode": STRUCTURE_ONLY_MODE,
-            "reason": terminal[1] if terminal is not None else None,
-            "authoritative": False,
-        })
+        recorder.append_event(
+            {
+                "phase": "structure_scene",
+                "status": "REJECTED",
+                "mode": STRUCTURE_ONLY_MODE,
+                "reason": terminal[1] if terminal is not None else None,
+                "authoritative": False,
+            }
+        )
 
     # Phase 4: IMMUTABILITY of the original inputs after validation. No gate
     # or session may proceed on bytes that changed while they were validated.
-    digest_after_validation, rehash_error = _rehash_original_inputs(
-        original_paths
-    )
+    digest_after_validation, rehash_error = _rehash_original_inputs(original_paths)
     immutable_after_validation = (
         rehash_error is None and digest_after_validation == digest_before
     )
     checks["inputs_immutable_after_validation"] = immutable_after_validation
-    recorder.append_event({
-        "phase": "immutability",
-        "stage": "after_validation",
-        "mode": STRUCTURE_ONLY_MODE,
-        "status": "OK" if immutable_after_validation else "FAILED",
-        "sha256_before": digest_before,
-        "sha256_after": digest_after_validation,
-        "reason": rehash_error,
-    })
+    recorder.append_event(
+        {
+            "phase": "immutability",
+            "stage": "after_validation",
+            "mode": STRUCTURE_ONLY_MODE,
+            "status": "OK" if immutable_after_validation else "FAILED",
+            "sha256_before": digest_before,
+            "sha256_after": digest_after_validation,
+            "reason": rehash_error,
+        }
+    )
     if terminal is None and not immutable_after_validation:
         terminal = (
             RunStatus.INPUT_MUTATED,
@@ -2628,19 +2634,23 @@ def _run_robot_operation_plan_primary(
                 "created and no motion was sent",
             )
         tcp_record["gate"] = gate_status
-        recorder.append_event({
-            "phase": "tcp_gate",
-            "status": gate_status,
-            "mode": STRUCTURE_ONLY_MODE,
-            "tcp": tcp_record,
-        })
+        recorder.append_event(
+            {
+                "phase": "tcp_gate",
+                "status": gate_status,
+                "mode": STRUCTURE_ONLY_MODE,
+                "tcp": tcp_record,
+            }
+        )
     else:
-        recorder.append_event({
-            "phase": "tcp_gate",
-            "status": "NOT_EVALUATED",
-            "mode": STRUCTURE_ONLY_MODE,
-            "reason": terminal[1],
-        })
+        recorder.append_event(
+            {
+                "phase": "tcp_gate",
+                "status": "NOT_EVALUATED",
+                "mode": STRUCTURE_ONLY_MODE,
+                "reason": terminal[1],
+            }
+        )
 
     # Phase 6: execute the validated no-STAP path for skills with real
     # backends (WAIT, TRANSIT, PICK, PLACE_DOWN).
@@ -2655,21 +2665,24 @@ def _run_robot_operation_plan_primary(
         )
     elif terminal is None:
         terminal = (
-            RunStatus.EXECUTION_NOT_IMPLEMENTED,
-            f"{NO_STAP_AUTHORIZATION}: the plan contains a skill without a "
-            "real direct-execution backend",
+            (
+                RunStatus.PREFLIGHT_ONLY,
+                "preflight-only run: all gates evaluated and no "
+                "capability is unresolved; dispatch not requested",
+            )
+            if args.preflight_only
+            else (
+                RunStatus.EXECUTION_NOT_IMPLEMENTED,
+                f"{NO_STAP_AUTHORIZATION}: the plan contains a skill without a "
+                "real direct-execution backend",
+            )
         )
 
     # Phase 7: IMMUTABILITY after all phases and the terminal documents.
     digest_after_all, final_error = _rehash_original_inputs(original_paths)
-    immutable_after_all = (
-        final_error is None and digest_after_all == digest_before
-    )
+    immutable_after_all = final_error is None and digest_after_all == digest_before
     checks["inputs_immutable_after_all_phases"] = immutable_after_all
-    if (
-        not immutable_after_all
-        and terminal[0] is RunStatus.EXECUTION_NOT_IMPLEMENTED
-    ):
+    if not immutable_after_all and terminal[0] is RunStatus.EXECUTION_NOT_IMPLEMENTED:
         terminal = (
             RunStatus.INPUT_MUTATED,
             "the original inputs of the structure-only preflight are not "
@@ -2679,8 +2692,7 @@ def _run_robot_operation_plan_primary(
     start_record = input_records.get("structure_start")
     start_provided = start_path is not None
     start_empty = not start_provided or (
-        isinstance(start_record, dict)
-        and start_record.get("start_empty") is True
+        isinstance(start_record, dict) and start_record.get("start_empty") is True
     )
     record["inputs"] = {
         "records": input_records,
@@ -2717,23 +2729,27 @@ def _run_robot_operation_plan_primary(
             "status": str(status),
             "reason": reason,
         }
-        checks.update({
-            "structure_only": False,
-            "stap_source_plan_provided": False,
-            "stap_authorization": False,
-            "runtime_created": run_document.get("readiness") is not None,
-            "motion_sent": motion_sent,
-            "no_motion_dispatched": not motion_sent,
-        })
-        recorder.append_event({
-            "phase": "dispatch",
-            "status": str(status),
-            "mode": "robot_operation_plan_primary",
-            "dispatch_requested": True,
-            "runtime_created": run_document.get("readiness") is not None,
-            "motion_sent": motion_sent,
-            "reason": reason,
-        })
+        checks.update(
+            {
+                "structure_only": False,
+                "stap_source_plan_provided": False,
+                "stap_authorization": False,
+                "runtime_created": run_document.get("readiness") is not None,
+                "motion_sent": motion_sent,
+                "no_motion_dispatched": not motion_sent,
+            }
+        )
+        recorder.append_event(
+            {
+                "phase": "dispatch",
+                "status": str(status),
+                "mode": "robot_operation_plan_primary",
+                "dispatch_requested": True,
+                "runtime_created": run_document.get("readiness") is not None,
+                "motion_sent": motion_sent,
+                "reason": reason,
+            }
+        )
         record["status"] = str(status)
         record["passed"] = status is RunStatus.EXECUTED
         record["reason"] = reason
@@ -2770,14 +2786,16 @@ def _run_robot_operation_plan_primary(
             **asdict(result),
         }
         recorder.write_json("result.json", result_document)
-        recorder.append_event({
-            "phase": "result",
-            "status": str(status),
-            "mode": "robot_operation_plan_primary",
-            "passed": result.passed,
-            "reason": reason,
-            "exit_code": EXIT_CODES[status],
-        })
+        recorder.append_event(
+            {
+                "phase": "result",
+                "status": str(status),
+                "mode": "robot_operation_plan_primary",
+                "passed": result.passed,
+                "reason": reason,
+                "exit_code": EXIT_CODES[status],
+            }
+        )
         return RunOutcome(
             status=status,
             reason=reason,
@@ -2795,57 +2813,63 @@ def _run_robot_operation_plan_primary(
         "status": str(status),
         "reason": reason,
     }
-    checks.update({
-        "structure_only": True,
-        "stap_source_plan_provided": False,
-        "stap_authorization": False,
-        "runtime_created": False,
-        "motion_sent": False,
-        "no_motion_dispatched": True,
-    })
-    recorder.append_event({
-        "phase": "dispatch_blocked",
-        "status": str(status),
-        "mode": STRUCTURE_ONLY_MODE,
-        "dispatch_requested": False,
-        "runtime_created": False,
-        "stap_authorization": None,
-        "reason": reason,
-    })
-    run_document = _json_value({
-        "schema": RUN_SCHEMA,
-        "mode": STRUCTURE_ONLY_MODE,
-        "status": str(status),
-        "reason": reason,
-        "passed": False,
-        "runtime_created": False,
-        "scheduler_ran": False,
-        "scheduler_passed": False,
-        "motion_sent": False,
-        "assembly_passed": False,
-        "operations": {},
-        "layers": [],
-        "evidence": [],
-        "resources": [],
-        "cancellations": [],
-        "unsafe_terminals": [],
-        "readiness": None,
-        "cleanup": None,
-        "cleanup_passed": False,
-        "retreat_clear": False,
-        "stap_authorization": None,
-        "stap_assembly_effects": None,
-        "structure": record["structure"],
-        "robot_operation_plan": plan_record,
-        "tcp": tcp_record,
-        "inputs": {
-            "sha256_before_validation": digest_before,
-            "sha256_after_validation": digest_after_validation,
-            "immutable_after_validation": immutable_after_validation,
-            "sha256_after_all_phases": digest_after_all,
-            "immutable_after_all_phases": immutable_after_all,
-        },
-    })
+    checks.update(
+        {
+            "structure_only": True,
+            "stap_source_plan_provided": False,
+            "stap_authorization": False,
+            "runtime_created": False,
+            "motion_sent": False,
+            "no_motion_dispatched": True,
+        }
+    )
+    recorder.append_event(
+        {
+            "phase": "dispatch_blocked",
+            "status": str(status),
+            "mode": STRUCTURE_ONLY_MODE,
+            "dispatch_requested": False,
+            "runtime_created": False,
+            "stap_authorization": None,
+            "reason": reason,
+        }
+    )
+    run_document = _json_value(
+        {
+            "schema": RUN_SCHEMA,
+            "mode": STRUCTURE_ONLY_MODE,
+            "status": str(status),
+            "reason": reason,
+            "passed": False,
+            "runtime_created": False,
+            "scheduler_ran": False,
+            "scheduler_passed": False,
+            "motion_sent": False,
+            "assembly_passed": False,
+            "operations": {},
+            "layers": [],
+            "evidence": [],
+            "resources": [],
+            "cancellations": [],
+            "unsafe_terminals": [],
+            "readiness": None,
+            "cleanup": None,
+            "cleanup_passed": False,
+            "retreat_clear": False,
+            "stap_authorization": None,
+            "stap_assembly_effects": None,
+            "structure": record["structure"],
+            "robot_operation_plan": plan_record,
+            "tcp": tcp_record,
+            "inputs": {
+                "sha256_before_validation": digest_before,
+                "sha256_after_validation": digest_after_validation,
+                "immutable_after_validation": immutable_after_validation,
+                "sha256_after_all_phases": digest_after_all,
+                "immutable_after_all_phases": immutable_after_all,
+            },
+        }
+    )
     record["robot_operation_plan_run"] = run_document
     recorder.write_json(PLAN_RUN_NAME, run_document)
     record["status"] = str(status)
@@ -2855,8 +2879,7 @@ def _run_robot_operation_plan_primary(
     record["evidence_dir"] = str(recorder.directory)
     recorder.write_json("preflight.json", record)
     result = FinalResult(
-        input_valid=status
-        not in (RunStatus.INVALID_INPUT, RunStatus.INPUT_MUTATED),
+        input_valid=status not in (RunStatus.INVALID_INPUT, RunStatus.INPUT_MUTATED),
         tasks_complete=False,
         structure_valid=checks.get("structure_scene_validated") is True,
         execution_safe=False,
@@ -2884,14 +2907,16 @@ def _run_robot_operation_plan_primary(
         **asdict(result),
     }
     recorder.write_json("result.json", result_document)
-    recorder.append_event({
-        "phase": "result",
-        "status": str(status),
-        "mode": STRUCTURE_ONLY_MODE,
-        "passed": result.passed,
-        "reason": reason,
-        "exit_code": EXIT_CODES[status],
-    })
+    recorder.append_event(
+        {
+            "phase": "result",
+            "status": str(status),
+            "mode": STRUCTURE_ONLY_MODE,
+            "passed": result.passed,
+            "reason": reason,
+            "exit_code": EXIT_CODES[status],
+        }
+    )
     return RunOutcome(
         status=status,
         reason=reason,
@@ -2926,9 +2951,7 @@ def _materialize_direct_defaults(args: _Arguments, run_dir: Path) -> _Arguments:
         scene_snapshot_out=(
             args.scene_snapshot_out or run_dir / "scene-snapshot.json"
         ).resolve(),
-        host_instance_id=(
-            args.host_instance_id or f"piper-run-{run_dir.name}"
-        ),
+        host_instance_id=(args.host_instance_id or f"piper-run-{run_dir.name}"),
         config_path=(
             args.config_path or REPO_ROOT / "config/user_config.json"
         ).resolve(),
@@ -3022,17 +3045,19 @@ def _run(args: _Arguments) -> RunOutcome:
             recorder.capture_input("plan.json", inputs.plan_path)
             recorder.capture_input("structure_start.json", inputs.start_path)
             recorder.capture_input("structure_goal.json", inputs.goal_path)
-            recorder.append_event({
-                "phase": "immutable_input",
-                "status": "OK",
-                "sha256": dict(inputs.sha256),
-                "bytes": dict(inputs.sizes),
-                "note": (
-                    "plan and task structure bytes read exactly once and "
-                    "hashed before any parsing; the input paths are never "
-                    "written"
-                ),
-            })
+            recorder.append_event(
+                {
+                    "phase": "immutable_input",
+                    "status": "OK",
+                    "sha256": dict(inputs.sha256),
+                    "bytes": dict(inputs.sizes),
+                    "note": (
+                        "plan and task structure bytes read exactly once and "
+                        "hashed before any parsing; the input paths are never "
+                        "written"
+                    ),
+                }
+            )
             try:
                 payload = json.loads(inputs.plan_bytes.decode("utf-8"))
             except (UnicodeDecodeError, ValueError) as error:
@@ -3051,17 +3076,19 @@ def _run(args: _Arguments) -> RunOutcome:
                 else:
                     record["plan_id"] = plan.plan_id
                     record["checks"]["stap_validated_authoritatively"] = True
-                    recorder.append_event({
-                        "phase": "stap_validated",
-                        "status": "OK",
-                        "schema": STAP_PLAN_SCHEMA,
-                        "plan_id": plan.plan_id,
-                        "parser": (
-                            "rocobrick.stap_contract.parse_stap_plan "
-                            "(the metric plan contract is never imported)"
-                        ),
-                        "robots": list(plan.robots),
-                    })
+                    recorder.append_event(
+                        {
+                            "phase": "stap_validated",
+                            "status": "OK",
+                            "schema": STAP_PLAN_SCHEMA,
+                            "plan_id": plan.plan_id,
+                            "parser": (
+                                "rocobrick.stap_contract.parse_stap_plan "
+                                "(the metric plan contract is never imported)"
+                            ),
+                            "robots": list(plan.robots),
+                        }
+                    )
         # Phase 2: STRUCTURAL_BINDING.
         if terminal is None:
             decision = bind_single_stap_task(
@@ -3082,26 +3109,26 @@ def _run(args: _Arguments) -> RunOutcome:
                 record["task_id"] = binding.task_id
                 record["motion_geometry"] = binding.motion_geometry
                 record["checks"]["binding_accepted"] = True
-            recorder.append_event({
-                "phase": "structural_binding",
-                "status": "ACCEPTED" if decision.accepted else "REJECTED",
-                "reason": decision.reason,
-                "robot_id": args.robot_id,
-                "motion_geometry": (
-                    binding.motion_geometry if binding is not None else None
-                ),
-                "binding": asdict(binding) if binding is not None else None,
-                "details": dict(decision.details),
-            })
+            recorder.append_event(
+                {
+                    "phase": "structural_binding",
+                    "status": "ACCEPTED" if decision.accepted else "REJECTED",
+                    "reason": decision.reason,
+                    "robot_id": args.robot_id,
+                    "motion_geometry": (
+                        binding.motion_geometry if binding is not None else None
+                    ),
+                    "binding": asdict(binding) if binding is not None else None,
+                    "details": dict(decision.details),
+                }
+            )
             if not decision.accepted:
                 terminal = (
                     RunStatus.BINDING_REJECTED,
                     f"structural binding rejected: {decision.reason}",
                 )
         # Phase 3: TCP_GATE.
-        requires_tcp = (
-            binding_requires_tcp(binding) if binding is not None else None
-        )
+        requires_tcp = binding_requires_tcp(binding) if binding is not None else None
         tcp_record: dict[str, object] = {"binding_requires_tcp": requires_tcp}
         record["tcp"] = tcp_record
         if terminal is None:
@@ -3124,11 +3151,13 @@ def _run(args: _Arguments) -> RunOutcome:
                 tcp_record["gate"] = gate_status
             else:
                 tcp_record["gate"] = "not_required"
-            recorder.append_event({
-                "phase": "tcp_gate",
-                "status": str(terminal[0]) if terminal is not None else "PASSED",
-                "tcp": tcp_record,
-            })
+            recorder.append_event(
+                {
+                    "phase": "tcp_gate",
+                    "status": str(terminal[0]) if terminal is not None else "PASSED",
+                    "tcp": tcp_record,
+                }
+            )
         # Phase 4: CAPABILITY / DISPATCH decision. ``--robot-operation-plan``
         # is the only production dispatch entry; without it nothing is ever
         # sent to any runtime. The plan path captures and validates the
@@ -3150,13 +3179,13 @@ def _run(args: _Arguments) -> RunOutcome:
                         "real multi-robot session"
                     ),
                 }
-                recorder.append_event({
-                    "phase": "dispatch",
-                    "status": "RUNTIME_DISPATCH",
-                    "robot_operation_plan": str(
-                        args.robot_operation_plan_path
-                    ),
-                })
+                recorder.append_event(
+                    {
+                        "phase": "dispatch",
+                        "status": "RUNTIME_DISPATCH",
+                        "robot_operation_plan": str(args.robot_operation_plan_path),
+                    }
+                )
                 terminal = _robot_operation_plan_phase(
                     args, record, recorder, contract, plan
                 )
@@ -3194,12 +3223,14 @@ def _run(args: _Arguments) -> RunOutcome:
                     "status": str(terminal[0]),
                     "reason": terminal[1],
                 }
-                recorder.append_event({
-                    "phase": "dispatch_blocked",
-                    "status": str(terminal[0]),
-                    "dispatch_requested": not args.preflight_only,
-                    "reason": terminal[1],
-                })
+                recorder.append_event(
+                    {
+                        "phase": "dispatch_blocked",
+                        "status": str(terminal[0]),
+                        "dispatch_requested": not args.preflight_only,
+                        "reason": terminal[1],
+                    }
+                )
     except Exception as error:
         _diagnostic(format_exc())
         terminal = (
@@ -3223,9 +3254,7 @@ def _run(args: _Arguments) -> RunOutcome:
             and isinstance(plan_record.get("sha256"), str)
             and isinstance(plan_record.get("path"), str)
         ):
-            originals["robot_operation_plan"] = Path(
-                str(plan_record["path"])
-            )
+            originals["robot_operation_plan"] = Path(str(plan_record["path"]))
             expected["robot_operation_plan"] = str(plan_record["sha256"])
             sizes["robot_operation_plan"] = plan_record.get("bytes")
         after: dict[str, str] = {}
@@ -3263,17 +3292,10 @@ def _run(args: _Arguments) -> RunOutcome:
             run_document["passed"] = bool(
                 run_document.get("scheduler_ran") is True
                 and run_document.get("scheduler_passed") is True
-                and record["checks"].get(
-                    "robot_operation_plan_readiness_passed"
-                )
+                and record["checks"].get("robot_operation_plan_readiness_passed")
                 is True
-                and record["checks"].get(
-                    "robot_operation_plan_cleanup_passed"
-                )
-                is True
-                and record["checks"].get(
-                    "robot_operation_plan_pending_tasks_confirmed"
-                )
+                and record["checks"].get("robot_operation_plan_cleanup_passed") is True
+                and record["checks"].get("robot_operation_plan_pending_tasks_confirmed")
                 is True
                 and immutable
             )
@@ -3289,16 +3311,13 @@ def _run(args: _Arguments) -> RunOutcome:
     record["checks"]["robot_operation_plan_dispatched"] = (
         args.robot_operation_plan_path is not None
     )
-    record["checks"]["runtime_dispatched"] = (
-        isinstance(record.get("runtime"), Mapping)
-    )
+    record["checks"]["runtime_dispatched"] = isinstance(record.get("runtime"), Mapping)
     record["checks"]["no_motion_dispatched"] = not motion_sent
     record["checks"]["inputs_immutable_after_runtime"] = record["checks"].get(
         "inputs_immutable_after_all_phases", False
     )
     robot_plan_passed = bool(
-        isinstance(run_document, Mapping)
-        and run_document.get("passed") is True
+        isinstance(run_document, Mapping) and run_document.get("passed") is True
     )
     record["status"] = str(status)
     record["passed"] = status is RunStatus.PREFLIGHT_ONLY or (
@@ -3317,8 +3336,7 @@ def _run(args: _Arguments) -> RunOutcome:
             recorder.write_json(PLAN_RUN_NAME, run_document)
     recorder.write_json("preflight.json", record)
     result = FinalResult(
-        input_valid=status
-        not in (RunStatus.INVALID_INPUT, RunStatus.INPUT_MUTATED),
+        input_valid=status not in (RunStatus.INVALID_INPUT, RunStatus.INPUT_MUTATED),
         tasks_complete=binding is not None,
         structure_valid=binding is not None,
         execution_safe=record["passed"],
@@ -3343,21 +3361,21 @@ def _run(args: _Arguments) -> RunOutcome:
         # cleanup and the immutable input digests) and the runtime lifecycle
         # from the run result document; the full documents live in the run
         # directory.
-        result_document["robot_operation_plan"] = record.get(
-            "robot_operation_plan"
-        )
+        result_document["robot_operation_plan"] = record.get("robot_operation_plan")
         result_document["robot_operation_plan_run"] = record.get(
             "robot_operation_plan_run"
         )
         result_document["runtime_session"] = record.get("runtime")
     recorder.write_json("result.json", result_document)
-    recorder.append_event({
-        "phase": "result",
-        "status": str(status),
-        "passed": result.passed,
-        "reason": reason,
-        "exit_code": record["exit_code"],
-    })
+    recorder.append_event(
+        {
+            "phase": "result",
+            "status": str(status),
+            "passed": result.passed,
+            "reason": reason,
+            "exit_code": record["exit_code"],
+        }
+    )
     return RunOutcome(
         status=status,
         reason=reason,
@@ -3415,8 +3433,10 @@ def _parse_arguments(argv: list[str] | None) -> _Arguments:
     """
     namespace = build_parser().parse_args(argv)
     direct = namespace.robot_operation_plan is not None
-    if direct and namespace.preflight_only and (
-        namespace.task is not None or namespace.plan is not None
+    if (
+        direct
+        and namespace.preflight_only
+        and (namespace.task is not None or namespace.plan is not None)
     ):
         raise _UsageError(
             "--robot-operation-plan cannot be combined with --preflight-only"
@@ -3570,23 +3590,25 @@ def main(argv: list[str] | None = None) -> int:
                 result_path=None,
             )
     print(
-        json.dumps({
-            "schema": RESULT_SCHEMA,
-            "status": str(outcome.status),
-            "passed": (
-                outcome.status is RunStatus.PREFLIGHT_ONLY
-                if outcome.passed is None
-                else outcome.passed
-            ),
-            "run_dir": (
-                str(outcome.run_dir) if outcome.run_dir is not None else None
-            ),
-            "result_path": (
-                str(outcome.result_path)
-                if outcome.result_path is not None
-                else None
-            ),
-        })
+        json.dumps(
+            {
+                "schema": RESULT_SCHEMA,
+                "status": str(outcome.status),
+                "passed": (
+                    outcome.status is RunStatus.PREFLIGHT_ONLY
+                    if outcome.passed is None
+                    else outcome.passed
+                ),
+                "run_dir": (
+                    str(outcome.run_dir) if outcome.run_dir is not None else None
+                ),
+                "result_path": (
+                    str(outcome.result_path)
+                    if outcome.result_path is not None
+                    else None
+                ),
+            }
+        )
     )
     return outcome.exit_code
 

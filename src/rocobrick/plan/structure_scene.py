@@ -143,9 +143,7 @@ def _read(path: Path) -> tuple[bytes, Mapping[str, object]]:
         raw = path.read_bytes()
         value = json.loads(raw)
     except (OSError, json.JSONDecodeError) as exc:
-        raise StructureSceneError(
-            f"cannot read structure file {path}: {exc}"
-        ) from exc
+        raise StructureSceneError(f"cannot read structure file {path}: {exc}") from exc
     if not isinstance(value, Mapping):
         raise StructureSceneError(f"structure file {path} must contain an object")
     return raw, value
@@ -237,9 +235,7 @@ def build_structure_scene_plan(
             start_bytes, start_doc = _read(start_path)
         else:
             start_bytes, start_doc = raw_start, {}
-    goal_rows = {
-        str(key): _record(value, str(key)) for key, value in goal_doc.items()
-    }
+    goal_rows = {str(key): _record(value, str(key)) for key, value in goal_doc.items()}
     start_rows = {
         str(key): _record(value, str(key)) for key, value in start_doc.items()
     }
@@ -325,8 +321,7 @@ def build_structure_scene_plan(
                 if isinstance(operation, Mapping)
                 and operation.get("skill") == "PLACE_DOWN"
                 and isinstance(operation.get("target"), Mapping)
-                and operation["target"].get("upper_physical_instance_id")
-                == instance_id
+                and operation["target"].get("upper_physical_instance_id") == instance_id
             ),
             f"assemble-{instance_id.removeprefix('brick-')}",
         )
@@ -391,6 +386,7 @@ class _PlanFacts:
     referenced: frozenset[str]
     placed: Mapping[str, str]
     placement_operation: Mapping[str, str]
+    placement_skill: Mapping[str, str]
     connections: Mapping[str, str]
 
 
@@ -430,9 +426,7 @@ def _decode_object(raw: bytes, path: Path, label: str) -> Mapping[str, object]:
     try:
         document = json.loads(raw)
     except (UnicodeDecodeError, ValueError) as exc:
-        raise StructureSceneError(
-            f"{label} {path} is not valid JSON: {exc}"
-        ) from exc
+        raise StructureSceneError(f"{label} {path} is not valid JSON: {exc}") from exc
     if not isinstance(document, Mapping):
         raise StructureSceneError(f"{label} {path} must contain a JSON object")
     return document
@@ -551,8 +545,7 @@ def _read_manifest(path: Path) -> tuple[bytes, dict[str, int]]:
             )
         if instance_id in brick_ids:
             raise StructureSceneError(
-                f"scene manifest {path} repeats physical_instance_id "
-                f"{instance_id!r}"
+                f"scene manifest {path} repeats physical_instance_id {instance_id!r}"
             )
         brick_id = item.get("brick_id")
         if type(brick_id) is not int or brick_id < 0:
@@ -564,9 +557,7 @@ def _read_manifest(path: Path) -> tuple[bytes, dict[str, int]]:
     return raw, brick_ids
 
 
-def _target_values(
-    operation_id: str, plan: RobotOperationPlan
-) -> Mapping[str, object]:
+def _target_values(operation_id: str, plan: RobotOperationPlan) -> Mapping[str, object]:
     """Return the validated target values of one non-``WAIT`` operation.
 
     Args:
@@ -621,16 +612,17 @@ def _plan_facts(plan: RobotOperationPlan) -> _PlanFacts:
     referenced: set[str] = set()
     placed: dict[str, str] = {}
     placement_operation: dict[str, str] = {}
+    placement_skill: dict[str, str] = {}
     connections: dict[str, str] = {}
     for operation_id, operation in plan.operations.items():
         path = f"operation {operation_id!r}"
-        if operation.skill == "PLACE_DOWN":
+        if operation.skill in {"PLACE_DOWN", "PLACE_UP"}:
             values = _target_values(operation_id, plan)
             upper = _target_text(values, "upper_physical_instance_id", path)
             lower = _target_text(values, "lower_physical_instance_id", path)
             if upper == lower:
                 raise StructureSceneError(
-                    f"{path} PLACE_DOWN places {upper!r} onto itself"
+                    f"{path} {operation.skill} names the same part twice"
                 )
             if upper in placed:
                 raise StructureSceneError(
@@ -639,6 +631,7 @@ def _plan_facts(plan: RobotOperationPlan) -> _PlanFacts:
                 )
             placed[upper] = lower
             placement_operation[upper] = operation_id
+            placement_skill[upper] = operation.skill
             connections[upper] = _target_text(values, "connection_id", path)
             referenced.update((upper, lower))
         elif operation.skill == "PICK":
@@ -681,6 +674,7 @@ def _plan_facts(plan: RobotOperationPlan) -> _PlanFacts:
         frozenset(referenced),
         dict(placed),
         dict(placement_operation),
+        dict(placement_skill),
         dict(connections),
     )
 
@@ -716,9 +710,7 @@ def _forced_role_binding(
         return None
     supports = sorted(facts.referenced - set(facts.placed))
     initial_rows = sorted(start_key_by_goal_key)
-    moving_rows = sorted(
-        key for key in goal_rows if key not in start_key_by_goal_key
-    )
+    moving_rows = sorted(key for key in goal_rows if key not in start_key_by_goal_key)
     if len(initial_rows) != len(supports) or len(initial_rows) > 1:
         return None
     if len(moving_rows) != len(facts.placed) or len(moving_rows) > 1:
@@ -760,9 +752,7 @@ def _bind_goal_rows(
         )
     if facts.referenced <= digest_ids:
         return dict(derived), "content-digest"
-    forced = _forced_role_binding(
-        goal_rows, start_key_by_goal_key, facts, digest_ids
-    )
+    forced = _forced_role_binding(goal_rows, start_key_by_goal_key, facts, digest_ids)
     if forced is not None:
         return forced, "singleton"
     unproven_rows = [key for key in goal_rows if derived[key] not in facts.referenced]
@@ -853,18 +843,20 @@ def _validate_placements(
             a goal part is never placed, a lower part is not the goal part
             directly beneath its upper, or that lower is not placed first.
     """
-    placed_ids = set(facts.placed)
-    both = sorted(placed_ids & initial_ids)
+    placed_parts = {
+        upper if facts.placement_skill[upper] == "PLACE_DOWN" else facts.placed[upper]
+        for upper in facts.placed
+    }
+    both = sorted(placed_parts & initial_ids)
     if both:
         raise StructureSceneError(
             f"parts are both initially assembled and placed: {both}"
         )
     # A robot-operation-plan may intentionally be a skill-level prefix such
-    # as TRANSIT -> PICK, with PLACE_DOWN deferred to a later run.  In that
-    # case every non-initial goal part is loaded as a loose runtime object;
-    # require complete placement only once the plan actually contains a
-    # PLACE_DOWN operation.
-    unplaced = sorted(set(row_by_instance) - initial_ids - placed_ids)
+    # as TRANSIT -> PICK, with placement deferred to a later run. Once a
+    # PLACE_DOWN or PLACE_UP operation is present, every non-initial goal part
+    # must be accounted for by one placement operation.
+    unplaced = sorted(set(row_by_instance) - initial_ids - placed_parts)
     if unplaced and not allow_partial:
         raise StructureSceneError(
             f"goal parts are not placed by any PLACE_DOWN operation: {unplaced}"
@@ -873,20 +865,32 @@ def _validate_placements(
         lower = facts.placed[upper]
         upper_row = row_by_instance[upper]
         lower_row = row_by_instance[lower]
-        beneath = (upper_row[1], upper_row[2], upper_row[3] - 1)
-        if (lower_row[1], lower_row[2], lower_row[3]) != beneath:
-            hint = (
-                "; a part at z=0 has no goal part beneath it and cannot be "
-                "grounded by robot-operation-plan/v1"
-                if upper_row[3] == 0
-                else ""
-            )
-            raise StructureSceneError(
-                f"PLACE_DOWN for {upper!r} names support {lower!r} at "
-                f"(x={lower_row[1]}, y={lower_row[2]}, z={lower_row[3]}), not "
-                f"the goal part directly beneath {upper!r} at "
-                f"(x={upper_row[1]}, y={upper_row[2]}, z={upper_row[3]}){hint}"
-            )
+        operation_id = facts.placement_operation[upper]
+        skill = facts.placement_skill[upper]
+        # PLACE_DOWN keeps the historical exact x/y support relation. PLACE_UP
+        # represents task C: the moving lower is one layer below the fixed upper;
+        # exact x/y/interface offset is established by the runtime connection.
+        if skill == "PLACE_UP":
+            if lower_row[3] != upper_row[3] - 1:
+                raise StructureSceneError(
+                    f"PLACE_UP for {upper!r} requires moving lower {lower!r} "
+                    "to be one layer below the supported upper"
+                )
+        else:
+            beneath = (upper_row[1], upper_row[2], upper_row[3] - 1)
+            if (lower_row[1], lower_row[2], lower_row[3]) != beneath:
+                hint = (
+                    "; a part at z=0 has no goal part beneath it and cannot be "
+                    "grounded by robot-operation-plan/v1"
+                    if upper_row[3] == 0
+                    else ""
+                )
+                raise StructureSceneError(
+                    f"PLACE_DOWN for {upper!r} names support {lower!r} at "
+                    f"(x={lower_row[1]}, y={lower_row[2]}, z={lower_row[3]}), not "
+                    f"the goal part directly beneath {upper!r} at "
+                    f"(x={upper_row[1]}, y={upper_row[2]}, z={upper_row[3]}){hint}"
+                )
         if lower not in facts.placed:
             continue
         before = facts.placement_operation[lower]
@@ -965,9 +969,7 @@ def build_structure_scene_plan_from_files(
             goal/start relation is inconsistent, or the manifest disagrees.
     """
     if not isinstance(plan, Mapping):
-        raise StructureSceneError(
-            "plan must be a robot-operation-plan/v1 object"
-        )
+        raise StructureSceneError("plan must be a robot-operation-plan/v1 object")
 
     goal_bytes = _read_bytes(goal, "goal structure")
     goal_document = _decode_object(goal_bytes, goal, "goal")
@@ -998,26 +1000,29 @@ def build_structure_scene_plan_from_files(
     try:
         operation_plan = parse_robot_operation_plan(plan)
     except RobotOperationPlanError as exc:
-        raise StructureSceneError(
-            f"robot operation plan is invalid: {exc}"
-        ) from exc
+        raise StructureSceneError(f"robot operation plan is invalid: {exc}") from exc
 
     facts = _plan_facts(operation_plan)
     start_key_by_goal_key = _start_key_by_goal_key(goal_rows, start_rows)
-    key_to_id, binding_mode = _bind_goal_rows(
-        goal_rows, start_key_by_goal_key, facts
-    )
+    key_to_id, binding_mode = _bind_goal_rows(goal_rows, start_key_by_goal_key, facts)
     row_by_instance = {key_to_id[key]: goal_rows[key] for key in sorted(goal_rows)}
-    initial_ids = frozenset(
-        key_to_id[goal_key] for goal_key in start_key_by_goal_key
-    )
+    initial_ids = frozenset(key_to_id[goal_key] for goal_key in start_key_by_goal_key)
     layers, slots = _operation_positions(operation_plan)
-    allow_partial = any(
-        operation.skill in {"TRANSIT", "PICK"}
-        for operation in operation_plan.operations.values()
-    ) and not facts.placed
+    # Once a placement operation is present, require complete placement. A
+    # TRANSIT/PICK-only prefix remains valid for scene preparation.
+    allow_partial = (
+        any(
+            operation.skill in {"TRANSIT", "PICK"}
+            for operation in operation_plan.operations.values()
+        )
+        and not facts.placed
+    )
     _validate_placements(
-        facts, row_by_instance, initial_ids, layers, slots,
+        facts,
+        row_by_instance,
+        initial_ids,
+        layers,
+        slots,
         allow_partial=allow_partial,
     )
     if manifest is not None:
@@ -1042,6 +1047,8 @@ def build_structure_scene_plan_from_files(
     tasks: dict[str, StructuralTask] = {}
     for upper in sorted(facts.placed):
         operation = operation_plan.operations[facts.placement_operation[upper]]
+        skill = facts.placement_skill[upper]
+        moving_part = upper if skill == "PLACE_DOWN" else facts.placed[upper]
         supporting = tuple(
             robot
             for robot in operation.participants
@@ -1050,23 +1057,22 @@ def build_structure_scene_plan_from_files(
         if len(supporting) > 1:
             raise StructureSceneError(
                 f"operation {operation.operation_id!r} names more than one "
-                f"supporting robot {list(supporting)}; a PLACE_DOWN task "
-                "carries at most one"
+                f"supporting robot; one support robot is allowed"
             )
         if operation.source_task_id in tasks:
             raise StructureSceneError(
-                f"source task {operation.source_task_id!r} places more than "
-                "one part"
+                f"source task {operation.source_task_id!r} places more than one part"
             )
         lower = facts.placed[upper]
+        support_fact = lower if skill == "PLACE_DOWN" else upper
         tasks[operation.source_task_id] = StructuralTask(
             operation.source_task_id,
-            upper,
-            SkillType.PLACE_DOWN,
+            moving_part,
+            SkillType(skill),
             operation.executor_robot_id,
             supporting[0] if supporting else None,
             frozenset(),
-            frozenset({lower}) if lower in initial_ids else frozenset(),
+            frozenset({support_fact}) if support_fact in initial_ids else frozenset(),
             0,
             0,
         )
@@ -1079,14 +1085,19 @@ def build_structure_scene_plan_from_files(
     placements: list[dict[str, object]] = []
     for upper in sorted(facts.placed):
         operation = operation_plan.operations[facts.placement_operation[upper]]
-        placements.append({
-            "operation_id": operation.operation_id,
-            "source_task_id": operation.source_task_id,
-            "executor_robot_id": operation.executor_robot_id,
-            "upper_physical_instance_id": upper,
-            "lower_physical_instance_id": facts.placed[upper],
-            "connection_id": facts.connections[upper],
-        })
+        placements.append(
+            {
+                "operation_id": operation.operation_id,
+                "source_task_id": operation.source_task_id,
+                "executor_robot_id": operation.executor_robot_id,
+                "upper_physical_instance_id": upper,
+                "lower_physical_instance_id": facts.placed[upper],
+                "connection_id": facts.connections[upper],
+            }
+        )
+        if operation.skill == "PLACE_UP":
+            placements[-1]["skill"] = operation.skill
+            placements[-1]["moving_physical_instance_id"] = facts.placed[upper]
     metadata: dict[str, object] = {
         "plan_id": plan_id,
         "robots": list(operation_plan.robots),
@@ -1109,9 +1120,7 @@ def build_structure_scene_plan_from_files(
         ),
         "manifest_bytes": len(manifest_bytes),
         "manifest_entries": len(manifest_brick_ids),
-        "physical_instance_ids": {
-            key: key_to_id[key] for key in sorted(key_to_id)
-        },
+        "physical_instance_ids": {key: key_to_id[key] for key in sorted(key_to_id)},
         "initial_instance_ids": sorted(initial_ids),
         "placed_instance_ids": sorted(facts.placed),
         "placements": placements,
