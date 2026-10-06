@@ -36,8 +36,10 @@ from rocobrick.compat import StrEnum
 from rocobrick.coordinated_layer import coordinated_layer_group
 from rocobrick.robot_operation_plan import RobotOperation, RobotOperationPlan
 from rocobrick.unified_dual_arm_runtime import (
+    SharedSceneSnapshot,
     SuccessorPrePhaseEvidence,
     SuccessorPrePhaseRequest,
+    TerminalPrePhasePolicy,
 )
 
 JSONValue = None | bool | int | float | str | list["JSONValue"] | dict[str, "JSONValue"]
@@ -77,8 +79,7 @@ def is_json_safe(value: object) -> bool:
         return math.isfinite(value)
     if isinstance(value, Mapping):
         return all(
-            isinstance(key, str) and is_json_safe(item)
-            for key, item in value.items()
+            isinstance(key, str) and is_json_safe(item) for key, item in value.items()
         )
     if isinstance(value, (list, tuple)):
         return all(is_json_safe(item) for item in value)
@@ -396,18 +397,13 @@ def _evidence_present(evidence: Mapping[str, JSONValue], label: str) -> bool:
 
 def _is_confirmation(result: OperationResult) -> bool:
     return (
-        result.status is OperationStatus.CONFIRMED
-        and result.passed
-        and result.terminal
+        result.status is OperationStatus.CONFIRMED and result.passed and result.terminal
     )
 
 
 def _cancel_releases(cancel: CancelEvidence | None) -> bool:
     return (
-        cancel is not None
-        and cancel.acknowledged
-        and cancel.terminal
-        and cancel.safe
+        cancel is not None and cancel.acknowledged and cancel.terminal and cancel.safe
     )
 
 
@@ -424,9 +420,9 @@ def _requires_attention(result: OperationResult) -> bool:
 def _predecessors(plan: RobotOperationPlan) -> dict[str, tuple[str, ...]]:
     predecessors: dict[str, list[str]] = {}
     for dependency in plan.dependencies:
-        predecessors.setdefault(
-            dependency.successor_operation_id, []
-        ).append(dependency.predecessor_operation_id)
+        predecessors.setdefault(dependency.successor_operation_id, []).append(
+            dependency.predecessor_operation_id
+        )
     return {oid: tuple(preds) for oid, preds in predecessors.items()}
 
 
@@ -535,10 +531,7 @@ def _deadline_settlement(
             deadline_exceeded=True,
             late_terminal_confirmation=True,
         )
-    reason = (
-        "operation deadline exceeded; "
-        f"{settled.reason or settled.status.value}"
-    )
+    reason = f"operation deadline exceeded; {settled.reason or settled.status.value}"
     return dataclasses.replace(
         settled,
         detail=reason,
@@ -552,9 +545,7 @@ def _legacy_cancel(operation_id: str, value: object) -> CancelEvidence:
     acknowledged = False
     if isinstance(value, bool):
         acknowledged = value
-    elif isinstance(value, Mapping) and isinstance(
-        value.get("acknowledged"), bool
-    ):
+    elif isinstance(value, Mapping) and isinstance(value.get("acknowledged"), bool):
         acknowledged = bool(value["acknowledged"])
     elif isinstance(value, Mapping) and isinstance(value.get("passed"), bool):
         acknowledged = bool(value["passed"])
@@ -593,6 +584,79 @@ class _RunState:
     deadline_events: list[Mapping[str, JSONValue]] = field(default_factory=list)
     failed: bool = False
     failure_reasons: list[str] = field(default_factory=list)
+    pre_phases: dict[str, Mapping[str, JSONValue]] = field(default_factory=dict)
+    transitioning: set[str] = field(default_factory=set)
+
+    def reserve(
+        self, operation: RobotOperation, predecessor_ids: tuple[str, ...]
+    ) -> str | None:
+        """Reserve new resources without changing any predecessor owner.
+
+        Returns:
+            A conflict reason, or None when the reservation is complete.
+        """
+        conflicts = [
+            resource
+            for resource in operation.resources
+            if resource in self.held
+            and self.held[resource] not in (*predecessor_ids, operation.operation_id)
+        ]
+        if conflicts:
+            return f"held by other operations: {sorted(conflicts)}"
+        for resource in operation.resources:
+            if resource not in self.held:
+                self.held[resource] = operation.operation_id
+                self.resource_records[(operation.operation_id, resource)] = (
+                    ResourceEvidence(
+                        resource,
+                        operation.operation_id,
+                        operation.executor_robot_id,
+                        True,
+                        False,
+                        "reserved before successor pre-phase",
+                    )
+                )
+        return None
+
+    def adopt(
+        self, request: SuccessorPrePhaseRequest, successor: RobotOperation | None
+    ) -> None:
+        """Atomically transfer proven physical leases without an unowned interval."""
+        if any(
+            self.held.get(resource) != owner
+            for resource, owner in request.lease_owners.items()
+        ):
+            raise ExecutionContractError("predecessor lease changed during pre-phase")
+        for resource, owner in request.lease_owners.items():
+            record = self.resource_records[(owner, resource)]
+            self.resource_records[(owner, resource)] = dataclasses.replace(
+                record,
+                released=True,
+                reason=f"adopted by {request.transition_id}",
+            )
+            if successor is None:
+                del self.held[resource]
+            else:
+                self.held[resource] = successor.operation_id
+                self.resource_records[(successor.operation_id, resource)] = (
+                    ResourceEvidence(
+                        resource,
+                        successor.operation_id,
+                        successor.executor_robot_id,
+                        True,
+                        False,
+                        f"atomic adoption from {owner}",
+                    )
+                )
+        for owner in request.predecessor_operation_ids:
+            result = self.results[owner]
+            evidence = dict(result.evidence)
+            evidence["physical_departure_confirmed"] = request.transition_id
+            self.results[owner] = dataclasses.replace(
+                result,
+                resources_released=True,
+                evidence=evidence,
+            )
 
     def acquire(self, operation: RobotOperation) -> str | None:
         conflicts = sorted(
@@ -619,7 +683,8 @@ class _RunState:
             return reason
         for resource in operation.resources:
             self.held[resource] = operation.operation_id
-            self.resource_records[(operation.operation_id, resource)] = (
+            self.resource_records.setdefault(
+                (operation.operation_id, resource),
                 ResourceEvidence(
                     resource=resource,
                     operation_id=operation.operation_id,
@@ -627,14 +692,18 @@ class _RunState:
                     acquired=True,
                     released=False,
                     reason="acquired before dispatch",
-                )
+                ),
             )
         return None
 
     def release(self, operation: RobotOperation, reason: str) -> None:
-        for resource in operation.resources:
-            if self.held.get(resource) == operation.operation_id:
-                del self.held[resource]
+        resources = tuple(
+            resource
+            for resource, owner in self.held.items()
+            if owner == operation.operation_id
+        )
+        for resource in resources:
+            del self.held[resource]
             key = (operation.operation_id, resource)
             record = self.resource_records.get(key)
             if record is not None and record.acquired and not record.released:
@@ -689,9 +758,7 @@ def _build_evidence(
                 "deadline_exceeded": item.deadline_exceeded,
                 "late_terminal_confirmation": item.late_terminal_confirmation,
                 "cancel": (
-                    _cancel_document(item.cancel)
-                    if item.cancel is not None
-                    else None
+                    _cancel_document(item.cancel) if item.cancel is not None else None
                 ),
             }
         )
@@ -819,16 +886,6 @@ class MultiRobotScheduler:
             layer_status, layer_results = await self._run_layer(
                 plan, layer_index, operation_ids, executor, canceler, state
             )
-            handoff_ok = await self._run_layer_handoffs(
-                plan,
-                layer_index,
-                operation_ids,
-                layer_results,
-                executor,
-                state,
-            )
-            if not handoff_ok:
-                layer_status = OperationStatus.FAILED
             state.results.update(layer_results)
             if layer_status is OperationStatus.CONFIRMED:
                 confirmed.update(
@@ -850,11 +907,11 @@ class MultiRobotScheduler:
                     else "layer failure",
                 )
             )
+        if not state.failed:
+            await self._terminal_departures(plan, executor, state)
         operations = dict(state.results)
         acquired = [
-            record
-            for record in state.resource_records.values()
-            if record.acquired
+            record for record in state.resource_records.values() if record.acquired
         ]
         passed = (
             not state.failed
@@ -897,12 +954,12 @@ class MultiRobotScheduler:
         results: dict[str, OperationResult] = {}
         running: dict[str, asyncio.Task[object]] = {}
         order = {
-            operation_id: index
-            for index, operation_id in enumerate(operation_ids)
+            operation_id: index for index, operation_id in enumerate(operation_ids)
         }
         for operation_id in operation_ids:
             operation = plan.operations[operation_id]
-            conflict = state.acquire(operation)
+            predecessors = self._physical_predecessors(operation, plan, state)
+            conflict = None if predecessors else state.acquire(operation)
             if conflict is not None:
                 reason = f"resource unavailable before dispatch: {conflict}"
                 results[operation_id] = _failure_result(operation, reason)
@@ -910,7 +967,7 @@ class MultiRobotScheduler:
                 continue
             try:
                 running[operation_id] = asyncio.create_task(
-                    executor.execute(operation)
+                    self._execute_successor(operation, plan, executor, state)
                 )
             except Exception as exc:
                 reason = f"dispatch failed for {operation_id!r}: {exc!r}"
@@ -930,9 +987,7 @@ class MultiRobotScheduler:
         timed_out = False
         try:
             while pending:
-                remaining = (
-                    None if deadline is None else deadline - time.monotonic()
-                )
+                remaining = None if deadline is None else deadline - time.monotonic()
                 if remaining is not None and remaining <= 0:
                     timed_out = True
                     break
@@ -990,9 +1045,9 @@ class MultiRobotScheduler:
             if result is None:
                 continue
             released = False
+            if result.evidence.get("handoff_required") is True:
+                continue
             if _is_confirmation(result):
-                if result.evidence.get("handoff_required") is True:
-                    continue
                 state.release(operation, "terminal confirmation")
                 released = True
             elif _cancel_releases(result.cancel) and result.motion_sent is not True:
@@ -1011,9 +1066,7 @@ class MultiRobotScheduler:
             _is_confirmation(item) for item in results.values()
         )
         return (
-            OperationStatus.CONFIRMED
-            if confirmed_layer
-            else OperationStatus.FAILED,
+            OperationStatus.CONFIRMED if confirmed_layer else OperationStatus.FAILED,
             results,
         )
 
@@ -1035,6 +1088,18 @@ class MultiRobotScheduler:
             plan.operations[operation_id] for operation_id in operation_ids
         )
         results: dict[str, OperationResult] = {}
+        if any(
+            self._physical_predecessors(operation, plan, state)
+            for operation in operations
+        ):
+            reason = (
+                "coordinated layer requires successor-owned unified pre-phase transport"
+            )
+            state.mark_failure(reason)
+            return OperationStatus.FAILED, {
+                operation.operation_id: _failure_result(operation, reason)
+                for operation in operations
+            }
         for operation in operations:
             conflict = state.acquire(operation)
             if conflict is not None:
@@ -1093,78 +1158,300 @@ class MultiRobotScheduler:
             results,
         )
 
-    async def _run_layer_handoffs(
+    def _physical_predecessors(
+        self, operation: RobotOperation, plan: RobotOperationPlan, state: _RunState
+    ) -> tuple[str, ...]:
+        """Select retained endpoints for this successor only.
+
+        Returns:
+            Direct physical dependencies or the next shared-robot endpoint owners.
+        """
+        if operation.skill == "WAIT":
+            return ()
+        direct = set(_predecessors(plan).get(operation.operation_id, ()))
+        selected = []
+        for owner in dict.fromkeys(state.held.values()):
+            result = state.results.get(owner)
+            if result is None or result.evidence.get("handoff_required") is not True:
+                continue
+            predecessor = plan.operations[owner]
+            if owner in direct or set(predecessor.participants) & set(
+                operation.participants
+            ):
+                selected.append(owner)
+        return tuple(selected)
+
+    async def _execute_successor(
         self,
+        operation: RobotOperation,
         plan: RobotOperationPlan,
-        layer_index: int,
-        operation_ids: tuple[str, ...],
-        results: dict[str, OperationResult],
         executor: object,
         state: _RunState,
-    ) -> bool:
-        """Complete explicit skill-to-next-transport handoffs before release."""
-        next_operations = (
-            tuple(
-                plan.operations[next_id]
-                for next_id in plan.execution_layers[layer_index + 1]
+    ) -> object:
+        """Run a retained-state transition inside the successor dispatch.
+
+        Returns:
+            The contact execution result, or a structured pre-phase failure.
+        """
+
+        def failure(reason: str) -> OperationExecution:
+            return OperationExecution(
+                operation.operation_id,
+                operation.executor_robot_id,
+                OperationStatus.FAILED,
+                False,
+                False,
+                False,
+                {},
+                reason,
             )
-            if layer_index + 1 < len(plan.execution_layers)
-            else ()
+
+        predecessors = self._physical_predecessors(operation, plan, state)
+        if predecessors:
+            if set(predecessors) & state.transitioning:
+                return failure("predecessor lease is already transitioning")
+            state.transitioning.update(predecessors)
+            try:
+                conflict = state.reserve(operation, predecessors)
+                if conflict:
+                    return failure(conflict)
+                if not await self._transition(
+                    plan, predecessors, operation, executor, state
+                ):
+                    return failure(
+                        "successor pre-phase failed; predecessor leases retained"
+                    )
+            finally:
+                state.transitioning.difference_update(predecessors)
+        conflict = state.acquire(operation)
+        if conflict:
+            return failure(f"resource unavailable before dispatch: {conflict}")
+        execute = getattr(executor, "execute")
+        raw = await execute(operation)
+        if (
+            isinstance(raw, OperationExecution)
+            and operation.operation_id in state.pre_phases
+        ):
+            raw = dataclasses.replace(
+                raw,
+                evidence={
+                    **raw.evidence,
+                    "pre_phase": state.pre_phases[operation.operation_id],
+                },
+            )
+        return raw
+
+    async def _transition(
+        self,
+        plan: RobotOperationPlan,
+        predecessor_ids: tuple[str, ...],
+        successor: RobotOperation | None,
+        executor: object,
+        state: _RunState,
+        policy: TerminalPrePhasePolicy | None = None,
+    ) -> bool:
+        """Execute a bound transition and atomically adopt its physical leases.
+
+        Returns:
+            True only after scene validation and physical arrival proof.
+        """
+        transition_id = (
+            f"pre-phase:{successor.operation_id}"
+            if successor
+            else f"terminal:{policy.policy_id}"
         )
-        pre_phase = getattr(executor, "execute_pre_phase", None)
-        passed = True
-        for operation_id in operation_ids:
-            result = results.get(operation_id)
-            if result is None or not _is_confirmation(result):
-                continue
-            if result.evidence.get("handoff_required") is not True:
-                continue
-            if not callable(pre_phase):
-                state.mark_failure(
-                    f"operation {operation_id} requires successor pre-phase runtime"
+        execution_attempted = False
+        try:
+            observe = getattr(executor, "observe_pre_phase", None)
+            execute = getattr(executor, "execute_pre_phase", None)
+            if not callable(observe) or not callable(execute):
+                raise ExecutionContractError(
+                    "shared snapshot/pre-phase runtime unavailable"
                 )
-                state.note_attention(operation_id)
-                passed = False
-                continue
-            operation = plan.operations[operation_id]
-            successor_ids = tuple(item.operation_id for item in next_operations)
+            operations = tuple(plan.operations[owner] for owner in predecessor_ids)
             participants = tuple(
                 sorted(
                     {
-                        operation.executor_robot_id,
-                        *(participant for item in next_operations for participant in item.participants),
+                        robot
+                        for operation in operations
+                        for robot in operation.participants
                     }
+                    | (
+                        set(successor.participants)
+                        if successor
+                        else set(policy.participants)
+                    )
                 )
             )
+            snapshot = await asyncio.wait_for(
+                observe(participants), self._operation_timeout_s
+            )
+            if not isinstance(snapshot, SharedSceneSnapshot):
+                raise ExecutionContractError(
+                    "pre-phase requires one admitted shared snapshot"
+                )
+            owners = {
+                resource: owner
+                for resource, owner in state.held.items()
+                if owner in predecessor_ids
+            }
             request = SuccessorPrePhaseRequest(
-                predecessor_operation_id=operation_id,
-                successor_operation_ids=successor_ids,
-                predecessor_state=dict(result.evidence),
-                successor_operations=next_operations,
+                transition_id=transition_id,
+                predecessor_operations=operations,
+                predecessor_states={
+                    owner: dict(state.results[owner].evidence)
+                    for owner in predecessor_ids
+                },
+                next_operation=successor,
                 participants=participants,
-                scene_digest=str(result.evidence.get("scene_digest", "pre-phase-scene")),
-                resources=tuple(operation.resources),
-                terminal_cleanup=not bool(next_operations),
+                resources=tuple(sorted(owners)),
+                lease_owners=owners,
+                scene_snapshot=snapshot,
+                terminal_policy=policy,
             )
-            raw = pre_phase(request)
-            if inspect.isawaitable(raw):
-                raw = await raw
-            if not isinstance(raw, SuccessorPrePhaseEvidence) or raw.predecessor_operation_id != operation_id or not raw.passed:
-                state.mark_failure(
-                    f"operation {operation_id} successor pre-phase did not reach terminal-safe state"
+            execution_attempted = True
+            task = asyncio.create_task(execute(request))
+            raw = await asyncio.wait_for(task, self._operation_timeout_s)
+            if (
+                not isinstance(raw, SuccessorPrePhaseEvidence)
+                or not raw.matches(request)
+                or not raw.passed
+            ):
+                raise ExecutionContractError(
+                    "pre-phase binding or physical arrival evidence failed"
                 )
-                state.note_attention(operation_id)
-                passed = False
-                continue
-            evidence = dict(result.evidence)
-            evidence["handoff_confirmed"] = dict(raw.evidence)
-            results[operation_id] = dataclasses.replace(result, evidence=evidence)
-            operation = plan.operations[operation_id]
-            state.release(operation, "terminal-safe next-transport handoff")
-            results[operation_id] = dataclasses.replace(
-                results[operation_id], resources_released=True
+            robots = snapshot.document["robots"]
+            release_support = set(policy.release_supporting) if policy else set()
+            for robot_id in participants:
+                facts = robots[robot_id]["facts"]
+                if set(raw.final_facts[robot_id]) - set(facts):
+                    raise ExecutionContractError(
+                        "pre-phase cannot create physical facts"
+                    )
+                if any(
+                    not isinstance(proof, Mapping) or not proof
+                    for proof in raw.final_facts[robot_id].values()
+                ):
+                    raise ExecutionContractError(
+                        "physical facts require explicit evidence"
+                    )
+                for key in facts:
+                    if key.startswith("holding:") or (
+                        key.startswith("supporting:")
+                        and robot_id not in release_support
+                    ):
+                        if not raw.final_facts[robot_id].get(key):
+                            raise ExecutionContractError(
+                                f"pre-phase lost physical fact {robot_id}/{key}"
+                            )
+            validate = getattr(executor, "validate_pre_phase", None)
+            if (
+                not callable(validate)
+                or await asyncio.wait_for(
+                    validate(request, raw),
+                    self._operation_timeout_s,
+                )
+                is not True
+            ):
+                raise ExecutionContractError(
+                    "scene/version or ledger reconciliation failed"
+                )
+            state.adopt(request, successor)
+            proof = to_json_value(dataclasses.asdict(raw))
+            state.pre_phases[successor.operation_id if successor else transition_id] = (
+                proof
             )
-        return passed
+            state.deadline_events.append(
+                {
+                    "kind": "pre_phase_adoption",
+                    "transition_id": transition_id,
+                    "resource_adoption_confirmed": True,
+                    "evidence": proof,
+                }
+            )
+            return True
+        except asyncio.CancelledError:
+            if execution_attempted:
+                await self._cancel_transition(executor, transition_id, state)
+            state.mark_failure(f"{transition_id}: cancelled; leases retained")
+            for owner in predecessor_ids:
+                state.note_attention(owner)
+            raise
+        except Exception as error:
+            if execution_attempted:
+                await self._cancel_transition(executor, transition_id, state)
+            reason = f"{transition_id}: {type(error).__name__}: {error}"
+            state.mark_failure(reason)
+            for owner in predecessor_ids:
+                state.note_attention(owner)
+                result = state.results[owner]
+                state.results[owner] = dataclasses.replace(
+                    result,
+                    evidence={**result.evidence, "pre_phase_failure": reason},
+                )
+            state.deadline_events.append(
+                {
+                    "kind": "pre_phase_failure",
+                    "transition_id": transition_id,
+                    "reason": reason,
+                }
+            )
+            return False
+
+    async def _cancel_transition(
+        self, executor: object, transition_id: str, state: _RunState
+    ) -> None:
+        """Record cancellation without releasing physical predecessor leases."""
+        cancel = getattr(executor, "cancel_pre_phase", None)
+        try:
+            if not callable(cancel):
+                raise ExecutionContractError("pre-phase cancel unavailable")
+            raw = await asyncio.wait_for(cancel(transition_id), self._cancel_timeout_s)
+            if not isinstance(raw, Mapping) or not is_json_safe(raw):
+                raise ExecutionContractError("invalid pre-phase cancellation evidence")
+            evidence = to_json_value(raw)
+        except Exception as error:
+            evidence = {"terminal": False, "safe": False, "error": repr(error)}
+        state.deadline_events.append(
+            {
+                "kind": "pre_phase_cancel",
+                "transition_id": transition_id,
+                "evidence": evidence,
+            }
+        )
+
+    async def _terminal_departures(
+        self, plan: RobotOperationPlan, executor: object, state: _RunState
+    ) -> None:
+        """Require explicit policy for every remaining physical endpoint."""
+        owners = tuple(dict.fromkeys(state.held.values()))
+        if not owners:
+            return
+        policy_fn = getattr(executor, "terminal_pre_phase_policy", None)
+        try:
+            policy = (
+                policy_fn(tuple(plan.operations[owner] for owner in owners))
+                if callable(policy_fn)
+                else None
+            )
+            if not isinstance(policy, TerminalPrePhasePolicy):
+                raise ExecutionContractError(
+                    "final endpoint has no explicit terminal pre-phase policy"
+                )
+        except Exception as error:
+            state.mark_failure(str(error))
+            for owner in owners:
+                state.note_attention(owner)
+                result = state.results[owner]
+                state.results[owner] = dataclasses.replace(
+                    result,
+                    evidence={
+                        **result.evidence,
+                        "terminal_policy_failure": str(error),
+                    },
+                )
+            return
+        await self._transition(plan, owners, None, executor, state, policy)
 
     def _evaluate_task(
         self,
@@ -1199,8 +1486,7 @@ class MultiRobotScheduler:
         if not self._allow_legacy_results:
             return _failure_result(
                 operation,
-                "non-contract executor result rejected: "
-                f"{type(value).__name__!r}",
+                f"non-contract executor result rejected: {type(value).__name__!r}",
             )
         return self._evaluate_legacy(value, operation)
 
@@ -1258,7 +1544,8 @@ class MultiRobotScheduler:
                 evidence=dict(execution.evidence),
                 reason=execution.reason,
                 resources=operation.resources,
-                resources_released=execution.evidence.get("handoff_required") is not True,
+                resources_released=execution.evidence.get("handoff_required")
+                is not True,
             )
         if execution.status in (
             OperationStatus.FAILED,
@@ -1316,19 +1603,14 @@ class MultiRobotScheduler:
         return OperationResult(
             operation_id=operation.operation_id,
             robot_id=operation.executor_robot_id,
-            status=(
-                OperationStatus.CONFIRMED
-                if passed
-                else OperationStatus.FAILED
-            ),
+            status=(OperationStatus.CONFIRMED if passed else OperationStatus.FAILED),
             passed=passed,
             detail=_legacy_summary(value),
             terminal=True,
             motion_sent=motion_sent,
             evidence=evidence,
             reason=(
-                "legacy executor result accepted without strict evidence "
-                "validation"
+                "legacy executor result accepted without strict evidence validation"
             ),
             legacy=True,
             resources=operation.resources,
@@ -1355,9 +1637,7 @@ class MultiRobotScheduler:
                     acknowledged=False,
                     terminal=False,
                     safe=False,
-                    evidence={
-                        "cancel_unavailable": "no cancel seam was provided"
-                    },
+                    evidence={"cancel_unavailable": "no cancel seam was provided"},
                 )
                 for operation_id in pending_ids
             }
@@ -1402,8 +1682,7 @@ class MultiRobotScheduler:
                 if exception is not None:
                     settled = _failure_result(
                         operation,
-                        "executor raised after cancel request: "
-                        f"{exception!r}",
+                        f"executor raised after cancel request: {exception!r}",
                     )
                 else:
                     settled = self._evaluate_task(task, operation, plan)
@@ -1429,9 +1708,7 @@ class MultiRobotScheduler:
         try:
             value = cancel_fn(operation_id)
             if inspect.isawaitable(value):
-                value = await asyncio.wait_for(
-                    value, timeout=self._cancel_timeout_s
-                )
+                value = await asyncio.wait_for(value, timeout=self._cancel_timeout_s)
         except TimeoutError:
             return CancelEvidence(
                 operation_id=operation_id,
@@ -1471,8 +1748,7 @@ class MultiRobotScheduler:
                 safe=False,
                 evidence={
                     "cancel_error": (
-                        "non-contract cancel result "
-                        f"{type(value).__name__!r} rejected"
+                        f"non-contract cancel result {type(value).__name__!r} rejected"
                     )
                 },
             )

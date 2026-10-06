@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import signal
 import threading
 import time
@@ -9,6 +10,10 @@ from collections.abc import Callable, Mapping
 from pathlib import Path
 from uuid import uuid4
 
+from rocobrick.coordinated_session import (
+    CoordinatedSessionRequest,
+    CoordinatedSessionResult,
+)
 from rocobrick.execution.ros_session_worker import SCHEMA, read_message, write_atomic
 from rocobrick.ros_session_entry import RosSessionRequest, RosSessionResult
 
@@ -32,7 +37,9 @@ class RosWorkerTransport:
         self.sleep = sleep
         self.lock = threading.Lock()
         self.active: dict[str, tuple[str, RosSessionRequest, Path]] = {}
+        self.active_coordinated: dict[str, tuple[str, CoordinatedSessionRequest, Path]] = {}
         self.stopping = False
+        self.failed = False
 
     def wait_ready(self, robots: tuple[str, ...], timeout_s: float) -> None:
         """Block until the worker attests readiness for exactly these robots."""
@@ -82,7 +89,7 @@ class RosWorkerTransport:
             request.operations[0].operation.request_id if request.operations else key
         )
         with self.lock:
-            if self.stopping or self.handle.poll() is not None:
+            if self.stopping or self.failed or self.handle.poll() is not None:
                 raise RuntimeError("ROS worker unavailable; replay is forbidden")
             if operation_id in self.active:
                 raise ValueError("operation is already active")
@@ -113,6 +120,260 @@ class RosWorkerTransport:
                 with self.lock:
                     self.active.pop(operation_id, None)
 
+    def observe_all(
+        self, robots: tuple[str, ...], timeout_s: float
+    ) -> Mapping[str, object]:
+        """Read exactly one shared host snapshot through the persistent ROS owner.
+
+        Returns:
+            Complete scene state with every configured robot.
+        """
+        snapshot = self.observe_shared(robots, timeout_s)["scene_snapshot"]
+        if not isinstance(snapshot, Mapping):
+            raise ValueError("shared observation returned no scene snapshot")
+        return snapshot
+
+    def observe_shared(
+        self, robots: tuple[str, ...], timeout_s: float
+    ) -> Mapping[str, object]:
+        """Read one shared observation bound to its planning-scene version.
+
+        Returns:
+            The complete scene snapshot plus the unified planning-scene
+            version and the shared simulation-time sample observed with it.
+        """
+        key = uuid4().hex
+        path = self.directory / "results" / f"{key}.json"
+        with self.lock:
+            if (
+                self.active
+                or self.failed
+                or self.stopping
+                or self.handle.poll() is not None
+            ):
+                raise RuntimeError("shared observation requires an idle worker")
+            write_atomic(
+                self.directory / "requests" / f"{key}.json",
+                {
+                    "schema": SCHEMA,
+                    "token": self.token,
+                    "request": {
+                        "schema": "rocobrick-unified-observe/v1",
+                        "request_id": key,
+                        "robots": list(robots),
+                    },
+                },
+            )
+            try:
+                self._wait(path, timeout_s)
+            except TimeoutError:
+                self.failed = True
+                raise
+            result = read_message(path, self.token).get("result")
+            if (
+                not isinstance(result, Mapping)
+                or result.get("passed") is not True
+                or result.get("request_id") != key
+            ):
+                raise ValueError("shared observation failed or identity mismatched")
+            snapshot = result.get("scene_snapshot")
+            if not isinstance(snapshot, Mapping) or set(
+                snapshot.get("robots", {})
+            ) != set(robots):
+                raise ValueError("shared observation participant set mismatched")
+            version = result.get("planning_scene_version")
+            if type(version) is not int or version < 0:
+                raise ValueError("shared observation planning-scene version is invalid")
+            observed = result.get("observed_sim_time_s")
+            if (
+                isinstance(observed, bool)
+                or not isinstance(observed, (int, float))
+                or not math.isfinite(observed)
+                or observed < 0
+            ):
+                raise ValueError("shared observation simulation time is invalid")
+            start_state = result.get("start_state", {})
+            if not isinstance(start_state, Mapping) or not all(
+                isinstance(name, str)
+                and isinstance(value, (int, float))
+                and not isinstance(value, bool)
+                and math.isfinite(float(value))
+                for name, value in start_state.items()
+            ):
+                raise ValueError("shared observation combined start state is invalid")
+            return {
+                "scene_snapshot": snapshot,
+                "planning_scene_version": version,
+                "observed_sim_time_s": float(observed),
+                "start_state": dict(start_state),
+            }
+
+    def call_plan_only(
+        self, request: CoordinatedSessionRequest, result_path: Path, timeout_s: float
+    ) -> CoordinatedSessionResult:
+        """Submit a no-motion combined plan to the existing worker.
+
+        Returns:
+            A strictly bound planning result, never operation arrival evidence.
+        """
+        if not request.plan_only:
+            raise ValueError("combined mailbox execution is not implemented")
+        key = uuid4().hex
+        path = self.directory / "results" / f"{key}.json"
+        with self.lock:
+            if (
+                self.stopping
+                or self.failed
+                or self.active
+                or self.handle.poll() is not None
+            ):
+                raise RuntimeError("combined planning requires an idle live worker")
+            if result_path.exists():
+                raise ValueError("plan result path already exists")
+            write_atomic(
+                self.directory / "requests" / f"{key}.json",
+                {
+                    "schema": SCHEMA,
+                    "token": self.token,
+                    "request": request.serialize(),
+                },
+            )
+            try:
+                self._wait(path, timeout_s)
+            except TimeoutError:
+                self.failed = True
+                raise
+            result = CoordinatedSessionResult.parse(
+                read_message(path, self.token).get("result")
+            )
+            if (
+                result.coordination_id != request.coordination_id
+                or result.robots != request.robots
+            ):
+                raise ValueError("combined worker result identity mismatch")
+            if (
+                result.lifecycle.get("physical_execution") is not False
+                or result.lifecycle.get("safe_to_release") is not False
+            ):
+                raise ValueError("plan-only worker result claims physical execution")
+            write_atomic(result_path, result.serialize())
+            return result
+
+    def execute_coordinated(
+        self,
+        request: CoordinatedSessionRequest,
+        result_path: Path,
+        timeout_s: float,
+    ) -> CoordinatedSessionResult:
+        """Submit one combined free-space execution to the worker.
+
+        Returns:
+            The worker's strictly validated physical execution result.
+        """
+        key = uuid4().hex
+        path = self.directory / "results" / f"{key}.json"
+        with self.lock:
+            if (
+                self.stopping
+                or self.failed
+                or self.active
+                or self.active_coordinated
+                or self.handle.poll() is not None
+            ):
+                raise RuntimeError("coordinated execution requires an idle live worker")
+            if result_path.exists():
+                raise ValueError("coordinated execution result path already exists")
+            write_atomic(
+                self.directory / "requests" / f"{key}.json",
+                {
+                    "schema": SCHEMA,
+                    "token": self.token,
+                    "request": {
+                        "schema": "rocobrick-coordinated-execute/v1",
+                        "request_id": key,
+                        "request": request.serialize(),
+                    },
+                },
+            )
+            self.active_coordinated[request.coordination_id] = (key, request, path)
+        try:
+            try:
+                self._wait(path, timeout_s)
+            except TimeoutError:
+                self.failed = True
+                raise
+            message = read_message(path, self.token)
+            result = message.get("result")
+            if (
+                not isinstance(result, Mapping)
+                or result.get("coordination_id") != request.coordination_id
+            ):
+                raise ValueError("coordinated execution result identity mismatched")
+            parsed = CoordinatedSessionResult.parse(result.get("result"))
+            if parsed.robots != request.robots or parsed.participants != request.participants:
+                raise ValueError("coordinated execution robot identity mismatched")
+            if parsed.passed and (
+                parsed.lifecycle.get("physical_execution") is not True
+                or parsed.lifecycle.get("safe_to_release") is not True
+            ):
+                raise ValueError(
+                    "coordinated execution result lacks physical terminal proof"
+                )
+            write_atomic(result_path, parsed.serialize())
+            return parsed
+        finally:
+            with self.lock:
+                self.active_coordinated.pop(request.coordination_id, None)
+
+    def cancel_free_space(
+        self, motion_id: str, timeout_s: float = 10.0
+    ) -> Mapping[str, object]:
+        """Cancel one combined request and await its terminal-safe result."""
+        with self.lock:
+            entry = self.active_coordinated.get(motion_id)
+        if entry is None:
+            return {
+                "motion_id": motion_id,
+                "attempted": False,
+                "terminal": False,
+                "safe": False,
+                "error": "free-space request is not active",
+            }
+        key, request, path = entry
+        write_atomic(
+            self.directory / "coordinated_cancels" / f"{key}.json",
+            {
+                "schema": SCHEMA,
+                "token": self.token,
+                "coordination_id": request.coordination_id,
+            },
+        )
+        try:
+            self._wait(path, timeout_s)
+            message = read_message(path, self.token)
+            parsed = CoordinatedSessionResult.parse(message.get("result", {}).get("result"))
+            lifecycle = parsed.lifecycle
+            safe = bool(
+                parsed.participants == request.participants
+                and lifecycle.get("terminal") is True
+                and lifecycle.get("safe_to_release") is True
+            )
+            return {
+                "motion_id": motion_id,
+                "attempted": True,
+                "terminal": lifecycle.get("terminal") is True,
+                "safe": safe,
+                "participants": dict(lifecycle.get("participants") or {}),
+            }
+        except (OSError, ValueError, RuntimeError, TimeoutError) as error:
+            return {
+                "motion_id": motion_id,
+                "attempted": True,
+                "terminal": False,
+                "safe": False,
+                "error": str(error),
+            }
+
     def cancel(
         self, operation_id: str, timeout_s: float = 10.0
     ) -> Mapping[str, object]:
@@ -140,7 +401,11 @@ class RosWorkerTransport:
             },
         )
         try:
-            self._wait(path, timeout_s)
+            try:
+                self._wait(path, timeout_s)
+            except TimeoutError:
+                self.failed = True
+                raise
             result = self._result(path, request)
             record = result.operations[0]
             inner = record.get("result")

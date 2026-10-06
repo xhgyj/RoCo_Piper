@@ -23,49 +23,48 @@ class CoordinatedLayerGroup:
 def coordinated_layer_group(
     operations: Sequence[RobotOperation],
 ) -> CoordinatedLayerGroup | None:
-    """Recognize task-C transport pairing without changing operation semantics.
+    """Recognize a task-C HANDOVER plus SUPPORT_TOP pairing.
 
-    The external plan remains a TRANSIT plus SUPPORT_TOP pair. The pair is
-    eligible only when both operations are in the same scheduler layer and
-    identify the same connection and upper/lower physical instances. Any
-    ambiguity returns ``None`` so the caller can fail closed.
+    Both operations are in the same scheduler layer, target the same
+    connection and physical instances, and involve different executor robots.
+    Any ambiguity returns ``None`` so the caller can fail closed.
 
     Returns:
         The strict paired group, or ``None`` when the layer is not eligible.
     """
-    transit = [item for item in operations if item.skill == "TRANSIT"]
+    handover = [item for item in operations if item.skill == "HANDOVER"]
     support = [item for item in operations if item.skill == "SUPPORT_TOP"]
-    if len(transit) != 1 or len(support) != 1 or len(operations) != 2:
+    if len(handover) != 1 or len(support) != 1 or len(operations) != 2:
         return None
-    transit_item = transit[0]
+    handover_item = handover[0]
     support_item = support[0]
-    transit_target = transit_item.target
+    handover_target = handover_item.target
     support_target = support_item.target
-    if transit_target is None or support_target is None:
+    if handover_target is None or support_target is None:
         return None
-    transit_values = transit_target.values
+    handover_values = handover_target.values
     support_values = support_target.values
-    destination = transit_values.get("to")
-    carrying = transit_values.get("carrying_physical_instance_id")
-    if not isinstance(destination, dict) or destination.get("kind") != "connection":
-        return None
-    connection_id = destination.get("connection_id")
+    physical = handover_values.get("physical_instance_id")
+    connection_id = support_values.get("connection_id")
     upper = support_values.get("upper_physical_instance_id")
     lower = support_values.get("lower_physical_instance_id")
     if not all(
         isinstance(value, str) and value
-        for value in (connection_id, upper, lower)
+        for value in (physical, connection_id, upper, lower)
     ):
         return None
-    if carrying != lower or support_values.get("connection_id") != connection_id:
+    if physical != lower:
         return None
-    if support_values.get("placement_robot_id") != transit_item.executor_robot_id:
+    if support_values.get("placement_robot_id") != handover_item.executor_robot_id:
         return None
-    if transit_item.executor_robot_id == support_item.executor_robot_id:
+    if handover_item.executor_robot_id == support_item.executor_robot_id:
         return None
     return CoordinatedLayerGroup(
-        operation_ids=(transit_item.operation_id, support_item.operation_id),
-        robot_ids=(transit_item.executor_robot_id, support_item.executor_robot_id),
+        operation_ids=(handover_item.operation_id, support_item.operation_id),
+        robot_ids=(
+            handover_item.executor_robot_id,
+            support_item.executor_robot_id,
+        ),
         connection_id=connection_id,
         upper_physical_instance_id=upper,
         lower_physical_instance_id=lower,

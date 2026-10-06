@@ -43,7 +43,7 @@ class DualArmPlanOnlyCoordinator:
         return require_group_readiness(
             document,
             coordination_id=request.coordination_id,
-            participants=request.robots,
+            participants=request.participants,
             scene_digest=request.scene_digest,
         )
 
@@ -63,14 +63,14 @@ class DualArmPlanOnlyCoordinator:
         return coordinated_operation_from_joint_trajectory(
             coordination_id=request.coordination_id,
             scene_digest=request.scene_digest,
-            participants=request.robots,
+            participants=request.participants,
             joint_names=joint_names,
             points=points,
             joint_binding=self._joint_binding,
-            start_at_sim_time_s=request.targets[request.robots[0]].get(
+            start_at_sim_time_s=request.targets[request.participants[0]].get(
                 "start_at_sim_time_s", 0.0
             ),
-            synchronization_tolerance_s=request.targets[request.robots[0]].get(
+            synchronization_tolerance_s=request.targets[request.participants[0]].get(
                 "synchronization_tolerance_s", 0.02
             ),
         )

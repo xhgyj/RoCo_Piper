@@ -365,6 +365,8 @@ def test_callback_assembles_live_scene_state(bridge_module) -> None:
         BRICK_ID_B: VALID_AABBS_B,
     }
     bridge._brick_connections = lambda: {PAIR_KEY: True}
+    bridge._state.tcp_provenance = {"runtime_model_sha256": "a" * 64, "source_sha256": "b" * 64}
+    bridge._environment_colliders = lambda: {"ground": {"aabb_min": [-1., -1., -0.01], "aabb_max": [1., 1., 0.]}}
     response = types.SimpleNamespace(success=None, message=None)
     bridge._on_scene_state(object(), response)
     assert response.success is True

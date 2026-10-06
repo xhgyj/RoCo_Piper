@@ -7,6 +7,7 @@ import dataclasses
 import json
 
 import pytest
+from pre_phase_helpers import snapshot, success
 
 from rocobrick.multi_robot_scheduler import (
     CancelEvidence,
@@ -25,14 +26,14 @@ from rocobrick.robot_operation_plan import (
     ScheduledOperation,
     parse_robot_operation_plan,
 )
-from rocobrick.unified_dual_arm_runtime import (
-    SuccessorPrePhaseEvidence,
-    SuccessorPrePhaseRequest,
-)
 from rocobrick.robot_operation_runner import (
     RUN_SCHEMA,
     OperationPlanRunner,
     serialize_run_result,
+)
+from rocobrick.unified_dual_arm_runtime import (
+    SuccessorPrePhaseEvidence,
+    SuccessorPrePhaseRequest,
 )
 
 
@@ -55,9 +56,7 @@ def _operation(
         "preconditions": [],
         "effects": [],
         "resources": (
-            list(resources)
-            if resources is not None
-            else [f"robot:{robot_id}"]
+            list(resources) if resources is not None else [f"robot:{robot_id}"]
         ),
         "evidence_requirements": list(evidence_requirements),
     }
@@ -165,19 +164,16 @@ class StrictExecutor:
         self, request: SuccessorPrePhaseRequest
     ) -> SuccessorPrePhaseEvidence:
         """Return terminal-safe successor pre-phase evidence."""
-        return SuccessorPrePhaseEvidence(
-            predecessor_operation_id=request.predecessor_operation_id,
-            successor_operation_ids=request.successor_operation_ids,
-            participants=request.participants,
-            scene_digest=request.scene_digest,
-            planned=True,
-            executed=True,
-            terminal=True,
-            safe=True,
-            resource_transfer_confirmed=True,
-            evidence={"pre_phase": True},
-            terminal_cleanup=request.terminal_cleanup,
-        )
+        return success(request)
+
+    async def observe_pre_phase(self, participants):
+        return snapshot(participants)
+
+    async def validate_pre_phase(self, request, evidence):
+        return True
+
+    async def cancel_pre_phase(self, transition_id):
+        return {"transition_id": transition_id, "terminal": False, "safe": False}
 
     async def cancel(self, operation_id: str) -> object:
         self.cancelled.append(operation_id)
@@ -435,16 +431,10 @@ def test_strict_evidence_labels_from_operation_and_plan() -> None:
             )
         ],
         [["a"]],
-        evidence_requirements=[
-            {"operation_id": "a", "evidence": "plan_label"}
-        ],
+        evidence_requirements=[{"operation_id": "a", "evidence": "plan_label"}],
     )
     missing = StrictExecutor(
-        outcomes={
-            "a": lambda op: _execution(
-                op, evidence={"operation_label": True}
-            )
-        }
+        outcomes={"a": lambda op: _execution(op, evidence={"operation_label": True})}
     )
     result = asyncio.run(schedule(plan, missing))
     assert not result.passed
@@ -495,13 +485,9 @@ def test_identity_and_consistency_fail_closed() -> None:
         ),
     }
     for name, outcome in cases.items():
-        result = asyncio.run(
-            schedule(plan, StrictExecutor(outcomes={"a": outcome}))
-        )
+        result = asyncio.run(schedule(plan, StrictExecutor(outcomes={"a": outcome})))
         assert not result.passed, name
-        assert (
-            result.operations["a"].status is not OperationStatus.CONFIRMED
-        ), name
+        assert result.operations["a"].status is not OperationStatus.CONFIRMED, name
 
     def invalid(op: RobotOperation) -> OperationExecution:
         return OperationExecution(
@@ -514,30 +500,34 @@ def test_identity_and_consistency_fail_closed() -> None:
             evidence={},
         )
 
-    raised = asyncio.run(
-        schedule(plan, StrictExecutor(outcomes={"a": invalid}))
-    )
+    raised = asyncio.run(schedule(plan, StrictExecutor(outcomes={"a": invalid})))
     assert not raised.passed
     assert "ExecutionContractError" in (raised.operations["a"].reason or "")
 
 
 def test_handoff_releases_resources_only_after_terminal_safe_transfer() -> None:
     """A deferred skill keeps its lease until the next transport handoff."""
-    first = _operation("a", "piper_0", resources=("robot:piper_0",))
-    second = _operation("b", "piper_0", resources=("robot:piper_0",))
-    plan = _plan([first, second], [["a"], ["b"]])
+    plan = _raw_plan(
+        [
+            _raw_operation("a", "piper_0", ("robot:piper_0",)),
+            dataclasses.replace(
+                _raw_operation("b", "piper_0", ("robot:piper_0",)), skill="TRANSIT"
+            ),
+        ],
+        (("a",), ("b",)),
+    )
     executor = StrictExecutor(
         outcomes={
             "a": lambda op: _execution(
                 op,
-                evidence={"handoff_required": True},
+                evidence={"handoff_required": True, "terminal_safe": True},
             )
         }
     )
     result = asyncio.run(schedule(plan, executor))
     assert result.passed
     assert result.operations["a"].resources_released is True
-    assert result.operations["a"].evidence["handoff_confirmed"]["pre_phase"] is True
+    assert result.operations["b"].evidence["pre_phase"]["evidence"]["pre_phase"] is True
     assert result.resources[0].released is True
 
 
@@ -547,32 +537,29 @@ class FailingPrePhaseExecutor(StrictExecutor):
     async def execute_pre_phase(
         self, request: SuccessorPrePhaseRequest
     ) -> SuccessorPrePhaseEvidence:
-        return SuccessorPrePhaseEvidence(
-            predecessor_operation_id=request.predecessor_operation_id,
-            successor_operation_ids=request.successor_operation_ids,
-            participants=request.participants,
-            scene_digest=request.scene_digest,
-            planned=False,
-            executed=False,
-            terminal=False,
-            safe=False,
-            resource_transfer_confirmed=False,
-            evidence={"pre_phase": False},
-            terminal_cleanup=request.terminal_cleanup,
-            reason="pre-phase blocked",
-        )
+        return dataclasses.replace(success(request), arrival_confirmed=False)
 
 
 def test_failed_handoff_keeps_previous_resources_held() -> None:
     """A failed next-transport handoff cannot release the prior lease."""
-    first = _operation("a", "piper_0", resources=("robot:piper_0",))
-    second = _operation("b", "piper_0", resources=("robot:piper_0",))
-    plan = _plan([first, second], [["a"], ["b"]])
+    plan = _raw_plan(
+        [
+            _raw_operation("a", "piper_0", ("robot:piper_0",)),
+            dataclasses.replace(
+                _raw_operation("b", "piper_0", ("robot:piper_0",)), skill="TRANSIT"
+            ),
+        ],
+        (("a",), ("b",)),
+    )
     result = asyncio.run(
         schedule(
             plan,
             FailingPrePhaseExecutor(
-                outcomes={"a": lambda op: _execution(op, evidence={"handoff_required": True})}
+                outcomes={
+                    "a": lambda op: _execution(
+                        op, evidence={"handoff_required": True, "terminal_safe": True}
+                    )
+                }
             ),
         )
     )
@@ -581,6 +568,8 @@ def test_failed_handoff_keeps_previous_resources_held() -> None:
     assert result.operations["a"].resources_released is False
 
 
+def test_completed_operations_release_resources_between_layers() -> None:
+    """Ordinary terminal-safe completion permits the next layer to acquire."""
     plan = _plan(
         [_operation("a", "piper_0"), _operation("b", "piper_0")],
         [["a"], ["b"]],
@@ -614,8 +603,7 @@ def test_failed_operation_holds_resources_and_blocks_successor() -> None:
     result = asyncio.run(schedule(plan, executor))
     assert not result.passed
     records = {
-        (record.operation_id, record.resource): record
-        for record in result.resources
+        (record.operation_id, record.resource): record for record in result.resources
     }
     assert records[("a", "robot:piper_0")].released is False
     assert result.operations["b"].status is OperationStatus.BLOCKED
@@ -638,8 +626,7 @@ def test_dispatch_time_conflict_fails_closed_without_dispatch() -> None:
     assert result.operations["b"].status is OperationStatus.FAILED
     assert "resource unavailable" in (result.operations["b"].reason or "")
     refused = {
-        (record.operation_id, record.resource): record
-        for record in result.resources
+        (record.operation_id, record.resource): record for record in result.resources
     }
     assert refused[("b", "robot:shared")].acquired is False
 
@@ -665,15 +652,12 @@ def test_timeout_requires_terminal_safe_cancel_to_release() -> None:
     assert set(executor.cancelled) == {"a", "b"}
     assert [item.operation_id for item in result.cancellations] == ["a", "b"]
     assert all(
-        item.status is OperationStatus.CANCELLED
-        for item in result.operations.values()
+        item.status is OperationStatus.CANCELLED for item in result.operations.values()
     )
     assert all(item.terminal for item in result.operations.values())
     assert all(item.motion_sent is None for item in result.operations.values())
     assert all(item.deadline_exceeded for item in result.operations.values())
-    assert all(
-        item.resources_released for item in result.operations.values()
-    )
+    assert all(item.resources_released for item in result.operations.values())
     assert all(record.released for record in result.resources)
     assert result.unsafe_terminals == ()
     assert "deadline" in (result.operations["a"].reason or "")
@@ -703,9 +687,7 @@ def test_late_terminal_confirmation_cannot_restore_deadline_success() -> None:
                 evidence={"requested": True},
             )
 
-    scheduler = MultiRobotScheduler(
-        operation_timeout_s=0.05, cancel_timeout_s=0.2
-    )
+    scheduler = MultiRobotScheduler(operation_timeout_s=0.05, cancel_timeout_s=0.2)
     result = asyncio.run(scheduler.schedule(plan, LateConfirm()))
     assert result.passed is False
     item = result.operations["a"]
@@ -780,12 +762,16 @@ def test_cooperative_cancel_attaches_safe_evidence_and_releases_resource() -> No
     assert waiting.cancel is not None and waiting.cancel.safe is True
     assert waiting.resources_released is True
     assert waiting.operation_id not in result.unsafe_terminals
-    assert next(
-        record for record in result.resources if record.operation_id == "waiting"
-    ).released is True
-    assert serialize_run_result(result)["operations"]["waiting"]["cancel"][
-        "acknowledged"
-    ] is True
+    assert (
+        next(
+            record for record in result.resources if record.operation_id == "waiting"
+        ).released
+        is True
+    )
+    assert (
+        serialize_run_result(result)["operations"]["waiting"]["cancel"]["acknowledged"]
+        is True
+    )
 
 
 def test_timeout_without_terminal_safe_cancel_holds_resources() -> None:
@@ -934,9 +920,7 @@ def test_legacy_results_are_marked_and_strict_mode_rejects() -> None:
     assert result.operations["a"].evidence["legacy_unvalidated"] is True
     assert result.resources[0].released is True
 
-    strict = asyncio.run(
-        schedule(plan, LegacyExecutor(), allow_legacy_results=False)
-    )
+    strict = asyncio.run(schedule(plan, LegacyExecutor(), allow_legacy_results=False))
     assert not strict.passed
     assert "rejected" in (strict.operations["a"].reason or "")
 

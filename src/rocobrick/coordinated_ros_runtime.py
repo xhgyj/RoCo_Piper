@@ -46,6 +46,7 @@ class CoordinatedMoveItPlanRuntime:
         self._client: object | None = None
         self._goal_handle: object | None = None
         self._result_future: object | None = None
+        self._acceptance_future: object | None = None
 
     def register(self) -> None:
         """Create the single combined MoveGroup action client."""
@@ -78,10 +79,9 @@ class CoordinatedMoveItPlanRuntime:
         """
         if request.planning_group != "dual_arm":
             raise ValueError("combined runtime requires planning_group='dual_arm'")
-        if not request.plan_only:
-            raise ValueError(
-                "combined runtime currently supports plan_only requests only"
-            )
+        # MoveGroup is the sole combined planner. Even physical pre-phase
+        # execution uses a plan-only goal here; our coordinated participants
+        # own the two controller goals, synchronization barrier and cancel.
         self.register()
         if self._client is None or not self.ready():
             raise RuntimeError(
@@ -91,6 +91,7 @@ class CoordinatedMoveItPlanRuntime:
         goal = self._build_goal(request, factories)
         deadline = self._clock() + float(timeout_s or request.timeout_s)
         future = self._client.send_goal_async(goal)  # type: ignore[attr-defined]
+        self._acceptance_future = future
         if not self._wait(future, deadline):
             self.cancel()
             raise TimeoutError("combined MoveGroup goal acceptance timed out")
@@ -104,6 +105,7 @@ class CoordinatedMoveItPlanRuntime:
             self.cancel()
             raise TimeoutError("combined MoveGroup plan timed out")
         wrapper = result_future.result()
+        self._acceptance_future = None
         self._goal_handle = None
         self._result_future = None
         action_result = wrapper.result
@@ -139,6 +141,15 @@ class CoordinatedMoveItPlanRuntime:
             "safe": False,
         }
         handle = self._goal_handle
+        deadline = self._clock() + 10.0
+        if handle is None and self._acceptance_future is not None:
+            if not self._wait(self._acceptance_future, deadline):
+                info["error"] = "late planning acceptance remains unknown"
+                return info
+            handle = self._acceptance_future.result()
+            if handle is not None and getattr(handle, "accepted", False):
+                self._goal_handle = handle
+                self._result_future = handle.get_result_async()
         if handle is None:
             return info
         info["attempted"] = True
@@ -162,6 +173,13 @@ class CoordinatedMoveItPlanRuntime:
             info["error"] = f"{type(exc).__name__}: {exc}"
             return info
 
+    def shutdown(self) -> None:
+        """Cancel an owned planning goal and destroy the sole combined action client."""
+        self.cancel()
+        if self._client is not None:
+            self._client.destroy()
+            self._client = None
+
     def _build_goal(
         self,
         request: CoordinatedSessionRequest,
@@ -172,40 +190,65 @@ class CoordinatedMoveItPlanRuntime:
         motion.group_name = request.planning_group
         motion.allowed_planning_time = ALLOWED_PLANNING_TIME_S
         motion.num_planning_attempts = NUM_PLANNING_ATTEMPTS
+        start_state = getattr(request, "start_state", {})
+        if isinstance(start_state, Mapping) and start_state:
+            motion.start_state.joint_state.name = list(start_state)
+            motion.start_state.joint_state.position = [
+                float(start_state[name]) for name in start_state
+            ]
         constraints = factories.constraints_factory()
-        for robot_id in request.robots:
+        path_constraints = factories.constraints_factory()
+        source = request.scene_snapshot.get("tcp_provenance")
+        for robot_id in request.participants:
             target = request.targets[robot_id]
             raw_pose = target.get("tcp_pose")
+            if request.scene_snapshot and isinstance(raw_pose, Mapping):
+                if not isinstance(source, Mapping) or any(
+                    raw_pose.get(key) != source.get(key)
+                    for key in ("runtime_model_sha256", "source_sha256")
+                ):
+                    raise ValueError(
+                        "TCP target calibration does not match runtime provenance"
+                    )
             raw_positions = target.get("joint_positions")
             expected = self.joint_binding[robot_id]
+            joint_space = (
+                isinstance(raw_positions, Mapping)
+                and set(raw_positions) == set(expected)
+            )
+            if target.get("maintain_pose") is True and isinstance(raw_pose, Mapping):
+                # The measured participant is held by its explicit joint target
+                # and combined start_state. A full TCP path constraint is too
+                # restrictive for this free-space OMPL transition; contact and
+                # support phases remain outside this planner.
+                pass
+            if joint_space:
+                for joint_name in expected:
+                    value = raw_positions[joint_name]
+                    if (
+                        isinstance(value, bool)
+                        or not isinstance(value, (int, float))
+                        or not math.isfinite(float(value))
+                    ):
+                        raise ValueError(f"target joint {joint_name} is not finite")
+                    item = factories.joint_constraint_factory()
+                    item.joint_name = joint_name
+                    item.position = float(value)
+                    item.tolerance_above = 0.01
+                    item.tolerance_below = 0.01
+                    item.weight = 1.0
+                    constraints.joint_constraints.append(item)
+                continue
             if isinstance(raw_pose, Mapping):
                 self._append_pose_constraints(
                     constraints, raw_pose, robot_id, factories
                 )
                 continue
-            if (
-                not isinstance(raw_positions, Mapping)
-                or set(raw_positions) != set(expected)
-            ):
-                raise ValueError(
-                    f"target {robot_id} must carry exact tcp_pose or joint_positions"
-                )
-            for joint_name in expected:
-                value = raw_positions[joint_name]
-                if (
-                    isinstance(value, bool)
-                    or not isinstance(value, (int, float))
-                    or not math.isfinite(float(value))
-                ):
-                    raise ValueError(f"target joint {joint_name} is not finite")
-                item = factories.joint_constraint_factory()
-                item.joint_name = joint_name
-                item.position = float(value)
-                item.tolerance_above = 0.01
-                item.tolerance_below = 0.01
-                item.weight = 1.0
-                constraints.joint_constraints.append(item)
+            raise ValueError(
+                f"target {robot_id} must carry exact tcp_pose or joint_positions"
+            )
         motion.goal_constraints.append(constraints)
+        motion.path_constraints = path_constraints
         goal.request = motion
         goal.planning_options.plan_only = True
         goal.planning_options.replan = False
@@ -242,6 +285,16 @@ class CoordinatedMoveItPlanRuntime:
             or len(orientation) != 4
         ):
             raise ValueError(f"target {robot_id} tcp_pose vectors are invalid")
+        values = tuple(position) + tuple(orientation)
+        if any(
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or not math.isfinite(value)
+            for value in values
+        ):
+            raise ValueError(f"target {robot_id} tcp_pose must be finite")
+        if abs(sum(float(value) ** 2 for value in orientation) - 1.0) > 1e-6:
+            raise ValueError(f"target {robot_id} tcp_pose quaternion is not normalized")
         if target["frame_id"] != f"{robot_id}_base_link":
             raise ValueError(f"target {robot_id} tcp_pose frame is not robot-scoped")
         prefix = f"{robot_id}_"
@@ -268,9 +321,7 @@ class CoordinatedMoveItPlanRuntime:
         position_constraint.header.frame_id = str(target["frame_id"])
         position_constraint.link_name = str(target["tip_link"])
         sphere = factories.solid_primitive_factory()
-        sphere.type = getattr(
-            type(sphere), "SPHERE", getattr(sphere, "SPHERE", 2)
-        )
+        sphere.type = getattr(type(sphere), "SPHERE", getattr(sphere, "SPHERE", 2))
         sphere.dimensions = [float(target["position_tolerance_m"])]
         pose = factories.pose_factory()
         pose.position.x, pose.position.y, pose.position.z = (

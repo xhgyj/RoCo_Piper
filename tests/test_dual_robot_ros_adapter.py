@@ -469,6 +469,7 @@ def make_world(robot_ids: tuple[str, ...] = (ROBOT_0, ROBOT_1)) -> World:
         node,
         robot_ids,
         factories=fake_factories(),
+        profile_factory=RobotRuntimeProfile.from_robot_id,
         qos_state=SimpleNamespace(label="state"),
         qos_sensor=SimpleNamespace(label="sensor"),
         clock=clock,

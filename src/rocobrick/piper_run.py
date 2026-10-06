@@ -143,9 +143,9 @@ PLAN_CAPTURE_NAME = "robot-operation-plan.json"
 PLAN_RUN_NAME = "robot-operation-plan-run.json"
 SCENE_MANIFEST_CAPTURE_NAME = "scene-manifest.json"
 CONFIG_CAPTURE_NAME = "config.json"
-# The structure-only ``--robot-operation-plan`` preflight has no
-# ``--task``/``--plan`` STAP source; it never synthesizes one, so no dispatch
-# (and no session) is ever authorized in that mode.
+# Direct ``--robot-operation-plan`` runs never synthesize a STAP source plan.
+# Explicit preflight-only runs stop before dispatch; direct runtime runs still
+# require structure binding, implemented skill backends and TCP authorization.
 STRUCTURE_ONLY_MODE = "structure-only-preflight"
 NO_STAP_AUTHORIZATION = "no authoritative STAP authorization"
 OPERATION_TIMEOUT_S = 60.0
@@ -747,7 +747,9 @@ def _derive_observation_connection_pairs(
         return ()
     pairs: set[tuple[str, str]] = set()
     for operation in operations:
-        if not isinstance(operation, Mapping) or operation.get("skill") not in {"PLACE_DOWN", "PLACE_UP"}:
+        if not isinstance(operation, Mapping) or operation.get("skill") not in {
+            "PLACE_DOWN", "PLACE_UP"
+        }:
             continue
         if operation.get("executor_robot_id") not in robot_ids:
             continue
@@ -1406,16 +1408,31 @@ def _robot_operation_plan_phase(
         load_transit_contexts,
     )
     from rocobrick.execution.operation_state_ledger import OperationStateLedger
+    from rocobrick.isaac_backend import (
+        box_geometry_digest,
+        gripper_operation,
+        gripper_target_from_payload,
+    )
+    from rocobrick.moveit_contract import GripperTarget
     from rocobrick.robot_operation_executor import SkillOperationExecutor
     from rocobrick.robot_operation_runner import (
         RUN_SCHEMA,
         OperationPlanRunner,
         serialize_run_result,
     )
-    from rocobrick.skills.pick import PickHandler
+    from rocobrick.skills.contracts import HandoverRequest
+    from rocobrick.skills.handover import (
+        HandoverHandler,
+        HandoverOperationBackend,
+        receiver_precontact_target,
+        require_receiver_contact_geometry,
+    )
+    from rocobrick.skills.observation import parse_pick_observation
+    from rocobrick.skills.pick import PickHandler, _tcp_relative_aabb
     from rocobrick.skills.place_down import PlaceDownHandler
     from rocobrick.skills.place_up import PlaceUpHandler
     from rocobrick.skills.support_top import SupportTopHandler
+    from rocobrick.skills.targets import pick_targets
     from rocobrick.tcp_contract import EXPECTED_RUNTIME_MODEL_SHA256
     from rocobrick.unified_runtime_facade import UnifiedDualArmRuntimeFacade
 
@@ -1681,12 +1698,19 @@ def _robot_operation_plan_phase(
                         for robot_id in operation_plan.robots
                     }
                     state_ledger = OperationStateLedger(operation_plan.robots)
+                    unified_runtime = UnifiedDualArmRuntimeFacade(
+                        session,
+                        transit_contexts,
+                        state_ledger=state_ledger,
+                    )
                     pick_backends = {}
                     place_backends = {}
                     place_up_backends = {}
                     support_backends = {}
+                    handover_backend = None
                     if any(
-                        item.skill in ("PICK", "PLACE_DOWN", "PLACE_UP", "SUPPORT_TOP")
+                        item.skill
+                        in ("PICK", "HANDOVER", "PLACE_DOWN", "PLACE_UP", "SUPPORT_TOP")
                         for item in operation_plan.operations.values()
                     ):
                         from rocobrick.isaac_snapshot_host_adapter import (
@@ -1709,6 +1733,7 @@ def _robot_operation_plan_phase(
                                     session_id=args.host_instance_id,
                                     manifest_sha256=manifest.manifest_sha256,
                                     motion_transport=session,
+                                    free_space_transport=unified_runtime,
                                     context=transit_contexts[robot_id],
                                 )
                                 for robot_id in operation_plan.robots
@@ -1730,6 +1755,7 @@ def _robot_operation_plan_phase(
                                     session_id=args.host_instance_id,
                                     manifest_sha256=manifest.manifest_sha256,
                                     motion_transport=session,
+                                    free_space_transport=unified_runtime,
                                     context=transit_contexts[robot_id],
                                     probe_contact=place_probe,
                                 )
@@ -1746,6 +1772,7 @@ def _robot_operation_plan_phase(
                                     session_id=args.host_instance_id,
                                     manifest_sha256=manifest.manifest_sha256,
                                     motion_transport=session,
+                                    free_space_transport=unified_runtime,
                                     context=transit_contexts[robot_id],
                                 )
                                 for robot_id in operation_plan.robots
@@ -1761,10 +1788,340 @@ def _robot_operation_plan_phase(
                                     session_id=args.host_instance_id,
                                     manifest_sha256=manifest.manifest_sha256,
                                     motion_transport=session,
+                                    free_space_transport=unified_runtime,
                                     context=transit_contexts[robot_id],
                                 )
                                 for robot_id in operation_plan.robots
                             }
+                    if any(
+                        item.skill == "HANDOVER"
+                        for item in operation_plan.operations.values()
+                    ):
+                        if not args.scene_manifest:
+                            raise RuntimeError(
+                                "HANDOVER operations require a scene manifest"
+                            )
+                        handover_manifest = manifest
+                        handover_ledger = state_ledger
+                        handover_session = session
+
+                        class _LiveHandoverObservations:
+                            """Validate co-sampled live HANDOVER observations."""
+
+                            def __init__(self, runtime, manifest_sha256):
+                                self._runtime = runtime
+                                self._manifest_sha256 = manifest_sha256
+
+                            async def observe(self, request):
+                                shared = self._runtime.observe_shared_scene()
+                                snapshot = shared.get("scene_snapshot")
+                                if not isinstance(snapshot, Mapping):
+                                    raise RuntimeError(
+                                        "HANDOVER shared observation has no "
+                                        "scene_snapshot"
+                                    )
+                                return snapshot
+
+                            def _stable(
+                                self, samples, request, robot_id, window, label
+                            ):
+                                if len(samples) < 3:
+                                    raise ValueError(
+                                        f"{label} requires at least three observations"
+                                    )
+                                parsed = []
+                                session_id = request.scene_snapshot.get("session_id")
+                                for sample in samples:
+                                    if not isinstance(sample, Mapping):
+                                        raise ValueError(
+                                            f"{label} observation is not a mapping"
+                                        )
+                                    parsed.append(
+                                        parse_pick_observation(
+                                            sample,
+                                            robot_id=robot_id,
+                                            physical_instance_id=(
+                                                request.physical_instance_id
+                                            ),
+                                            session_id=session_id,
+                                            manifest_sha256=self._manifest_sha256,
+                                        )
+                                    )
+                                if any(
+                                    item.manifest_sha256
+                                    != parsed[0].manifest_sha256
+                                    for item in parsed
+                                ):
+                                    raise ValueError(
+                                        f"{label} manifest provenance changed"
+                                    )
+                                if parsed[0].manifest_sha256 != self._manifest_sha256:
+                                    raise ValueError(
+                                        f"{label} manifest provenance is foreign"
+                                    )
+                                previous = parsed[0]
+                                low, high = float(window[0]), float(window[1])
+                                for item in parsed:
+                                    if robot_id == request.receiver_robot_id:
+                                        require_receiver_contact_geometry(
+                                            item,
+                                            tolerance_m=(
+                                                transit_contexts[robot_id].params
+                                                .position_tolerance_m
+                                            ),
+                                        )
+                                    if not low <= item.opening_m <= high:
+                                        raise ValueError(
+                                            f"{label} gripper opening is outside "
+                                            "the admitted window"
+                                        )
+                                    if item is not previous and (
+                                        item.sequence <= previous.sequence
+                                        or item.sim_time_s <= previous.sim_time_s
+                                    ):
+                                        raise ValueError(
+                                        f"{label} observations are stale "
+                                        "or reordered"
+                                        )
+                                    previous = item
+                                first = parsed[0]
+                                reference = tuple(
+                                    a - b
+                                    for a, b in zip(
+                                        first.object_pose.position_xyz,
+                                        first.tcp_pose.position_xyz,
+                                    )
+                                )
+                                max_error = 0.0
+                                for item in parsed:
+                                    current = tuple(
+                                        a - b
+                                        for a, b in zip(
+                                            item.object_pose.position_xyz,
+                                            item.tcp_pose.position_xyz,
+                                        )
+                                    )
+                                    max_error = max(
+                                        max_error,
+                                        math.dist(current, reference),
+                                    )
+                                if max_error > 0.02:
+                                    raise ValueError(
+                                        f"{label} object slipped relative to TCP"
+                                    )
+                                return {
+                                    "confirmed": True,
+                                    "robot_id": robot_id,
+                                    "physical_instance_id": (
+                                        request.physical_instance_id
+                                    ),
+                                    "samples": len(parsed),
+                                    "first_sequence": first.sequence,
+                                    "last_sequence": parsed[-1].sequence,
+                                    "max_relative_position_error_m": max_error,
+                                    "opening_window_m": [low, high],
+                                }
+
+                            def verify_co_hold(self, request, samples):
+                                receiver = self._stable(
+                                    samples,
+                                    request,
+                                    request.receiver_robot_id,
+                                    gripper_target_from_payload(
+                                        request.receiver_gripper
+                                    ).expected_opening_m,
+                                    "co-hold receiver",
+                                )
+                                donor = self._stable(
+                                    samples,
+                                    request,
+                                    request.donor_robot_id,
+                                    gripper_target_from_payload(
+                                        request.receiver_gripper
+                                    ).expected_opening_m,
+                                    "co-hold donor",
+                                )
+                                return {
+                                    "confirmed": True,
+                                    "receiver": receiver,
+                                    "donor": donor,
+                                }
+
+                            def verify_receiver_holding(self, request, samples):
+                                receiver = self._stable(
+                                    samples,
+                                    request,
+                                    request.receiver_robot_id,
+                                    gripper_target_from_payload(
+                                        request.receiver_gripper
+                                    ).expected_opening_m,
+                                    "receiver follow",
+                                )
+                                donor = self._stable(
+                                    samples,
+                                    request,
+                                    request.donor_robot_id,
+                                    gripper_target_from_payload(
+                                        request.donor_release_gripper
+                                    ).expected_opening_m,
+                                    "donor release",
+                                )
+                                return {
+                                    "confirmed": True,
+                                    "receiver": receiver,
+                                    "donor": donor,
+                                }
+
+                        live_observations = _LiveHandoverObservations(
+                            handover_session,
+                            handover_manifest.manifest_sha256,
+                        )
+
+                        def _handover_request(operation):
+                            target = operation.target.values if operation.target else {}
+                            donor_id = str(target["donor_robot_id"])
+                            receiver_id = str(target["receiver_robot_id"])
+                            physical_id = str(target["physical_instance_id"])
+                            shared = handover_session.observe_shared_scene()
+                            snapshot = shared["scene_snapshot"]
+                            if not isinstance(snapshot, Mapping):
+                                raise RuntimeError(
+                                    "HANDOVER request has no shared scene snapshot"
+                                )
+                            brick = snapshot["bricks"].get(physical_id)
+                            if not isinstance(brick, Mapping):
+                                raise RuntimeError(
+                                    f"HANDOVER brick {physical_id!r} is not observed"
+                                )
+                            receiver_context = transit_contexts[receiver_id]
+                            targets = pick_targets(
+                                brick["aabb_min"],
+                                brick["aabb_max"],
+                                receiver_context.base,
+                                receiver_context.provenance,
+                                receiver_context.params,
+                            )
+                            receiver_scene = parse_pick_observation(
+                                snapshot,
+                                robot_id=receiver_id,
+                                physical_instance_id=physical_id,
+                                session_id=str(snapshot["session_id"]),
+                                manifest_sha256=handover_manifest.manifest_sha256,
+                            )
+                            receiver_target = receiver_precontact_target(
+                                receiver_id,
+                                targets,
+                                aabb_min=receiver_scene.aabb_min,
+                                aabb_max=receiver_scene.aabb_max,
+                                base=receiver_context.base,
+                                ground_top_z_m=(
+                                    receiver_context.ground.top_z_m
+                                    if receiver_context.ground is not None
+                                    else None
+                                ),
+                            )
+                            receiver_gripper = gripper_operation(
+                                GripperTarget(
+                                    targets.close_opening_m,
+                                    receiver_context.params.gripper_duration_s,
+                                    receiver_context.params.gripper_goal_tolerance,
+                                    targets.close_expected_window_m,
+                                ),
+                                float(
+                                    operation.parameters.get(
+                                        "co_hold_timeout_s", OPERATION_TIMEOUT_S
+                                    )
+                                ),
+                                f"{operation.operation_id}:receiver-grasp",
+                            ).payload
+                            donor_context = transit_contexts[donor_id]
+                            donor_targets = pick_targets(
+                                brick["aabb_min"],
+                                brick["aabb_max"],
+                                donor_context.base,
+                                donor_context.provenance,
+                                donor_context.params,
+                            )
+                            donor_release = gripper_operation(
+                                GripperTarget(
+                                    donor_targets.reach_opening_m,
+                                    donor_context.params.gripper_duration_s,
+                                    donor_context.params.gripper_goal_tolerance,
+                                    donor_targets.reach_expected_window_m,
+                                ),
+                                float(
+                                    operation.parameters.get(
+                                        "co_hold_timeout_s", OPERATION_TIMEOUT_S
+                                    )
+                                ),
+                                f"{operation.operation_id}:donor-release",
+                            ).payload
+                            minimum, maximum = _tcp_relative_aabb(receiver_scene)
+                            frame_id = f"{receiver_id}_rocobrick_tcp"
+                            digest = box_geometry_digest(
+                                object_id=physical_id,
+                                frame_id=frame_id,
+                                minimum_m=minimum,
+                                maximum_m=maximum,
+                            )
+                            receiver_link = frame_id
+                            donor_link = f"{donor_id}_rocobrick_tcp"
+                            scene_id = str(
+                                snapshot.get("scene_id") or operation_plan.plan_id
+                            )
+                            attach = {
+                                "scene_id": scene_id,
+                                "object_id": physical_id,
+                                "link_name": receiver_link,
+                                "frame_id": frame_id,
+                                "minimum_m": list(minimum),
+                                "maximum_m": list(maximum),
+                                "geometry_digest": digest,
+                                "touch_links": [
+                                    f"{receiver_id}_gripper_link1",
+                                    f"{receiver_id}_gripper_link2",
+                                ],
+                            }
+                            detach = {
+                                "scene_id": scene_id,
+                                "object_id": physical_id,
+                                "link_name": donor_link,
+                                "operation": "detach",
+                            }
+                            return HandoverRequest(
+                                operation_id=operation.operation_id,
+                                donor_robot_id=donor_id,
+                                receiver_robot_id=receiver_id,
+                                physical_instance_id=physical_id,
+                                session_robots=tuple(operation_plan.robots),
+                                scene_snapshot=snapshot,
+                                scene_version=int(
+                                    shared["planning_scene_version"]
+                                ),
+                                start_state=shared["start_state"],
+                                receiver_target=receiver_target,
+                                receiver_gripper=receiver_gripper,
+                                donor_release_gripper=donor_release,
+                                receiver_attach=attach,
+                                donor_detach=detach,
+                                timeout_s=float(
+                                    operation.parameters.get(
+                                        "co_hold_timeout_s", OPERATION_TIMEOUT_S
+                                    )
+                                ),
+                            )
+
+                        handover_handler = HandoverHandler(
+                            handover_ledger,
+                            free_space=unified_runtime,
+                            motion=handover_session,
+                            observations=live_observations,
+                        )
+                        handover_backend = HandoverOperationBackend(
+                            handover_handler,
+                            _handover_request,
+                        )
+
                     executor = SkillOperationExecutor(
                         operation_plan.robots,
                         session,
@@ -1773,7 +2130,9 @@ def _robot_operation_plan_phase(
                         pick_backends=pick_backends,
                         place_backends=place_backends,
                         place_up_backends=place_up_backends,
-                        pre_phase_runtime=UnifiedDualArmRuntimeFacade(session),
+                        support_backends=support_backends,
+                        handover_backend=handover_backend,
+                        pre_phase_runtime=unified_runtime,
                         state_ledger=state_ledger,
                     )
                 else:
@@ -2475,7 +2834,7 @@ def _run_robot_operation_plan_primary(
         checks["robot_operation_plan_validated"] = True
         direct_dispatch = direct_dispatch and all(
             operation.skill in {
-                "TRANSIT",
+                "HANDOVER",
                 "WAIT",
                 "PICK",
                 "PLACE_DOWN",
@@ -2653,7 +3012,7 @@ def _run_robot_operation_plan_primary(
         )
 
     # Phase 6: execute the validated no-STAP path for skills with real
-    # backends (WAIT, TRANSIT, PICK, PLACE_DOWN).
+    # backends, including HANDOVER. The runtime retains all evidence gates.
     if terminal is None and direct_dispatch:
         runtime_terminal = _robot_operation_plan_phase(
             args, record, recorder, contract, None
@@ -2673,7 +3032,7 @@ def _run_robot_operation_plan_primary(
             if args.preflight_only
             else (
                 RunStatus.EXECUTION_NOT_IMPLEMENTED,
-                f"{NO_STAP_AUTHORIZATION}: the plan contains a skill without a "
+                "the direct operation plan contains a skill without a "
                 "real direct-execution backend",
             )
         )

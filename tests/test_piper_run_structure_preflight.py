@@ -59,7 +59,9 @@ TASK_DIR = ROOT / "tasks/type1/example1"
 TASK_START = TASK_DIR / "structure_start.json"
 TASK_GOAL = TASK_DIR / "structure_goal.json"
 SCENE_MANIFEST = ROOT / "artifacts/scene/example1-scene-manifest.json"
-OPERATION_PLAN = ROOT / "artifacts/scene/example1-robot-operation-plan.json"
+OPERATION_PLAN = (
+    ROOT / "tests/fixtures/robot_operation_plans/example1-robot-operation-plan.json"
+)
 
 # Every repository input this suite must leave byte-identical.
 PROVENANCE_INPUTS = (TASK_GOAL, TASK_START, SCENE_MANIFEST, OPERATION_PLAN)
@@ -579,7 +581,7 @@ def test_example1_structure_preflight_is_audited_and_never_dispatches(
     _assert_no_motion_claim(evidence_dir)
 
 
-def test_complete_runtime_group_dispatches_direct_transit_pick_without_stap(
+def test_complete_runtime_group_dispatches_direct_pick_without_stap(
     tmp_path: Path,
     session_guard: list[tuple[object, ...]],
     monkeypatch: pytest.MonkeyPatch,
@@ -593,7 +595,6 @@ def test_complete_runtime_group_dispatches_direct_transit_pick_without_stap(
     """
     source = _read_json(OPERATION_PLAN)
     allowed = {
-        "example1-piper0-transit-to-pick",
         "example1-piper1-wait-stable",
         "example1-piper0-pick",
     }
@@ -603,7 +604,7 @@ def test_complete_runtime_group_dispatches_direct_transit_pick_without_stap(
         if operation["operation_id"] in allowed
     ]
     operation_plan = dict(source)
-    operation_plan["plan_id"] = "direct-transit-pick-no-stap"
+    operation_plan["plan_id"] = "direct-pick-no-stap"
     operation_plan["operations"] = operations
     operation_plan["evidence_requirements"] = [
         requirement
@@ -617,18 +618,13 @@ def test_complete_runtime_group_dispatches_direct_transit_pick_without_stap(
         and dependency["successor_operation_id"] in allowed
     ]
     operation_plan["execution_layers"] = [
-        [
-            "example1-piper0-transit-to-pick",
-            "example1-piper1-wait-stable",
-        ],
-        ["example1-piper0-pick"],
+        ["example1-piper1-wait-stable", "example1-piper0-pick"],
     ]
     operation_plan["planned_schedule"] = [
         [
-            {"operation_id": "example1-piper0-transit-to-pick", "robot_id": "piper_0"},
             {"operation_id": "example1-piper1-wait-stable", "robot_id": "piper_1"},
+            {"operation_id": "example1-piper0-pick", "robot_id": "piper_0"},
         ],
-        [{"operation_id": "example1-piper0-pick", "robot_id": "piper_0"}],
     ]
     plan_path = tmp_path / "direct-transit-pick.json"
     plan_path.write_text(json.dumps(operation_plan), encoding="utf-8")
@@ -670,6 +666,185 @@ def test_complete_runtime_group_dispatches_direct_transit_pick_without_stap(
     assert preflight["dispatch"]["stap_authorization"] is None
     assert preflight["checks"]["runtime_created"] is False
     assert preflight["checks"]["stap_source_plan_provided"] is False
+
+
+def _direct_handover_plan(*, with_pick: bool) -> dict:
+    """Build a direct HANDOVER plan without requiring a PICK predecessor.
+
+    Args:
+        with_pick: Whether to include an explicit donor PICK operation.
+
+    Returns:
+        A strict plan for HANDOVER-only or sequential PICK and HANDOVER.
+    """
+    source = _read_json(OPERATION_PLAN)
+    pick = next(item for item in source["operations"] if item["skill"] == "PICK")
+    donor = pick["executor_robot_id"]
+    receiver = next(robot for robot in source["robots"] if robot != donor)
+    physical_id = pick["target"]["physical_instance_id"]
+    handover = {
+        "operation_id": "direct-handover",
+        "source_task_id": pick["source_task_id"],
+        "skill": "HANDOVER",
+        "executor_robot_id": receiver,
+        "participants": [donor, receiver],
+        "role_bindings": {"executor": receiver, "donor": donor, "receiver": receiver},
+        "target": {
+            "physical_instance_id": physical_id,
+            "donor_robot_id": donor,
+            "receiver_robot_id": receiver,
+        },
+        "parameters": {
+            "grasp_profile_id": "brick-side-grasp-v1",
+            "co_hold_timeout_s": 10.0,
+            "follow_samples": 4,
+        },
+        "preconditions": [f"holding:{physical_id}"],
+        "effects": [f"holding:{physical_id}"],
+        "resources": [f"robot:{donor}", f"robot:{receiver}", f"part:{physical_id}"],
+        "evidence_requirements": [
+            "receiver_free_space",
+            "receiver_grasp_feedback",
+            "co_hold_confirmed",
+            "scene_transfer_committed",
+            "donor_release_feedback",
+            "receiver_holding_follow",
+            "owner_transfer_committed",
+        ],
+    }
+    operations = [pick, handover] if with_pick else [handover]
+    return {
+        "schema": source["schema"],
+        "plan_id": "direct-pick-handover" if with_pick else "direct-handover-only",
+        "source_plan_id": source["source_plan_id"],
+        "robots": source["robots"],
+        "operations": operations,
+        "dependencies": [
+            {
+                "predecessor_operation_id": pick["operation_id"],
+                "successor_operation_id": handover["operation_id"],
+                "reason": "confirmed donor holding before transfer",
+            }
+        ] if with_pick else [],
+        "execution_layers": [[item["operation_id"]] for item in operations],
+        "planned_schedule": [
+            [{
+                "operation_id": item["operation_id"],
+                "robot_id": item["executor_robot_id"],
+            }]
+            for item in operations
+        ],
+        "evidence_requirements": [
+            {
+                "operation_id": item["operation_id"],
+                "evidence": item["evidence_requirements"][0],
+            }
+            for item in operations
+        ],
+    }
+
+
+@pytest.mark.parametrize(
+    "with_pick", [False, True], ids=["handover-only", "pick-handover"]
+)
+@pytest.mark.parametrize("preflight_only", [False, True], ids=["dispatch", "preflight"])
+def test_direct_handover_routes_without_stap(
+    tmp_path: Path,
+    session_guard: list[tuple[object, ...]],
+    monkeypatch: pytest.MonkeyPatch,
+    with_pick: bool,
+    preflight_only: bool,
+) -> None:
+    """HANDOVER reaches dispatch without STAP; preflight never starts runtime.
+
+    A sentinel failure proves routing only, not motion or physical holding.
+    The real backend must still verify donor holding and all transfer evidence.
+    """
+    plan = tmp_path / "handover.json"
+    plan.write_text(
+        json.dumps(_direct_handover_plan(with_pick=with_pick)), encoding="utf-8"
+    )
+    # HANDOVER-only does not promise to assemble the pending example1 part.
+    # This structural fixture is not evidence of donor holding at runtime.
+    complete_start = tmp_path / "complete-start.json"
+    complete_start.write_bytes(TASK_GOAL.read_bytes())
+    calls: list[object] = []
+
+    def dispatch(args, record, recorder, contract, stap_plan):
+        calls.append(stap_plan)
+        assert record["checks"]["direct_runtime_skills_supported"] is True
+        assert record["checks"]["tcp_resolved"] is True
+        return (
+            RunStatus.RUNTIME_START_FAILED,
+            "offline dispatch sentinel; no runtime created",
+        )
+
+    monkeypatch.setattr(piper_run, "_robot_operation_plan_phase", dispatch)
+    run_dir = tmp_path / "run"
+    code, line, _ = _invoke(
+        _structure_argv(
+            run_dir, goal=TASK_GOAL,
+            start=TASK_START if with_pick else complete_start, plan=plan,
+            preflight_only=preflight_only,
+        )
+    )
+    expected = (
+        RunStatus.PREFLIGHT_ONLY if preflight_only else RunStatus.RUNTIME_START_FAILED
+    )
+    assert line["status"] == expected, line
+    assert code == EXIT_CODES[expected], line
+    assert calls == ([] if preflight_only else [None])
+    assert session_guard == []
+    evidence_dir = Path(line["result_path"]).parent
+    preflight = _read_json(evidence_dir / "preflight.json")
+    assert preflight["robot_operation_plan"]["source_plan_bound"] is False
+    captured_plan = evidence_dir / "robot-operation-plan.json"
+    assert captured_plan.read_bytes() == plan.read_bytes()
+    _assert_no_motion_claim(evidence_dir)
+
+
+@pytest.mark.parametrize("rejection", ["bad-roles", "tcp-denied", "removed-transit"])
+def test_direct_handover_preserves_pre_dispatch_gates(
+    tmp_path: Path,
+    session_guard: list[tuple[object, ...]],
+    monkeypatch: pytest.MonkeyPatch,
+    rejection: str,
+) -> None:
+    """Adding HANDOVER does not bypass strict roles, TCP or TRANSIT rejection."""
+    document = _direct_handover_plan(with_pick=False)
+    if rejection == "bad-roles":
+        document["operations"][0]["role_bindings"]["donor"] = "foreign-robot"
+    elif rejection == "removed-transit":
+        document["operations"][0]["skill"] = "TRANSIT"
+    else:
+        def deny_tcp(contract):
+            raise piper_run.UnresolvedTcpError("offline TCP denial")
+
+        monkeypatch.setattr(piper_run, "require_resolved_tcp", deny_tcp)
+    plan = tmp_path / "handover.json"
+    plan.write_text(json.dumps(document), encoding="utf-8")
+    complete_start = tmp_path / "complete-start.json"
+    complete_start.write_bytes(TASK_GOAL.read_bytes())
+    calls: list[object] = []
+
+    def forbidden_dispatch(*args, **kwargs):
+        calls.append(args)
+        raise AssertionError("rejected direct plan reached runtime dispatch")
+
+    monkeypatch.setattr(piper_run, "_robot_operation_plan_phase", forbidden_dispatch)
+    code, line, _ = _invoke(_structure_argv(
+        tmp_path / "run", goal=TASK_GOAL, start=complete_start,
+        plan=plan, preflight_only=False,
+    ))
+    expected = (
+        RunStatus.UNRESOLVED_TCP
+        if rejection == "tcp-denied" else RunStatus.INVALID_INPUT
+    )
+    assert line["status"] == expected, line
+    assert code == EXIT_CODES[expected], line
+    assert calls == []
+    assert session_guard == []
+    _assert_no_motion_claim(Path(line["result_path"]).parent)
 
 
 def test_omitted_and_empty_start_mean_empty_and_fail_closed(

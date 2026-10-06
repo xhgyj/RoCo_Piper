@@ -207,12 +207,18 @@ def _running_inside_kit() -> bool:
 def _argv_from_args(args: argparse.Namespace) -> list[str]:
     """Rebuild the bridge CLI argv from parsed arguments."""
     argv = [
-        "--max-steps", str(args.max_steps),
-        "--time-limit", str(args.time_limit),
-        "--ready-timeout", str(args.ready_timeout),
-        "--hold-steps", str(args.hold_steps),
-        "--hold-seconds", str(args.hold_seconds),
-        "--evidence-out", str(args.evidence_out),
+        "--max-steps",
+        str(args.max_steps),
+        "--time-limit",
+        str(args.time_limit),
+        "--ready-timeout",
+        str(args.ready_timeout),
+        "--hold-steps",
+        str(args.hold_steps),
+        "--hold-seconds",
+        str(args.hold_seconds),
+        "--evidence-out",
+        str(args.evidence_out),
     ]
     for flag, value in (
         ("--scene-manifest", args.scene_manifest),
@@ -242,7 +248,8 @@ def _kit_launch_argv(args: argparse.Namespace) -> list[str]:
     exec_args = [str(BRIDGE_FILE), *_argv_from_args(args)]
     argv = [
         KIT_EXPERIENCE,
-        "--disable", "isaacsim.ros2.bridge",
+        "--disable",
+        "isaacsim.ros2.bridge",
         # exp.full points isaac.startup at the ros2 bridge; an empty override
         # keeps the startup sequence from re-enabling the disabled extension.
         "--/isaac/startup/ros_bridge_extension=",
@@ -435,18 +442,15 @@ def _gripper_observation(gripper_positions: Mapping[str, float]) -> dict:
 
 
 def _scene_rigid_pose(raw: Mapping[str, Sequence[float]]) -> dict:
-    if not isinstance(raw, Mapping) or set(raw) != {
-        "position_xyz", "orientation_xyzw"
-    }:
+    if not isinstance(raw, Mapping) or set(raw) != {"position_xyz", "orientation_xyzw"}:
         raise ValueError("scene rigid pose must carry position and orientation")
     try:
         position = tuple(raw["position_xyz"])
     except (TypeError, KeyError) as exc:
         raise ValueError("scene rigid pose position must be a 3-vector") from exc
-    if (
-        len(position) != 3
-        or any(type(value) not in (int, float) or not math.isfinite(value)
-               for value in position)
+    if len(position) != 3 or any(
+        type(value) not in (int, float) or not math.isfinite(value)
+        for value in position
     ):
         raise ValueError("scene rigid pose position must be finite")
     position = [float(value) for value in position]
@@ -456,10 +460,11 @@ def _scene_rigid_pose(raw: Mapping[str, Sequence[float]]) -> dict:
         raise ValueError("scene rigid pose orientation must be unit xyzw") from exc
     if (
         len(orientation) != 4
-        or any(type(value) not in (int, float) or not math.isfinite(value)
-               for value in orientation)
-        or abs(math.sqrt(sum(float(value) ** 2 for value in orientation)) - 1.0)
-        > 1e-3
+        or any(
+            type(value) not in (int, float) or not math.isfinite(value)
+            for value in orientation
+        )
+        or abs(math.sqrt(sum(float(value) ** 2 for value in orientation)) - 1.0) > 1e-3
     ):
         raise ValueError("scene rigid pose orientation must be unit xyzw")
     return {
@@ -488,15 +493,16 @@ def _compose_scene_poses(parent: Mapping, child: Mapping) -> dict:
     rotated = _scene_quaternion_multiply(
         _scene_quaternion_multiply(parent_q, [*child_position, 0.0]), inverse
     )
-    return _scene_rigid_pose({
-        "position_xyz": [
-            parent["position_xyz"][index] + rotated[index]
-            for index in range(3)
-        ],
-        "orientation_xyzw": _scene_quaternion_multiply(
-            parent_q, child["orientation_xyzw"]
-        ),
-    })
+    return _scene_rigid_pose(
+        {
+            "position_xyz": [
+                parent["position_xyz"][index] + rotated[index] for index in range(3)
+            ],
+            "orientation_xyzw": _scene_quaternion_multiply(
+                parent_q, child["orientation_xyzw"]
+            ),
+        }
+    )
 
 
 def scene_snapshot_digest(document: Mapping[str, object]) -> str:
@@ -584,9 +590,7 @@ def build_scene_state_document(
     connections: dict[str, bool] = {}
     for pair_key, connected in connection_results.items():
         if not isinstance(pair_key, str) or not pair_key:
-            raise ValueError(
-                f"connection key must be a non-empty string: {pair_key!r}"
-            )
+            raise ValueError(f"connection key must be a non-empty string: {pair_key!r}")
         if not isinstance(connected, bool):
             raise ValueError(f"connection {pair_key} value must be a bool")
         connections[pair_key] = connected
@@ -605,10 +609,7 @@ def build_scene_state_document(
         if not isinstance(robot_grippers, Mapping) or not robot_grippers:
             raise ValueError("robot_grippers must be a non-empty mapping")
         for robot_id, fingers in robot_grippers.items():
-            if (
-                type(robot_id) is not str
-                or not ROBOT_ID_PATTERN.fullmatch(robot_id)
-            ):
+            if type(robot_id) is not str or not ROBOT_ID_PATTERN.fullmatch(robot_id):
                 raise ValueError(
                     f"robot id must be a ROS-safe non-empty string: {robot_id!r}"
                 )
@@ -631,11 +632,13 @@ def build_scene_state_document(
             or sequence < 0
         ):
             raise ValueError("scene pose provenance or instance set is invalid")
-        document.update({
-            "session_id": session_id,
-            "manifest_sha256": manifest_sha256,
-            "sequence": sequence,
-        })
+        document.update(
+            {
+                "session_id": session_id,
+                "manifest_sha256": manifest_sha256,
+                "sequence": sequence,
+            }
+        )
         for instance_id, raw in brick_poses.items():
             bricks[instance_id]["pose"] = _scene_rigid_pose(raw)
         for robot_id, raw in robot_tcp_poses.items():
@@ -1004,9 +1007,7 @@ class RobotChannel:
         floats = [float(value) for value in positions]
         if any(value != value for value in floats):
             self.positions_nan += 1
-        message = self.joint_state_message(
-            sim_time_s, floats, self._joint_velocities()
-        )
+        message = self.joint_state_message(sim_time_s, floats, self._joint_velocities())
         self.joint_state_publisher.publish(message)
         self.joint_states_published += 1
         # Diagnostic twin with static content isolates payload-content issues
@@ -1094,16 +1095,23 @@ class RobotChannel:
             gravity_values = gravity[0]
             measured = [float(x) for x in efforts]
             model = [float(x) for x in gravity_values]
-            if len(measured) != len(self._dof_names) or len(model) != len(self._dof_names):
+            if len(measured) != len(self._dof_names) or len(model) != len(
+                self._dof_names
+            ):
                 raise ValueError("dynamics joint vector length mismatch")
             if not all(math.isfinite(x) for x in measured + model):
                 raise ValueError("nonfinite dynamics feedback")
-            return {"available": True, "robot_id": self.robot_id,
-                    "gravity_feedforward_enabled": self.gravity_feedforward,
-                    "applied_gravity_efforts": list(self.gravity_efforts),
-                    "joint_names": list(self._dof_names),
-                    "measured_efforts": measured, "gravity_compensation_efforts": model,
-                    "source": "physx_articulation", "tcp_wrench_calibrated": False}
+            return {
+                "available": True,
+                "robot_id": self.robot_id,
+                "gravity_feedforward_enabled": self.gravity_feedforward,
+                "applied_gravity_efforts": list(self.gravity_efforts),
+                "joint_names": list(self._dof_names),
+                "measured_efforts": measured,
+                "gravity_compensation_efforts": model,
+                "source": "physx_articulation",
+                "tcp_wrench_calibrated": False,
+            }
         except Exception as error:
             return {"available": False, "reason": f"{type(error).__name__}: {error}"}
 
@@ -1119,8 +1127,12 @@ class RobotChannel:
         positions = self._robot.get_joint_positions()
         prefix = "" if self.robot_id is None else f"{self.robot_id}_"
         return {
-            GRIPPER_JOINT_1: float(positions[self._dof_index[prefix + GRIPPER_JOINT_1]]),
-            GRIPPER_JOINT_2: float(positions[self._dof_index[prefix + GRIPPER_JOINT_2]]),
+            GRIPPER_JOINT_1: float(
+                positions[self._dof_index[prefix + GRIPPER_JOINT_1]]
+            ),
+            GRIPPER_JOINT_2: float(
+                positions[self._dof_index[prefix + GRIPPER_JOINT_2]]
+            ),
         }
 
 
@@ -1146,15 +1158,13 @@ def collect_counter_evidence(
         "received": sum(channel.commands_received for channel in channels),
         "applied": sum(channel.commands_applied for channel in channels),
         "clamped_to_limits": sum(channel.commands_clamped for channel in channels),
-        "unknown_joint_names_ignored": sorted({
-            name for channel in channels for name in channel.unknown_joint_names
-        }),
+        "unknown_joint_names_ignored": sorted(
+            {name for channel in channels for name in channel.unknown_joint_names}
+        ),
     }
     publish_totals = {
         "clock": clock_published,
-        "joint_states": sum(
-            channel.joint_states_published for channel in channels
-        ),
+        "joint_states": sum(channel.joint_states_published for channel in channels),
         "joint_states_diag": sum(
             channel.joint_states_diag_published for channel in channels
         ),
@@ -1322,12 +1332,22 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         )
     if args.hold_steps <= 0:
         parser.error("--hold-steps must be positive")
-    snapshot_args = (args.scene_manifest, args.scene_snapshot_out, args.host_instance_id)
-    if any(value is not None for value in snapshot_args) and not all(value is not None for value in snapshot_args):
-        parser.error("--scene-manifest, --scene-snapshot-out and --host-instance-id must be provided together")
+    snapshot_args = (
+        args.scene_manifest,
+        args.scene_snapshot_out,
+        args.host_instance_id,
+    )
+    if any(value is not None for value in snapshot_args) and not all(
+        value is not None for value in snapshot_args
+    ):
+        parser.error(
+            "--scene-manifest, --scene-snapshot-out and --host-instance-id must be provided together"
+        )
     if args.scene_manifest is not None and (args.plan is None or args.config is None):
         parser.error("scene snapshot mode requires --plan and --config")
-    if args.scene_manifest is None and (args.plan is not None or args.config is not None):
+    if args.scene_manifest is None and (
+        args.plan is not None or args.config is not None
+    ):
         parser.error("--plan and --config require scene snapshot mode")
     if args.structure_start is not None and args.structure_goal is None:
         parser.error("--structure-start requires --structure-goal")
@@ -1336,12 +1356,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     if (
         args.structure_goal is not None or args.structure_start is not None
     ) and args.scene_manifest is None:
-        parser.error(
-            "--structure-goal/--structure-start require scene snapshot mode"
-        )
-    if any(type(item) is not str or not item for item in args.physics_filter_instance_id):
+        parser.error("--structure-goal/--structure-start require scene snapshot mode")
+    if any(
+        type(item) is not str or not item for item in args.physics_filter_instance_id
+    ):
         parser.error("--physics-filter-instance-id values must be non-empty strings")
-    if len(set(args.physics_filter_instance_id)) != len(args.physics_filter_instance_id):
+    if len(set(args.physics_filter_instance_id)) != len(
+        args.physics_filter_instance_id
+    ):
         parser.error("--physics-filter-instance-id values must be unique")
     if args.physics_filter_instance_id and args.physics_filter_robot_id is None:
         parser.error("physics filter instance ids require --physics-filter-robot-id")
@@ -1367,8 +1389,12 @@ def initial_evidence(args: argparse.Namespace) -> dict:
     robot_only = args.scene_manifest is None
     evidence: dict = {
         "scene_snapshot": {
-            "requested": args.scene_manifest is not None and args.scene_snapshot_out is not None and args.host_instance_id is not None,
-            "status": "REQUESTED" if args.scene_manifest is not None else "NOT_REQUESTED",
+            "requested": args.scene_manifest is not None
+            and args.scene_snapshot_out is not None
+            and args.host_instance_id is not None,
+            "status": "REQUESTED"
+            if args.scene_manifest is not None
+            else "NOT_REQUESTED",
         },
         "scene_runtime": {
             "plan_path": str(args.plan) if args.plan is not None else None,
@@ -1555,9 +1581,7 @@ class InProcessBridge:
         # Same single node, no second DDS participant: the scene-state query
         # service the MoveIt container calls during skill confirmation.
         self.scene_state_service_created = False
-        self.node.create_service(
-            Trigger, SCENE_STATE_SERVICE, self._on_scene_state
-        )
+        self.node.create_service(Trigger, SCENE_STATE_SERVICE, self._on_scene_state)
         self.scene_state_service_created = True
 
     @property
@@ -1606,8 +1630,7 @@ class InProcessBridge:
             robot-only channel contributes the None key (no validated id).
         """
         return {
-            channel.robot_id: channel.gripper_positions()
-            for channel in self._channels
+            channel.robot_id: channel.gripper_positions() for channel in self._channels
         }
 
     def _scene_state_ready(self) -> bool:
@@ -1636,7 +1659,10 @@ class InProcessBridge:
         stage = omni.usd.get_context().get_stage()
         cache = UsdGeom.BBoxCache(Usd.TimeCode.Default(), [UsdGeom.Tokens.default_])
         aabbs: dict[str, tuple[tuple[float, ...], tuple[float, ...]]] = {}
-        for instance_id, prim_path in self._state.runtime_host.physical_instance_paths.items():
+        for (
+            instance_id,
+            prim_path,
+        ) in self._state.runtime_host.physical_instance_paths.items():
             prim = stage.GetPrimAtPath(prim_path)
             if not prim.IsValid():
                 raise RuntimeError(f"missing runtime prim: {instance_id}")
@@ -1647,6 +1673,75 @@ class InProcessBridge:
             )
         return aabbs
 
+    def _environment_colliders(self) -> dict[str, object]:
+        """Measure leaf collision geometry, never aggregate room bounds.
+
+        Returns:
+            Leaf collider AABBs in the shared assembly-world frame.
+
+        Raises:
+            RuntimeError: If an enabled collision aggregate has no measurable
+                leaf geometry or a leaf has an empty bound.
+        """
+        import omni.usd
+        from pxr import Usd, UsdGeom, UsdPhysics
+
+        stage = omni.usd.get_context().get_stage()
+        cache = UsdGeom.BBoxCache(Usd.TimeCode.Default(), [UsdGeom.Tokens.default_])
+        excluded = tuple(
+            self._state.runtime_host.physical_instance_paths.values()
+        ) + tuple(channel.prim_path for channel in self._channels)
+
+        def collision_enabled(prim: object) -> bool:
+            if not prim.HasAPI(UsdPhysics.CollisionAPI):
+                return False
+            attribute = UsdPhysics.CollisionAPI(prim).GetCollisionEnabledAttr()
+            value = attribute.Get()
+            return value is not False
+
+        def subtree_geometries(prim: object) -> list[object]:
+            """Return the prim's strict-subtree Gprims via ``Usd.PrimRange``.
+
+            ``Usd.Prim`` has no ``GetDescendants``; the subtree walk must use
+            ``Usd.PrimRange(prim)``, which yields the prim itself first.
+            """
+            return [
+                descendant
+                for descendant in Usd.PrimRange(prim)
+                if descendant != prim and descendant.IsA(UsdGeom.Gprim)
+            ]
+
+        def is_geometry_leaf(prim: object, path: str) -> bool:
+            return (
+                "/colliders/" in path
+                and prim.IsA(UsdGeom.Gprim)
+                and not subtree_geometries(prim)
+            )
+
+        def has_geometry_descendant(prim: object) -> bool:
+            return bool(subtree_geometries(prim))
+
+        result: dict[str, object] = {}
+        for prim in stage.Traverse():
+            path = str(prim.GetPath())
+            if any(path == root or path.startswith(root + "/") for root in excluded):
+                continue
+            if not is_geometry_leaf(prim, path) and (
+                not collision_enabled(prim) or has_geometry_descendant(prim)
+            ):
+                continue
+            bounds = cache.ComputeWorldBound(prim).ComputeAlignedRange()
+            if bounds.IsEmpty():
+                raise RuntimeError(f"leaf environment collider has no bounds: {path}")
+            minimum = tuple(float(value) for value in bounds.GetMin())
+            maximum = tuple(float(value) for value in bounds.GetMax())
+            if any(high <= low for low, high in zip(minimum, maximum)):
+                raise RuntimeError(f"leaf environment collider is degenerate: {path}")
+            result[path] = {"aabb_min": list(minimum), "aabb_max": list(maximum)}
+        if not result:
+            raise RuntimeError("live environment has no leaf collision envelopes")
+        return result
+
     def _physx_pose(self, path: str, physics: object) -> dict:
         """Read one current rigid-body transform; missing physics fails closed.
 
@@ -1656,10 +1751,12 @@ class InProcessBridge:
         result = physics.get_rigidbody_transformation(path)
         if not isinstance(result, Mapping) or result.get("ret_val") is not True:
             raise RuntimeError(f"no live PhysX rigid transform at {path}")
-        return _scene_rigid_pose({
-            "position_xyz": result.get("position"),
-            "orientation_xyzw": result.get("rotation"),
-        })
+        return _scene_rigid_pose(
+            {
+                "position_xyz": result.get("position"),
+                "orientation_xyzw": result.get("rotation"),
+            }
+        )
 
     def _live_rigid_poses(self) -> tuple[dict, dict]:
         """Sample mapped bricks and calibrated TCPs in one service callback.
@@ -1672,8 +1769,7 @@ class InProcessBridge:
         physics = omni.physx.get_physx_interface()
         bricks = {
             instance_id: self._physx_pose(path, physics)
-            for instance_id, path in
-            self._state.runtime_host.physical_instance_paths.items()
+            for instance_id, path in self._state.runtime_host.physical_instance_paths.items()
         }
         transform = self._state.tcp_transform
         if transform is None:
@@ -1701,7 +1797,7 @@ class InProcessBridge:
         paths = self._state.runtime_host.physical_instance_paths
         connections: dict[str, bool] = {}
         for index, id_a in enumerate(instance_ids):
-            for id_b in instance_ids[index + 1:]:
+            for id_b in instance_ids[index + 1 :]:
                 connections[f"{id_a}|{id_b}"] = bool(
                     are_parts_connected(paths[id_a], paths[id_b])
                 )
@@ -1725,12 +1821,17 @@ class InProcessBridge:
             if lower not in paths or upper not in paths:
                 continue
             rotation, position = compute_connection_transform(
-                stud_path=paths[lower], stud_if=connection["stud_iface"],
-                hole_path=paths[upper], hole_if=connection["hole_iface"],
-                offset=tuple(connection["offset"]), yaw=connection["yaw"],
+                stud_path=paths[lower],
+                stud_if=connection["stud_iface"],
+                hole_path=paths[upper],
+                hole_if=connection["hole_iface"],
+                offset=tuple(connection["offset"]),
+                yaw=connection["yaw"],
             )
             # BrickSim returns WXYZ; scene rigid poses use XYZW.
-            part = getattr(self._state, "topology_parts", {}).get(connection["hole_id"], {})
+            part = getattr(self._state, "topology_parts", {}).get(
+                connection["hole_id"], {}
+            )
             payload = part.get("payload", {})
             symmetries = [0]
             if part.get("type") == "brick" and all(
@@ -1741,55 +1842,105 @@ class InProcessBridge:
             # Regular brick prototypes use a centred local origin; only their
             # verified C4 shape symmetries may substitute for the nominal yaw.
             live = lookup_physics_connection(
-                paths[lower], connection["stud_iface"], paths[upper], connection["hole_iface"]
+                paths[lower],
+                connection["stud_iface"],
+                paths[upper],
+                connection["hole_iface"],
             )
             actual = None
             if live is not None:
                 actual_rotation, actual_position = compute_connection_transform(
-                    paths[lower], live.stud_ifid, paths[upper], live.hole_ifid,
-                    tuple(live.offset), live.yaw,
+                    paths[lower],
+                    live.stud_ifid,
+                    paths[upper],
+                    live.hole_ifid,
+                    tuple(live.offset),
+                    live.yaw,
                 )
-                actual = {"stud_interface": live.stud_ifid,
-                          "hole_interface": live.hole_ifid,
-                          "offset": list(live.offset), "yaw": live.yaw,
-                          "lower_to_upper": {"position_xyz": list(actual_position),
-                           "orientation_xyzw": [actual_rotation[1], actual_rotation[2],
-                                                actual_rotation[3], actual_rotation[0]]}}
+                actual = {
+                    "stud_interface": live.stud_ifid,
+                    "hole_interface": live.hole_ifid,
+                    "offset": list(live.offset),
+                    "yaw": live.yaw,
+                    "lower_to_upper": {
+                        "position_xyz": list(actual_position),
+                        "orientation_xyzw": [
+                            actual_rotation[1],
+                            actual_rotation[2],
+                            actual_rotation[3],
+                            actual_rotation[0],
+                        ],
+                    },
+                }
             result["|".join(sorted((lower, upper)))] = {
+                "connection_id": connection.get("connection_id", connection.get("id")),
                 "actual_connection": actual,
                 "contact_force_n": None,
-                "stud_path": paths[lower], "hole_path": paths[upper],
+                "stud_path": paths[lower],
+                "hole_path": paths[upper],
                 "allowed_upper_yaw_quarter_turns": symmetries,
                 "upper_shape": {"type": part.get("type"), "payload": payload},
                 "lower_physical_instance_id": lower,
                 "upper_physical_instance_id": upper,
                 "lower_to_upper": {
                     "position_xyz": list(position),
-                    "orientation_xyzw": [rotation[1], rotation[2], rotation[3], rotation[0]],
+                    "orientation_xyzw": [
+                        rotation[1],
+                        rotation[2],
+                        rotation[3],
+                        rotation[0],
+                    ],
                 },
                 "stud_interface": connection["stud_iface"],
                 "hole_interface": connection["hole_iface"],
-                "offset": list(connection["offset"]), "yaw": connection["yaw"],
+                "offset": list(connection["offset"]),
+                "yaw": connection["yaw"],
             }
         thresholds = get_assembly_thresholds()
         diagnostics = []
         for info in get_assembly_debug_infos():
             if info.stud_path in paths.values() and info.hole_path in paths.values():
                 for pair in result.values():
-                    if info.stud_path == pair["stud_path"] and info.hole_path == pair["hole_path"]:
+                    if (
+                        info.stud_path == pair["stud_path"]
+                        and info.hole_path == pair["hole_path"]
+                    ):
                         pair["contact_force_n"] = float(info.projected_force)
-                diagnostics.append({name: getattr(info, name) for name in (
-                    "accepted", "relative_distance", "tilt", "projected_force",
-                    "yaw_error", "position_error", "grid_pos", "grid_pos_snapped",
-                    "stud_path", "hole_path", "stud_interface", "hole_interface",
-                )})
-        return {"pairs": result, "diagnostics": diagnostics, "thresholds": {
-            name: getattr(thresholds, name) for name in (
-                "enabled", "distance_tolerance", "max_penetration",
-                "z_angle_tolerance", "required_force", "yaw_tolerance",
-                "position_tolerance",
-            )
-        }}
+                diagnostics.append(
+                    {
+                        name: getattr(info, name)
+                        for name in (
+                            "accepted",
+                            "relative_distance",
+                            "tilt",
+                            "projected_force",
+                            "yaw_error",
+                            "position_error",
+                            "grid_pos",
+                            "grid_pos_snapped",
+                            "stud_path",
+                            "hole_path",
+                            "stud_interface",
+                            "hole_interface",
+                        )
+                    }
+                )
+        return {
+            "pairs": result,
+            "diagnostics": diagnostics,
+            "thresholds": {
+                name: getattr(thresholds, name)
+                for name in (
+                    "enabled",
+                    "distance_tolerance",
+                    "max_penetration",
+                    "z_angle_tolerance",
+                    "required_force",
+                    "yaw_tolerance",
+                    "position_tolerance",
+                )
+            },
+        }
 
     def _on_scene_state(self, request, response):
         """Fill the Trigger response with canonical per-robot scene-state JSON.
@@ -1831,11 +1982,7 @@ class InProcessBridge:
                     sim_time_s,
                     brick_aabbs,
                     connections,
-                    (
-                        next(iter(identified.values()))
-                        if len(identified) == 1
-                        else None
-                    ),
+                    (next(iter(identified.values())) if len(identified) == 1 else None),
                     robot_grippers=identified,
                     brick_poses=brick_poses,
                     robot_tcp_poses=robot_tcp_poses,
@@ -1858,9 +2005,29 @@ class InProcessBridge:
             return response
         for channel in self._channels:
             if channel.robot_id in document.get("robots", {}):
-                document["robots"][channel.robot_id]["dynamics"] = channel.dynamics_feedback()
+                document["robots"][channel.robot_id]["dynamics"] = (
+                    channel.dynamics_feedback()
+                )
         if getattr(self._state, "goal_connections", None) is not None:
             document["placement_interfaces"] = self._placement_interfaces()
+        if self._scene_state_ready():
+            try:
+                document["tcp_provenance"] = dict(self._state.tcp_provenance)
+                document["environment_colliders"] = self._environment_colliders()
+            except Exception as error:
+                response.success = False
+                response.message = _canonical_json(
+                    scene_state_error_document(str(error))
+                )
+                return response
+        payload = {
+            key: value for key, value in document.items() if key != "scene_digest"
+        }
+        document["scene_digest"] = hashlib.sha256(
+            json.dumps(
+                payload, sort_keys=True, separators=(",", ":"), allow_nan=False
+            ).encode("utf-8")
+        ).hexdigest()
         response.success = True
         response.message = _canonical_json(document)
         return response
@@ -1874,7 +2041,9 @@ class InProcessBridge:
         self._rclpy.spin_once(self.node, timeout_sec=0.0)
 
 
-async def run_bridge(args: argparse.Namespace, state: BridgeState, evidence: dict) -> None:
+async def run_bridge(
+    args: argparse.Namespace, state: BridgeState, evidence: dict
+) -> None:
     """Boot headless Kit, verify the bridge extension stayed disabled, then run.
 
     The isaacsim.ros2.bridge Kit extension is never enabled; the bundled
@@ -1960,7 +2129,9 @@ async def run_bridge(args: argparse.Namespace, state: BridgeState, evidence: dic
 
         try:
             plan_bytes = args.plan.read_bytes()
-            evidence["scene_runtime"]["plan_sha256"] = hashlib.sha256(plan_bytes).hexdigest()
+            evidence["scene_runtime"]["plan_sha256"] = hashlib.sha256(
+                plan_bytes
+            ).hexdigest()
             plan_document = json.loads(plan_bytes)
             if args.structure_dir is not None:
                 plan, structure_evidence = build_structure_scene_plan(args.structure_dir, plan_document)
@@ -2001,7 +2172,9 @@ async def run_bridge(args: argparse.Namespace, state: BridgeState, evidence: dic
             )
             state.runtime_host = runtime_host
             state.goal_connections = inputs.topology.expected_goal_connections
-            state.topology_parts = {part["id"]: part for part in inputs.topology.goal["parts"]}
+            state.topology_parts = {
+                part["id"]: part for part in inputs.topology.goal["parts"]
+            }
             state.instance_by_topology_id = inputs.topology.instance_by_topology_id
             state.app = runtime_host.app
             world = runtime_host.world
@@ -2051,30 +2224,30 @@ async def run_bridge(args: argparse.Namespace, state: BridgeState, evidence: dic
                 if channel.robot_id == binding_endpoint.robot_id
             )
             timeline = omni.timeline.get_timeline_interface()
-            evidence["scene_runtime"].update({
-                "robot_id": binding_endpoint.robot_id,
-                "robot_prim_path": binding_endpoint.prim_path,
-                "articulation_prim_path": (
-                    binding_endpoint.prim_path + ARTICULATION_SUFFIX
-                ),
-                "snapshot_binding_source": binding_source,
-                "snapshot_binding_note": (
-                    "the frozen scene snapshot binding describes one robot; "
-                    "pass --physics-filter-robot-id to designate it"
-                ),
-                "robots": {
-                    channel.robot_id: {
-                        "prim_path": channel.prim_path,
-                        "joint_states_topic": channel.joint_states_topic,
-                        "joint_command_topic": channel.joint_command_topic,
-                    }
-                    for channel in channels
-                },
-                "part_mapping": dict(runtime_host.physical_instance_paths),
-                "collision_filter_pairs": list(
-                    runtime_host.collision_filter_pairs
-                ),
-            })
+            evidence["scene_runtime"].update(
+                {
+                    "robot_id": binding_endpoint.robot_id,
+                    "robot_prim_path": binding_endpoint.prim_path,
+                    "articulation_prim_path": (
+                        binding_endpoint.prim_path + ARTICULATION_SUFFIX
+                    ),
+                    "snapshot_binding_source": binding_source,
+                    "snapshot_binding_note": (
+                        "the frozen scene snapshot binding describes one robot; "
+                        "pass --physics-filter-robot-id to designate it"
+                    ),
+                    "robots": {
+                        channel.robot_id: {
+                            "prim_path": channel.prim_path,
+                            "joint_states_topic": channel.joint_states_topic,
+                            "joint_command_topic": channel.joint_command_topic,
+                        }
+                        for channel in channels
+                    },
+                    "part_mapping": dict(runtime_host.physical_instance_paths),
+                    "collision_filter_pairs": list(runtime_host.collision_filter_pairs),
+                }
+            )
 
             manifest_generated = False
             if args.scene_manifest.is_file():
@@ -2089,14 +2262,11 @@ async def run_bridge(args: argparse.Namespace, state: BridgeState, evidence: dic
                 manifest_generated = True
             evidence["scene_runtime"]["scene_manifest"] = {
                 "path": str(args.scene_manifest),
-                "source": (
-                    "isaac_runtime_stage" if manifest_generated else "provided"
-                ),
+                "source": ("isaac_runtime_stage" if manifest_generated else "provided"),
                 "manifest_sha256": manifest.manifest_sha256,
             }
             manifest_map = {
-                item.physical_instance_id: item.prim_path
-                for item in manifest.objects
+                item.physical_instance_id: item.prim_path for item in manifest.objects
             }
             if manifest_map != dict(runtime_host.physical_instance_paths):
                 raise RuntimeError(
@@ -2126,10 +2296,18 @@ async def run_bridge(args: argparse.Namespace, state: BridgeState, evidence: dic
                 or transform.get("child_frame") != "rocobrick_tcp"
             ):
                 raise RuntimeError("project TCP calibration is not resolved")
-            state.tcp_transform = _scene_rigid_pose({
-                "position_xyz": transform.get("translation_m"),
-                "orientation_xyzw": transform.get("rotation_xyzw"),
-            })
+            state.tcp_provenance = {
+                "runtime_model_sha256": "a781d52f9d55291fca9c8f2695abf9e311640d996314d272f47639d5323e2375",
+                "source_sha256": hashlib.sha256(
+                    calibration_path.read_bytes()
+                ).hexdigest(),
+            }
+            state.tcp_transform = _scene_rigid_pose(
+                {
+                    "position_xyz": transform.get("translation_m"),
+                    "orientation_xyzw": transform.get("rotation_xyzw"),
+                }
+            )
 
             profile_path = Path(evidence["dds_profile"])
             profile_sha = hashlib.sha256(profile_path.read_bytes()).hexdigest()
@@ -2150,25 +2328,32 @@ async def run_bridge(args: argparse.Namespace, state: BridgeState, evidence: dic
             )
             snapshot = collect_stage_snapshot(stage, manifest, host_binding)
             write_snapshot_artifact_atomic(snapshot, args.scene_snapshot_out)
-            evidence["scene_snapshot"].update({
-                "status": "CAPTURED",
-                "path": str(args.scene_snapshot_out),
-                "snapshot_sha256": snapshot.snapshot_sha256,
-                "object_ids": [obj.physical_instance_id for obj in snapshot.objects],
-                "host_instance_id": args.host_instance_id,
-                "provenance": "runtime_host_bricksim_scene_pre_rclpy",
-            })
+            evidence["scene_snapshot"].update(
+                {
+                    "status": "CAPTURED",
+                    "path": str(args.scene_snapshot_out),
+                    "snapshot_sha256": snapshot.snapshot_sha256,
+                    "object_ids": [
+                        obj.physical_instance_id for obj in snapshot.objects
+                    ],
+                    "host_instance_id": args.host_instance_id,
+                    "provenance": "runtime_host_bricksim_scene_pre_rclpy",
+                }
+            )
         except Exception as exc:
             cause = exc.__cause__
-            evidence["scene_snapshot"].update({
-                "status": "FAILED",
-                "error": f"{type(exc).__name__}: {exc}",
-                "cause": (
-                    f"{type(cause).__name__}: {cause}"
-                    if cause is not None else None
-                ),
-                "provenance": "runtime_host_bricksim_scene_pre_rclpy",
-            })
+            evidence["scene_snapshot"].update(
+                {
+                    "status": "FAILED",
+                    "error": f"{type(exc).__name__}: {exc}",
+                    "cause": (
+                        f"{type(cause).__name__}: {cause}"
+                        if cause is not None
+                        else None
+                    ),
+                    "provenance": "runtime_host_bricksim_scene_pre_rclpy",
+                }
+            )
             raise
 
     if args.scene_manifest is None:
@@ -2206,8 +2391,11 @@ async def run_bridge(args: argparse.Namespace, state: BridgeState, evidence: dic
     # mostly stalls without it). Default ON; ROCOBRICK_GRAVITY_FEEDFORWARD=0
     # disables it for comparison runs. Read before any DDS resource exists.
     gravity_enabled = os.environ.get("ROCOBRICK_GRAVITY_FEEDFORWARD", "1") != "0"
-    evidence["gravity_feedforward"] = {"enabled": gravity_enabled,
-                                        "arm_limit_nm": 10.0, "finger_efforts": 0.0}
+    evidence["gravity_feedforward"] = {
+        "enabled": gravity_enabled,
+        "arm_limit_nm": 10.0,
+        "finger_efforts": 0.0,
+    }
     for channel in channels:
         channel.gravity_feedforward = gravity_enabled
         channel.record_dof_limits(
@@ -2220,9 +2408,7 @@ async def run_bridge(args: argparse.Namespace, state: BridgeState, evidence: dic
         "created": False,
     }
     render_enabled = os.environ.get("ROCOBRICK_HEADED") == "1"
-    bridge = InProcessBridge(
-        state, channels, robot_only=args.scene_manifest is None
-    )
+    bridge = InProcessBridge(state, channels, robot_only=args.scene_manifest is None)
     # The Kit child's interrupted path reads the live channel counters from
     # here before its final evidence write.
     state.bridge = bridge
@@ -2292,8 +2478,7 @@ async def run_bridge(args: argparse.Namespace, state: BridgeState, evidence: dic
         ready_document["joint_dofs"] = list(bridge.channels[0].joint_names)
     else:
         ready_document["robots"] = {
-            channel.robot_id: list(channel.joint_names)
-            for channel in bridge.channels
+            channel.robot_id: list(channel.joint_names) for channel in bridge.channels
         }
     print(json.dumps(ready_document, sort_keys=True), flush=True)
 
@@ -2335,9 +2520,7 @@ async def run_bridge(args: argparse.Namespace, state: BridgeState, evidence: dic
                 }
             )
     evidence["hold_samples"] = hold_samples
-    evidence.update(
-        collect_counter_evidence(bridge.channels, bridge.clock_published)
-    )
+    evidence.update(collect_counter_evidence(bridge.channels, bridge.clock_published))
 
     evidence["hold_completed"] = True
     evidence["hold"] = {
@@ -2348,16 +2531,18 @@ async def run_bridge(args: argparse.Namespace, state: BridgeState, evidence: dic
     evidence["steps_total"] = steps
     if args.scene_manifest is not None:
         for channel in bridge.channels:
-            evidence["robots"][channel.robot_id].update({
-                "initialized": channel.initialized,
-                "joint_states_published": channel.joint_states_published,
-                "joint_states_diag_published": channel.joint_states_diag_published,
-                "positions_nan": channel.positions_nan,
-                "commands_received": channel.commands_received,
-                "commands_applied": channel.commands_applied,
-                "commands_clamped": channel.commands_clamped,
-                "unknown_joint_names_ignored": list(channel.unknown_joint_names),
-            })
+            evidence["robots"][channel.robot_id].update(
+                {
+                    "initialized": channel.initialized,
+                    "joint_states_published": channel.joint_states_published,
+                    "joint_states_diag_published": channel.joint_states_diag_published,
+                    "positions_nan": channel.positions_nan,
+                    "commands_received": channel.commands_received,
+                    "commands_applied": channel.commands_applied,
+                    "commands_clamped": channel.commands_clamped,
+                    "unknown_joint_names_ignored": list(channel.unknown_joint_names),
+                }
+            )
     # Persist before teardown: a native abort inside app.close() would
     # otherwise skip the finally-block write entirely.
     try:
@@ -2456,9 +2641,7 @@ def main(argv: list[str] | None = None) -> int:
             bridge = state.bridge
             if bridge is not None:
                 evidence.update(
-                    collect_counter_evidence(
-                        bridge.channels, bridge.clock_published
-                    )
+                    collect_counter_evidence(bridge.channels, bridge.clock_published)
                 )
             evidence["elapsed_s"] = round(time.monotonic() - started, 3)
             try:
@@ -2473,9 +2656,7 @@ def main(argv: list[str] | None = None) -> int:
             # An accepted early stop needs readiness, the orderly SIGINT
             # marker, no error and complete cleanup. Controller hold commands
             # remain in the counters but are not skill-operation dispatches.
-            evidence["early_stop_accepted"] = evaluate_early_stop_accepted(
-                evidence
-            )
+            evidence["early_stop_accepted"] = evaluate_early_stop_accepted(evidence)
             evidence["passed"] = evaluate_passed(evidence)
             try:
                 write_evidence(args.evidence_out, evidence)

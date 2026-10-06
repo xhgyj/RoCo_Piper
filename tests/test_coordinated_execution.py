@@ -4,6 +4,7 @@
 # ruff: noqa: D101, D102, D103, D105
 
 from dataclasses import dataclass
+from threading import Barrier
 
 import pytest
 
@@ -61,6 +62,28 @@ def operation() -> CoordinatedOperation:
         ),
         start_at_sim_time_s=10.0,
     )
+
+
+def test_start_calls_participants_concurrently_at_shared_barrier():
+    """A participant cannot finish start before the peer enters start."""
+    barrier = Barrier(2)
+    entered = []
+
+    @dataclass
+    class BarrierParticipant(Participant):
+        def start(self, *, start_at_sim_time_s):
+            entered.append(start_at_sim_time_s)
+            barrier.wait(timeout=1.0)
+            self.calls.append("start")
+            return {"started": True, "terminal": True, "safe": True}
+
+    first = BarrierParticipant()
+    second = BarrierParticipant()
+    result = CoordinatedExecutionCoordinator(
+        {"piper_0": first, "piper_1": second}
+    ).execute(operation())
+    assert result.started is True
+    assert entered == [10.0, 10.0]
 
 
 def test_prepare_failure_never_starts_and_cancels_all():

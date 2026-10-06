@@ -687,6 +687,7 @@ def write_stap_plan(path: Path) -> Path:
 
 def config_kwargs(tmp_path: Path) -> dict:
     """The shared valid configuration arguments of the session under test."""
+    (tmp_path / "user-config.json").write_bytes((ROOT / "config/user_config.json").read_bytes())
     return {
         "repo_root": ROOT,
         "robot_ids": ROBOTS,
@@ -1923,6 +1924,7 @@ def test_the_read_only_whitelist_covers_every_operation_kind():
         "GRIPPER_TARGET",
         "APPLY_PLANNING_SCENE",
         "ATTACH_PLANNING_SCENE",
+        "TRANSFER_ATTACHED_PLANNING_SCENE",
     }
 
 

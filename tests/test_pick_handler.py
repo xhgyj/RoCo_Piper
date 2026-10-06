@@ -192,7 +192,7 @@ def test_pick_planning_scene_includes_protected_ground_box() -> None:
     boxes = {box["object_id"]: box for box in payload["boxes"]}
     assert set(boxes) == {"brick-a", "piper_0_ground"}
     ground = boxes["piper_0_ground"]
-    assert ground["frame_id"] == "piper_0_world"
+    assert ground["frame_id"] == "dual_world"
     assert ground["minimum_m"] == (-1.0, -1.2, -0.021)
     assert ground["maximum_m"] == (1.0, 0.8, -0.001)
     assert set(map(tuple, payload["allowed_collision_pairs"])) == {

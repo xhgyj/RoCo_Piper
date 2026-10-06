@@ -74,14 +74,13 @@ from rocobrick.skills.targets import (
     world_orientation_to_base,
     world_position_to_base,
 )
-from rocobrick.transit_adapter import (
-    MotionExecution,
-    TransitContext,
-    resolve_transit_target,
-)
+from rocobrick.transit_adapter import TransitContext
 from rocobrick.unified_dual_arm_runtime import (
+    SharedSceneSnapshot,
     SuccessorPrePhaseEvidence,
     SuccessorPrePhaseRequest,
+    TerminalPrePhasePolicy,
+    failed_pre_phase,
 )
 
 SCENE_STATE_SCHEMA = "rocobrick-scene-state/v1"
@@ -89,11 +88,13 @@ GRIPPER_JOINT_NAMES = ("gripper_joint1", "gripper_joint2")
 
 WAIT = "WAIT"
 PICK = "PICK"
-TRANSIT = "TRANSIT"
 PLACE_DOWN = "PLACE_DOWN"
 PLACE_UP = "PLACE_UP"
 SUPPORT_TOP = "SUPPORT_TOP"
-MOTION_SKILLS = frozenset({PICK, TRANSIT, PLACE_DOWN, PLACE_UP, SUPPORT_TOP})
+HANDOVER = "HANDOVER"
+MOTION_SKILLS = frozenset(
+    {PICK, HANDOVER, PLACE_DOWN, PLACE_UP, SUPPORT_TOP}
+)
 
 LABEL_REAL_SCENE_OBSERVATION = "real_scene_observation"
 LABEL_WAIT_DURATION_CONFIRMED = "wait_duration_confirmed"
@@ -126,7 +127,9 @@ _REF_KEYS = frozenset(
 )
 _REF_KINDS = frozenset({"robot_current", "robot_home", "part", "connection"})
 _PICK_KEYS = frozenset({"physical_instance_id"})
-_TRANSIT_KEYS = frozenset({"from", "to", "carrying_physical_instance_id"})
+_HANDOVER_KEYS = frozenset(
+    {"physical_instance_id", "donor_robot_id", "receiver_robot_id"}
+)
 _PLACE_DOWN_KEYS = frozenset(
     {
         "connection_id",
@@ -358,14 +361,12 @@ def _target_valid(skill: str, target: object, executor_robot_id: str) -> bool:
         return False
     if skill == PICK:
         return set(target) == _PICK_KEYS and _text(target["physical_instance_id"])
-    if skill == TRANSIT:
-        if set(target) != _TRANSIT_KEYS:
-            return False
-        carrying = target["carrying_physical_instance_id"]
-        if carrying is not None and not _text(carrying):
-            return False
-        return all(
-            _reference_valid(target[key], executor_robot_id) for key in ("from", "to")
+    if skill == HANDOVER:
+        return (
+            set(target) == _HANDOVER_KEYS
+            and all(_text(target[key]) for key in _HANDOVER_KEYS)
+            and target["donor_robot_id"] != target["receiver_robot_id"]
+            and executor_robot_id == target["receiver_robot_id"]
         )
     if skill == PLACE_DOWN:
         return set(target) == _PLACE_DOWN_KEYS and all(
@@ -641,6 +642,7 @@ class SkillOperationExecutor:
         place_backends: Mapping[str, object] | None = None,
         place_up_backends: Mapping[str, object] | None = None,
         support_backends: Mapping[str, object] | None = None,
+        handover_backend: object | None = None,
         coordinated_layer_transport: object | None = None,
         pre_phase_runtime: object | None = None,
         state_ledger: OperationStateLedger | None = None,
@@ -705,6 +707,7 @@ class SkillOperationExecutor:
         self._place_backends = dict(place_backends or {})
         self._place_up_backends = dict(place_up_backends or {})
         self._support_backends = dict(support_backends or {})
+        self._handover_backend = handover_backend
         self._coordinated_layer_transport = coordinated_layer_transport
         self._pre_phase_runtime = pre_phase_runtime
         self._state_ledger = state_ledger
@@ -822,61 +825,80 @@ class SkillOperationExecutor:
             targets[robot_id] = _tcp_target_mapping(targets_data.preplace, robot_id)
         return targets
 
+    async def observe_pre_phase(
+        self, participants: tuple[str, ...]
+    ) -> SharedSceneSnapshot:
+        """Read one authorized shared snapshot, never synthesize it from robot queries.
+
+        Returns:
+            An admitted snapshot supplied by the unified transport.
+        """
+        observe = getattr(self._pre_phase_runtime, "observe_pre_phase", None)
+        if not callable(observe):
+            raise RuntimeError("unified shared snapshot admission is unavailable")
+        snapshot = await observe(participants)
+        if not isinstance(snapshot, SharedSceneSnapshot):
+            raise RuntimeError("unified transport returned an invalid shared snapshot")
+        return snapshot
+
     async def execute_pre_phase(
         self, request: SuccessorPrePhaseRequest
     ) -> SuccessorPrePhaseEvidence:
-        """Derive successor targets from live state and call unified runtime."""
-        runtime = self._pre_phase_runtime
-        execute = getattr(runtime, "execute_pre_phase", None)
+        """Dispatch the original operation and shared snapshot without rewriting input.
+
+        Returns:
+            Strict bound physical evidence or fail-closed evidence.
+        """
+        execute = getattr(self._pre_phase_runtime, "execute_pre_phase", None)
         if not callable(execute):
-            return SuccessorPrePhaseEvidence(
-                predecessor_operation_id=request.predecessor_operation_id,
-                successor_operation_ids=request.successor_operation_ids,
-                participants=request.participants,
-                scene_digest=request.scene_digest,
-                planned=False,
-                executed=False,
-                terminal=False,
-                safe=False,
-                resource_transfer_confirmed=False,
-                evidence={"pre_phase_error": "unified runtime unavailable"},
-                terminal_cleanup=request.terminal_cleanup,
-                reason="unified dual-arm runtime unavailable",
-            )
-        enriched = request
-        if request.successor_operations:
-            observations = {
-                robot_id: await self._observe_or_cancel(robot_id, asyncio.Event()) or {}
-                for robot_id in request.participants
-            }
-            targets = self._derive_successor_targets(request, observations)
-            successors = tuple(
-                replace(
-                    operation,
-                    parameters={**operation.parameters, "pre_phase_targets": targets},
-                )
-                for operation in request.successor_operations
-            )
-            enriched = replace(request, successor_operations=successors)
-        raw = execute(enriched)
-        if inspect.isawaitable(raw):
-            raw = await raw
+            return failed_pre_phase(request, "unified dual-arm runtime unavailable")
+        raw = await execute(request)
         if not isinstance(raw, SuccessorPrePhaseEvidence):
-            return SuccessorPrePhaseEvidence(
-                predecessor_operation_id=request.predecessor_operation_id,
-                successor_operation_ids=request.successor_operation_ids,
-                participants=request.participants,
-                scene_digest=request.scene_digest,
-                planned=False,
-                executed=False,
-                terminal=False,
-                safe=False,
-                resource_transfer_confirmed=False,
-                evidence={"pre_phase_error": "invalid unified runtime evidence"},
-                terminal_cleanup=request.terminal_cleanup,
-                reason="unified runtime returned invalid evidence",
+            return failed_pre_phase(
+                request, "unified runtime returned invalid evidence"
             )
         return raw
+
+    async def validate_pre_phase(
+        self, request: SuccessorPrePhaseRequest, evidence: SuccessorPrePhaseEvidence
+    ) -> bool:
+        """Validate live scene binding and reconcile physical facts before adoption.
+
+        Returns:
+            True only when scene binding and ledger continuity both hold.
+        """
+        validate = getattr(self._pre_phase_runtime, "validate_pre_phase", None)
+        if not callable(validate) or await validate(request, evidence) is not True:
+            return False
+        if self._state_ledger is None:
+            return False
+        self._state_ledger.reconcile_pre_phase(request, evidence)
+        return True
+
+    async def cancel_pre_phase(self, transition_id: str) -> Mapping[str, object]:
+        """Cancel the unified participant group rather than a completed predecessor.
+
+        Returns:
+            Explicit participant terminal-safety cancellation evidence.
+        """
+        cancel = getattr(self._pre_phase_runtime, "cancel_pre_phase", None)
+        if not callable(cancel):
+            return {"transition_id": transition_id, "terminal": False, "safe": False}
+        return await cancel(transition_id)
+
+    def terminal_pre_phase_policy(
+        self, operations: Sequence[RobotOperation]
+    ) -> TerminalPrePhasePolicy | None:
+        """Delegate the explicit terminal departure policy to the unified runtime.
+
+        Returns:
+            The runtime's authorized policy, or None when no explicit policy
+            source exists so the scheduler fails closed.
+        """
+        policy = getattr(self._pre_phase_runtime, "terminal_pre_phase_policy", None)
+        if not callable(policy):
+            return None
+        return policy(tuple(operations))
 
     def _derive_successor_targets(
         self,
@@ -894,11 +916,8 @@ class SkillOperationExecutor:
                 raise ValueError(f"successor pre-phase lacks context for {robot_id}")
             session_id = str(document.get("session_id", ""))
             manifest_sha = str(document.get("manifest_sha256", ""))
-            if operation.skill in {"PICK", "TRANSIT"}:
+            if operation.skill == "PICK":
                 physical_id = target.get("physical_instance_id")
-                destination = target.get("to")
-                if isinstance(destination, Mapping):
-                    physical_id = destination.get("physical_instance_id")
                 if not isinstance(physical_id, str) or not physical_id:
                     raise ValueError(
                         f"successor {operation.operation_id} lacks part target geometry"
@@ -921,6 +940,11 @@ class SkillOperationExecutor:
                 )
                 targets[robot_id] = _tcp_target_mapping(target_obj, robot_id)
                 continue
+            if operation.skill == "HANDOVER":
+                raise ValueError(
+                    "HANDOVER owns its receiver precontact free-space phase; "
+                    "it has no successor pre-phase transport"
+                )
             if operation.skill == "SUPPORT_TOP":
                 upper_id = target.get("upper_physical_instance_id")
                 if not isinstance(upper_id, str) or not upper_id:
@@ -1034,13 +1058,13 @@ class SkillOperationExecutor:
                     f"{REASON_TARGET_INVALID}: {skill} target does not match "
                     "the frozen shape",
                 )
-            if skill == TRANSIT and robot_id in self._transit_adapters:
-                return await self._run_motion_operation(
-                    operation, lambda: self._transit(operation, robot_id)
-                )
             if skill == PICK and robot_id in self._pick_backends:
                 return await self._run_motion_operation(
                     operation, lambda: self._pick(operation, robot_id)
+                )
+            if skill == HANDOVER and self._handover_backend is not None:
+                return await self._run_motion_operation(
+                    operation, lambda: self._handover(operation, robot_id)
                 )
             if skill == PLACE_DOWN and robot_id in self._place_backends:
                 return await self._run_motion_operation(
@@ -1174,43 +1198,20 @@ class SkillOperationExecutor:
             )
         record.cancel_event.set()
         if record.motion_sent:
-            adapter = self._transit_adapters.get(record.robot_id)
-            cancel = getattr(adapter, "cancel", None)
-            if not callable(cancel):
-                return CancelEvidence(
-                    operation_id=operation_id,
-                    acknowledged=True,
-                    terminal=False,
-                    safe=False,
-                    evidence={
-                        "cancel_error": "motion adapter has no cancel boundary",
-                        "motion_sent": True,
-                    },
-                )
-            try:
-                raw = await asyncio.to_thread(cancel, operation_id)
-            except Exception as exc:
-                return CancelEvidence(
-                    operation_id=operation_id,
-                    acknowledged=False,
-                    terminal=False,
-                    safe=False,
-                    evidence={"cancel_error": repr(exc), "motion_sent": True},
-                )
-            if not isinstance(raw, Mapping):
-                return CancelEvidence(
-                    operation_id=operation_id,
-                    acknowledged=False,
-                    terminal=False,
-                    safe=False,
-                    evidence={"cancel_error": "invalid motion cancel evidence"},
-                )
+            # TRANSIT adapters were removed with the TRANSIT skill; an active
+            # motion operation that may have sent commands can never prove a
+            # safe terminal state through this generic path, so fail closed.
             return CancelEvidence(
                 operation_id=operation_id,
-                acknowledged=raw.get("attempted") is True,
-                terminal=raw.get("terminal") is True,
-                safe=raw.get("safe") is True,
-                evidence=dict(raw),
+                acknowledged=True,
+                terminal=False,
+                safe=False,
+                evidence={
+                    "cancel_error": (
+                        "skill dispatch has no dedicated safe cancel boundary"
+                    ),
+                    "motion_sent": True,
+                },
             )
         try:
             await asyncio.wait_for(
@@ -1237,123 +1238,44 @@ class SkillOperationExecutor:
             evidence={"mode": "no_motion", "motion_sent": False},
         )
 
-    async def _transit(
+    async def _handover(
         self, operation: RobotOperation, robot_id: str
     ) -> OperationExecution:
-        """Execute one TRANSIT from a live scene snapshot through TCP MoveIt."""
-        adapter = self._transit_adapters.get(robot_id)
-        context = self._transit_contexts.get(robot_id)
-        if adapter is None or context is None:
+        """Execute one generic HANDOVER through the shared handover backend.
+
+        The operation is validated against the frozen plan contract before the
+        backend runs: the executor must be the receiver, participants must be
+        exactly donor/receiver, and the ledger must already prove the donor
+        holds the physical instance. The donor's holding fact is never assumed
+        from a predecessor skill; PICK is only one possible producer.
+        """
+        if self._handover_backend is None:
             return self._failed(operation, REASON_CAPABILITY_UNAVAILABLE)
-        try:
-            scene = await self._observe_or_cancel(
-                robot_id,
-                self._active[operation.operation_id].cancel_event
-                if operation.operation_id in self._active
-                else asyncio.Event(),
-            )
-            if scene is None:
-                return self._failed(operation, "STALE_WORLD")
-            target = resolve_transit_target(scene, operation, context)
-        except ValueError as error:
-            return self._failed(operation, str(error))
-        execute = getattr(adapter, "execute", None)
+        target = operation.target.values if operation.target is not None else {}
+        donor = target.get("donor_robot_id")
+        part = target.get("physical_instance_id")
+        if self._state_ledger is None:
+            return self._failed(operation, "HANDOVER_LEDGER_UNAVAILABLE")
+        if (
+            not isinstance(donor, str)
+            or not isinstance(part, str)
+            or self._state_ledger.observe(donor, f"holding:{part}") is None
+        ):
+            return self._failed(operation, "HANDOVER_DONOR_HOLDING_UNCONFIRMED")
+        execute = getattr(self._handover_backend, "execute", None)
         if not callable(execute):
-            return self._failed(operation, "TRANSIT_ADAPTER_INVALID")
-        target_values = operation.target.values if operation.target is not None else {}
-        destination = target_values.get("to")
-        destination_kind = (
-            destination.get("kind") if isinstance(destination, Mapping) else None
-        )
-        carrying = target_values.get("carrying_physical_instance_id")
-        if carrying is not None:
-            if not isinstance(carrying, str) or not carrying:
-                return self._failed(
-                    operation, "TARGET_INVALID: carrying_physical_instance_id"
-                )
-            if self._state_ledger is None:
-                return self._failed(operation, "CARRYING_STATE_UNAVAILABLE")
-            holding = self._state_ledger.observe(robot_id, f"holding:{carrying}")
-            if holding is None:
-                return self._failed(operation, "HOLDING_REQUIRED")
-            # Carrying TRANSIT needs synchronized object/TCP tracking and an
-            # attached planning-scene model. The current adapter only proves
-            # an empty TCP pose, so reject before dispatching motion.
-            return self._failed(operation, "CARRYING_TRANSIT_UNAVAILABLE")
-        if self._state_ledger is not None:
-            active_holding = [
-                key
-                for key in self._state_ledger.snapshot(robot_id)
-                if key.startswith("holding:")
-            ]
-            if active_holding:
-                return self._failed(operation, "CARRYING_INSTANCE_REQUIRED")
-        record = self._active.get(operation.operation_id)
-        if record is not None:
-            record.motion_sent = True
+            return self._failed(operation, "HANDOVER_BACKEND_INVALID")
         try:
-            result = await asyncio.to_thread(execute, operation, target)
-        except Exception as error:
-            return self._failed(operation, f"TRANSIT_ADAPTER_FAILED: {error}")
-        if not isinstance(result, MotionExecution):
-            return self._failed(operation, "TRANSIT_RESULT_INVALID")
-        evidence: dict[str, JSONValue] = dict(result.evidence)
-        target_values = operation.target.values if operation.target is not None else {}
-        destination = target_values.get("to")
-        destination_kind = (
-            destination.get("kind") if isinstance(destination, Mapping) else None
-        )
-        if result.passed and result.terminal and result.safe_to_release:
-            final_scene = await self._observe_or_cancel(robot_id, asyncio.Event())
-            if final_scene is None or not isinstance(
-                final_scene.get("bricks"), Mapping
-            ):
-                evidence["transit_scene_feedback_confirmed"] = False
-                return OperationExecution(
-                    operation_id=operation.operation_id,
-                    robot_id=robot_id,
-                    status=OperationStatus.FAILED,
-                    passed=False,
-                    terminal=result.terminal,
-                    motion_sent=result.motion_sent,
-                    evidence=evidence,
-                    reason="STALE_WORLD_AFTER_TRANSIT",
-                )
-            evidence["transit_scene_feedback_confirmed"] = True
-            evidence["transit_feedback_confirmed"] = True
-            evidence["carrying_state_confirmed"] = False
-            if self._state_ledger is not None:
-                key = (
-                    "robot_at_pick_region"
-                    if destination_kind == "part"
-                    else "robot_at_place_region"
-                )
-                ledger_evidence: dict[str, JSONValue] = dict(evidence)
-                if destination_kind == "part" and isinstance(destination, Mapping):
-                    ledger_evidence["physical_instance_id"] = destination.get(
-                        "physical_instance_id"
-                    )
-                self._state_ledger.confirm(robot_id, key, ledger_evidence)
-            return OperationExecution(
-                operation_id=operation.operation_id,
-                robot_id=robot_id,
-                status=OperationStatus.CONFIRMED,
-                passed=True,
-                terminal=True,
-                motion_sent=result.motion_sent,
-                evidence=evidence,
-                reason="TRANSIT_FEEDBACK_CONFIRMED",
-            )
-        return OperationExecution(
-            operation_id=operation.operation_id,
-            robot_id=robot_id,
-            status=OperationStatus.FAILED,
-            passed=False,
-            terminal=result.terminal,
-            motion_sent=result.motion_sent,
-            evidence=evidence,
-            reason=result.reason or "TRANSIT_ACTION_FAILED",
-        )
+            result = await execute(operation)
+        except Exception as error:  # noqa: BLE001 - preserve failure evidence
+            return self._failed(operation, f"HANDOVER_BACKEND_FAILED: {error}")
+        if (
+            not isinstance(result, OperationExecution)
+            or result.operation_id != operation.operation_id
+            or result.robot_id != robot_id
+        ):
+            return self._failed(operation, "HANDOVER_RESULT_INVALID")
+        return result
 
     async def _pick(
         self, operation: RobotOperation, robot_id: str

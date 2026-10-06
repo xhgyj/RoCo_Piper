@@ -6,6 +6,7 @@ this module owns the all-or-nothing admission and fail-closed evidence rules.
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Protocol
@@ -114,17 +115,26 @@ class CoordinatedExecutionCoordinator:
                         f"participant {trajectory.robot_id} did not prepare",
                     )
             started: dict[str, Mapping[str, object]] = {}
-            for robot_id in expected:
-                evidence = self._participants[robot_id].start(
-                    start_at_sim_time_s=start_at
-                )
-                started[robot_id] = dict(evidence)
-                if evidence.get("started") is not True:
-                    merged = {**prepared, **started}
-                    return self._failed_start(
-                        operation, merged, cancel_evidence,
-                        f"participant {robot_id} did not start",
+            # All participants are already prepared. Start their action goals
+            # concurrently against the same simulation-time barrier; iterating
+            # start() calls serially would create an unbounded start skew.
+            with ThreadPoolExecutor(max_workers=len(expected)) as pool:
+                futures = {
+                    robot_id: pool.submit(
+                        self._participants[robot_id].start,
+                        start_at_sim_time_s=start_at,
                     )
+                    for robot_id in expected
+                }
+                for robot_id in expected:
+                    evidence = futures[robot_id].result()
+                    started[robot_id] = dict(evidence)
+                    if evidence.get("started") is not True:
+                        merged = {**prepared, **started}
+                        return self._failed_start(
+                            operation, merged, cancel_evidence,
+                            f"participant {robot_id} did not start",
+                        )
             terminal = all(
                 evidence.get("terminal") is True and evidence.get("safe") is True
                 for evidence in started.values()

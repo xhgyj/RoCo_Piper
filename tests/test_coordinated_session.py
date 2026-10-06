@@ -23,7 +23,24 @@ def request() -> CoordinatedSessionRequest:
     )
 
 
-def test_coordinated_request_round_trips_without_single_robot_operations() -> None:
+def test_single_participant_request_keeps_full_session_identity() -> None:
+    """One skill participant still plans inside the complete dual-arm session."""
+    item = CoordinatedSessionRequest(
+        coordination_id="single-participant",
+        robots=("piper_0", "piper_1"),
+        participants=("piper_1",),
+        scene_digest="scene-1",
+        planning_group="dual_arm",
+        plan_only=False,
+        timeout_s=30.0,
+        targets={"piper_1": {"kind": "pregrasp"}},
+    )
+    parsed = parse_coordinated_request(item.serialize())
+    assert parsed.robots == ("piper_0", "piper_1")
+    assert parsed.participants == ("piper_1",)
+    assert set(parsed.targets) == {"piper_1"}
+
+
     """The wire shape carries one group identity, not two fake operations."""
     document = request().serialize()
     assert document["schema"] == COORDINATED_REQUEST_SCHEMA

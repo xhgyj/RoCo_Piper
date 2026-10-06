@@ -14,6 +14,10 @@ from collections.abc import Mapping
 from dataclasses import asdict, dataclass
 from typing import Protocol
 
+from rocobrick.coordinated_session import (
+    FreeSpaceMotionEvidence,
+    FreeSpaceMotionRequest,
+)
 from rocobrick.execution.operation_state_ledger import OperationStateLedger
 from rocobrick.isaac_backend import RuntimeOperation, tcp_pose_operation
 from rocobrick.multi_robot_scheduler import (
@@ -37,6 +41,15 @@ class SupportObservationTransport(Protocol):
 
     async def observe(self, robot_id: str) -> Mapping[str, object]:
         """Return one measured scene for the named robot."""
+
+
+class SupportFreeSpaceTransport(Protocol):
+    """Dispatch one skill-neutral support approach."""
+
+    async def execute_free_space(
+        self, request: FreeSpaceMotionRequest
+    ) -> FreeSpaceMotionEvidence:
+        """Execute support approach targets."""
 
 
 class SupportMotionTransport(Protocol):
@@ -77,6 +90,7 @@ class SupportTopHandler:
         session_id: str,
         manifest_sha256: str,
         motion_transport: SupportMotionTransport | None = None,
+        free_space_transport: SupportFreeSpaceTransport | None = None,
         context: TransitContext | None = None,
         poll_interval_s: float = 0.2,
     ) -> None:
@@ -86,10 +100,39 @@ class SupportTopHandler:
         self._session_id = session_id
         self._manifest_sha256 = manifest_sha256
         self._motion = motion_transport
+        self._free_space = free_space_transport
         self._context = context
         self._poll_interval_s = float(poll_interval_s)
         self._active_requests: dict[str, str] = {}
         self._cancelled_operations: set[str] = set()
+
+    async def execute_free_space_phase(
+        self,
+        operation: RobotOperation,
+        *,
+        scene_snapshot: Mapping[str, object],
+        scene_version: int,
+        targets: Mapping[str, Mapping[str, object]],
+        start_state: Mapping[str, float],
+        session_robots: tuple[str, ...] | None = None,
+    ) -> FreeSpaceMotionEvidence:
+        """Execute only the free-space approach, never support contact."""
+        if self._free_space is None:
+            raise RuntimeError("SUPPORT_TOP free-space transport is unavailable")
+        session_ids = session_robots or tuple(
+            getattr(self._free_space, "robot_ids", operation.participants)
+        )
+        request = FreeSpaceMotionRequest(
+            motion_id=f"{operation.operation_id}:free-space",
+            session_robots=tuple(session_ids),
+            participants=tuple(operation.participants),
+            scene_snapshot=scene_snapshot,
+            scene_version=scene_version,
+            targets=targets,
+            start_state=start_state,
+            timeout_s=60.0,
+        )
+        return await self._free_space.execute_free_space(request)
 
     async def preflight(self, operation: RobotOperation) -> SupportAdmission:
         """Validate the support pair and admit one fresh upper pose sample.
@@ -204,6 +247,38 @@ class SupportTopHandler:
                 self._context.provenance,
                 params,
             )
+            if self._free_space is not None:
+                scene, scene_version, start_state = (
+                    await self._free_space.free_space_context(
+                        tuple(operation.participants)
+                    )
+                )
+                free_target = {
+                    operation.executor_robot_id: {
+                        "tcp_pose": {
+                            "position": tuple(target.position),
+                            "orientation_xyzw": tuple(target.orientation_xyzw),
+                            "frame_id": f"{operation.executor_robot_id}_base_link",
+                            "tip_link": f"{operation.executor_robot_id}_rocobrick_tcp",
+                            "runtime_model_sha256": target.runtime_model_sha256,
+                            "source_sha256": target.source_sha256,
+                            "position_tolerance_m": target.position_tolerance_m,
+                            "orientation_tolerance_rad": target.orientation_tolerance_rad,
+                        }
+                    }
+                }
+                free_result = await self.execute_free_space_phase(
+                    operation,
+                    scene_snapshot=scene,
+                    scene_version=scene_version,
+                    targets=free_target,
+                    start_state=start_state,
+                )
+                evidence["free_space_approach"] = dict(free_result.evidence)
+                if not free_result.passed:
+                    raise ValueError(
+                        free_result.reason or "support free-space approach failed"
+                    )
             record = await self._dispatch(
                 operation,
                 "support_pose",

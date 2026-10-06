@@ -22,6 +22,15 @@ class Factory:
             joint_constraints=[], position_constraints=[], orientation_constraints=[]
         )
 
+    def joint_constraint_factory(self):
+        return SimpleNamespace(
+            joint_name="",
+            position=0.0,
+            tolerance_above=0.0,
+            tolerance_below=0.0,
+            weight=0.0,
+        )
+
     def position_constraint_factory(self):
         return SimpleNamespace(
             header=SimpleNamespace(frame_id=""),

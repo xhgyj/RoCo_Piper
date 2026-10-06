@@ -28,7 +28,9 @@ MODULE = ROOT / "src/rocobrick/plan/structure_scene.py"
 TASK_DIR = ROOT / "tasks/type1/example1"
 START = TASK_DIR / "structure_start.json"
 GOAL = TASK_DIR / "structure_goal.json"
-OPERATION_PLAN = ROOT / "artifacts/scene/example1-robot-operation-plan.json"
+OPERATION_PLAN = (
+    ROOT / "tests/fixtures/robot_operation_plans/example1-robot-operation-plan.json"
+)
 MANIFEST = ROOT / "artifacts/scene/example1-scene-manifest.json"
 STAP_PLAN = (
     ROOT / "runs/example1-compound-pick-20260915T130000Z/generated-plan.json"
@@ -232,7 +234,7 @@ def test_example1_binds_goal_start_and_plan_by_content_digest() -> None:
             "connection_id": "conn-example1-upper-lower",
         }
     ]
-    assert metadata["robot_plan_id"] == "robot-operation-plan-example1-v1"
+    assert metadata["robot_plan_id"] == "robot-operation-plan-example1-v2"
     assert (
         metadata["robot_source_plan_id"]
         == "assembly-plan-25a5d5cc586a1e5c65f2141d"

@@ -45,7 +45,7 @@ import threading
 import time
 from collections import deque
 from collections.abc import Sequence
-from dataclasses import asdict, dataclass, replace
+from dataclasses import asdict, dataclass, field, replace
 from typing import Any, Callable, Mapping
 
 from rocobrick.admission import (
@@ -95,6 +95,7 @@ from rocobrick.planning_scene import (
     AxisAlignedBox,
     PlanningSceneResult,
     PlanningSceneUpdate,
+    box_geometry_digest,
     scene_digest,
 )
 from rocobrick.readiness import (
@@ -137,6 +138,39 @@ WAIT_STEP_S = 0.05
 ACCEPT_TIMEOUT_S = 15.0
 CANCEL_TIMEOUT_S = 10.0
 SERVICE_CALL_TIMEOUT_S = 5.0
+IK_SEARCH_TIMEOUT_S = 0.5
+IK_ATTEMPT_TIMEOUT_S = 0.05
+IK_SEED_ATTEMPTS = 24
+COMBINED_ROBOT_DESCRIPTION_TOPIC = "/dual_arm/robot_description"
+
+
+def ik_seed_candidates(
+    measured: Mapping[str, float],
+    limits: Mapping[str, tuple[float, float]],
+    count: int,
+    token: str,
+) -> list[dict[str, float]]:
+    """Build deterministic diverse IK seeds around the measured state.
+
+    The stock KDL plugin runs one Newton descent per call, so restart
+    diversity must come from explicit seeds. The measured state is always
+    first; the rest are reproducible uniform samples inside the combined
+    model's per-joint limits, keyed by the caller's transition token.
+    """
+    import random as _random
+
+    rng = _random.Random(token)
+    joints = sorted(set(measured) & set(limits))
+    candidates: list[dict[str, float]] = []
+    for _ in range(max(0, count)):
+        candidates.append(
+            {
+                name: rng.uniform(*limits[name])
+                for name in joints
+            }
+            | {name: value for name, value in measured.items() if name not in limits}
+        )
+    return candidates
 # Bound of the read-only robot-scoped scene probe used by readiness.
 SCENE_PROBE_TIMEOUT_S = 2.0
 
@@ -222,6 +256,7 @@ class RuntimeServices:
     list_controllers: str = SERVICE_LIST_CONTROLLERS
     plan: str = SERVICE_PLAN
     compute_fk: str = SERVICE_COMPUTE_FK
+    compute_ik: str = ""
     apply_planning_scene: str = SERVICE_APPLY_PLANNING_SCENE
     get_planning_scene: str = SERVICE_GET_PLANNING_SCENE
     scene_state: str = SERVICE_SCENE_STATE
@@ -269,11 +304,20 @@ def runtime_services_for_profile(profile: RobotRuntimeProfile) -> RuntimeService
     response), never a namespaced per-robot endpoint, so it is never derived
     from the namespace.
     """
-    root = robot_endpoint_root(profile)
+    root = (
+        "/dual_arm"
+        if profile.move_group_action == "/dual_arm/move_action"
+        else robot_endpoint_root(profile)
+    )
     return RuntimeServices(
         list_controllers=profile.list_controllers,
         plan=profile.plan,
         compute_fk=profile.compute_fk,
+        compute_ik=(
+            "/dual_arm/compute_ik"
+            if profile.move_group_action == "/dual_arm/move_action"
+            else ""
+        ),
         apply_planning_scene=root + SERVICE_APPLY_PLANNING_SCENE,
         get_planning_scene=root + SERVICE_GET_PLANNING_SCENE,
         scene_state=SERVICE_SCENE_STATE,
@@ -330,6 +374,7 @@ class RobotCapabilityReadiness:
     compute_fk_ready: bool = False
     scene_query_ready: bool = False
     endpoints: tuple[tuple[str, str], ...] = ()
+    scene_evidence: Mapping[str, object] = field(default_factory=dict)
 
     @property
     def passed(self) -> bool:
@@ -351,6 +396,7 @@ class RobotCapabilityReadiness:
                 name: bool(getattr(self, name)) for name in CAPABILITY_COMPONENTS
             },
             "endpoints": {name: value for name, value in self.endpoints},
+            "scene_evidence": dict(self.scene_evidence),
         }
 
 
@@ -559,6 +605,9 @@ class RosMoveItFactories:
     joint_trajectory_point_factory: Callable[[], Any] | None = None
     joint_tolerance_factory: Callable[[], Any] | None = None
     duration_factory: Callable[[], Any] | None = None
+    # Combined per-arm IK transport (unified dual-arm stack only).
+    get_position_ik_type: Callable[[], Any] | None = None
+    get_position_ik_request_factory: Callable[[], Any] | None = None
 
 
 def _clock_nanos(message: Any) -> int:
@@ -886,6 +935,8 @@ class RosMoveItRuntime:
         self._isaac_states: deque[dict[str, float]] = deque(maxlen=STATE_HISTORY)
         self._isaac_receipts: deque[float] = deque(maxlen=STATE_HISTORY)
         self._joint_states: deque[dict[str, float]] = deque(maxlen=STATE_HISTORY)
+        self._joint_receipts: deque[float] = deque(maxlen=STATE_HISTORY)
+        self._joint_stamps: deque[float] = deque(maxlen=STATE_HISTORY)
         self._isaac_state_count = 0
         self._command_count = 0
         self._controller_states: dict[str, str] = {}
@@ -895,11 +946,15 @@ class RosMoveItRuntime:
         self._list_controllers_client: Any = None
         self._plan_client: Any = None
         self._fk_client: Any = None
+        self._ik_client: Any = None
         self._planning_scene_client: Any = None
         self._get_planning_scene_client: Any = None
         self._scene_state_client: Any = None
+        self._last_scene_error: str | None = None
+        self._last_scene_summary: Mapping[str, object] = {}
         self._arm_client: Any = None
         self._move_group_client: Any = None
+        self._combined_ready: Callable[[], bool] = lambda: False
         self._gripper_client: Any = None
         self._active_handle: Any = None
         # Keep both futures so a timeout can handle late goal acceptance and
@@ -1014,6 +1069,7 @@ class RosMoveItRuntime:
             GetMotionPlan,
             GetPlanningScene,
             GetPositionFK,
+            GetPositionIK,
         )
         from rclpy.action import ActionClient
         from rosgraph_msgs.msg import Clock
@@ -1055,6 +1111,8 @@ class RosMoveItRuntime:
             get_planning_scene_request_factory=GetPlanningScene.Request,
             trigger_type=lambda: Trigger,
             trigger_request_factory=Trigger.Request,
+            get_position_ik_type=lambda: GetPositionIK,
+            get_position_ik_request_factory=GetPositionIK.Request,
             follow_joint_trajectory_goal_factory=FollowJointTrajectory.Goal,
             joint_trajectory_point_factory=JointTrajectoryPoint,
             joint_tolerance_factory=JointTolerance,
@@ -1126,41 +1184,54 @@ class RosMoveItRuntime:
         :meth:`capability_readiness`, which is the gate a per-robot session
         runtime dispatches on.
         """
-        if self._move_group_client is not None:
-            return
         factories = self._resolve_factories()
         node = self.node
-        self._list_controllers_client = node.create_client(
-            factories.list_controllers_type(), self.services.list_controllers
-        )
-        self._plan_client = node.create_client(
-            factories.get_motion_plan_type(), self.services.plan
-        )
-        self._fk_client = node.create_client(
-            factories.get_position_fk_type(), self.services.compute_fk
-        )
+        if self._list_controllers_client is None:
+            self._list_controllers_client = node.create_client(
+                factories.list_controllers_type(), self.services.list_controllers
+            )
+        if self._plan_client is None:
+            self._plan_client = node.create_client(
+                factories.get_motion_plan_type(), self.services.plan
+            )
+        if self._fk_client is None:
+            self._fk_client = node.create_client(
+                factories.get_position_fk_type(), self.services.compute_fk
+            )
+        if (
+            factories.get_position_ik_type is not None
+            and self.services.compute_ik
+            and self._ik_client is None
+        ):
+            self._ik_client = node.create_client(
+                factories.get_position_ik_type(), self.services.compute_ik
+            )
         if (
             factories.get_planning_scene_type is not None
             and factories.get_planning_scene_request_factory is not None
+            and self._get_planning_scene_client is None
         ):
             self._get_planning_scene_client = node.create_client(
                 factories.get_planning_scene_type(), self.services.get_planning_scene
             )
-        if factories.trigger_type is not None:
+        if factories.trigger_type is not None and self._scene_state_client is None:
             self._scene_state_client = node.create_client(
                 factories.trigger_type(), self.services.scene_state
             )
-        self._arm_client = factories.action_client_factory(
-            node, factories.follow_joint_trajectory_type(), self.actions.arm_follow
-        )
-        self._move_group_client = factories.action_client_factory(
-            node, factories.move_group_type(), self.actions.move_group
-        )
-        self._gripper_client = factories.action_client_factory(
-            node,
-            factories.follow_joint_trajectory_type(),
-            self.actions.gripper_follow,
-        )
+        if self._arm_client is None:
+            self._arm_client = factories.action_client_factory(
+                node, factories.follow_joint_trajectory_type(), self.actions.arm_follow
+            )
+        if self.actions.move_group != "/dual_arm/move_action" and self._move_group_client is None:
+            self._move_group_client = factories.action_client_factory(
+                node, factories.move_group_type(), self.actions.move_group
+            )
+        if self._gripper_client is None:
+            self._gripper_client = factories.action_client_factory(
+                node,
+                factories.follow_joint_trajectory_type(),
+                self.actions.gripper_follow,
+            )
 
     # ------------------------------------------------------------- callbacks
 
@@ -1215,6 +1286,12 @@ class RosMoveItRuntime:
             return
         with self._lock:
             self._joint_states.append(state)
+            self._joint_receipts.append(self._clock_fn())
+            stamp = getattr(getattr(message, "header", None), "stamp", None)
+            if stamp is not None:
+                self._joint_stamps.append(
+                    float(stamp.sec) + float(stamp.nanosec) * 1e-9
+                )
 
     def _on_command(self, message: Any) -> None:
         with self._lock:
@@ -1235,6 +1312,24 @@ class RosMoveItRuntime:
             if not self._joint_states:
                 return None
             return dict(self._joint_states[-1])
+
+    def state_timing(self) -> Mapping[str, float | None]:
+        """Return actual receipt ages and broadcaster simulation timestamp.
+
+        Returns:
+            Per-channel ages and the latest stamped joint-state time.
+        """
+        now = self._clock_fn()
+        with self._lock:
+            return {
+                "isaac_age_s": now - self._isaac_receipts[-1]
+                if self._isaac_receipts
+                else None,
+                "joint_age_s": now - self._joint_receipts[-1]
+                if self._joint_receipts
+                else None,
+                "joint_stamp_s": self._joint_stamps[-1] if self._joint_stamps else None,
+            }
 
     def clock_values(self) -> tuple[int, ...]:
         """Recent /clock samples as integer nanoseconds."""
@@ -1321,7 +1416,11 @@ class RosMoveItRuntime:
             ),
             controllers_active=controllers_are_active(self.controller_states()),
             arm_action_ready=self._action_ready(self._arm_client),
-            move_group_action_ready=self._action_ready(self._move_group_client),
+            move_group_action_ready=self._action_ready(self._move_group_client)
+            or (
+                self.actions.move_group == "/dual_arm/move_action"
+                and self._combined_ready()
+            ),
             compute_fk_ready=self._service_ready(self._fk_client),
         )
 
@@ -1360,8 +1459,21 @@ class RosMoveItRuntime:
         """
         try:
             return self.query_robot_scene_state(timeout_s=timeout_s)
-        except (RuntimeError, ValueError):
+        except (RuntimeError, ValueError) as error:
+            self._last_scene_error = f"{type(error).__name__}: {error}"
+            self._last_scene_summary = {
+                "robot_id": self._robot_id,
+                "endpoint": self.services.scene_state,
+            }
             return None
+
+    def scene_readiness_evidence(self) -> Mapping[str, object]:
+        """Return the latest scene probe failure or success summary."""
+        return {
+            "error": self._last_scene_error,
+            "scene_client_registered": self._scene_state_client is not None,
+            **dict(self._last_scene_summary),
+        }
 
     def capability_readiness(
         self, *, probe_scene: bool = False, require_broadcaster_match: bool = True
@@ -1400,6 +1512,7 @@ class RosMoveItRuntime:
             compute_fk_ready=snapshot.compute_fk_ready,
             scene_query_ready=scene_query_ready,
             endpoints=tuple(sorted(self.endpoint_map().items())),
+            scene_evidence=self.scene_readiness_evidence(),
         )
 
     def wait_until_capability_ready(
@@ -1462,6 +1575,154 @@ class RosMoveItRuntime:
         hardcoded, interpolated, or faked.
         """
         return self._compute_fk(state, self._tcp_link, timeout_s)
+
+    def solve_tcp_ik(
+        self,
+        robot_id: str,
+        target: Mapping[str, object],
+        seed: Mapping[str, float],
+        timeout_s: float,
+        extra_seeds: Sequence[Mapping[str, float]] = (),
+    ) -> dict[str, float]:
+        """Solve one arm's calibrated TCP pose through the combined compute_ik.
+
+        The combined ``dual_arm`` group is joint-space by contract, so a pose
+        goal is solved per arm here: the unified ``/dual_arm/compute_ik``
+        service answers the calibrated ``<robot>_arm_tcp`` group for this
+        robot's tip link. The stock KDL backend performs ONE Newton descent
+        per call, so restart diversity must come from explicit seeds: the
+        live measured state first, then the caller's deterministic
+        candidates. The first successful answer is returned as exact
+        wire-named arm joint positions; an unavailable service, an exhausted
+        seed budget, a missing arm joint or a non-finite value raises so the
+        caller fails closed instead of planning to a guessed state.
+
+        Args:
+            robot_id: The arm whose calibrated TCP the pose constrains.
+            target: The serialized combined target carrying ``tcp_pose``.
+            seed: This robot's live wire-named joint state (8 joints).
+            timeout_s: Bounded total wait across the IK attempts.
+            extra_seeds: Additional deterministic seed states to restart from.
+
+        Returns:
+            Wire-named arm joint positions realizing the requested pose.
+        """
+        if (
+            not isinstance(timeout_s, (int, float))
+            or not math.isfinite(float(timeout_s))
+            or float(timeout_s) <= 0.0
+        ):
+            raise ValueError(
+                f"timeout_s must be finite and positive, got {timeout_s!r}"
+            )
+        factories = self._resolve_factories()
+        if (
+            factories.get_position_ik_type is None
+            or factories.get_position_ik_request_factory is None
+            or not self.services.compute_ik
+        ):
+            raise RuntimeError(
+                "per-arm IK requires the unified combined compute_ik service"
+            )
+        pose = target.get("tcp_pose")
+        if not isinstance(pose, Mapping):
+            raise ValueError("combined IK target carries no tcp_pose")
+        position = pose.get("position")
+        orientation = pose.get("orientation_xyzw")
+        if (
+            not isinstance(position, Sequence)
+            or isinstance(position, (str, bytes))
+            or len(position) != 3
+            or not isinstance(orientation, Sequence)
+            or isinstance(orientation, (str, bytes))
+            or len(orientation) != 4
+        ):
+            raise ValueError("combined IK target pose is malformed")
+        client = self._ik_client
+        if client is None or not self._service_ready(client):
+            raise RuntimeError(
+                f"{self.services.compute_ik} service is not discovered"
+            )
+        deadline = self._clock_fn() + float(timeout_s)
+        last_code: int | None = None
+        attempts = 0
+        for seed_state in (seed, *extra_seeds):
+            if self._clock_fn() >= deadline:
+                break
+            attempts += 1
+            solved, last_code = self._ik_attempt(
+                client,
+                factories,
+                robot_id,
+                pose,
+                position,
+                orientation,
+                seed_state,
+                deadline,
+            )
+            if solved is not None:
+                self.last_ik_attempts = attempts
+                return solved
+        self.last_ik_attempts = attempts
+        raise RuntimeError(
+            f"combined IK failed for {robot_id}: no seed converged "
+            f"(attempts={attempts}, last_error_code={last_code})"
+        )
+
+    def _ik_attempt(
+        self,
+        client: Any,
+        factories: RosMoveItFactories,
+        robot_id: str,
+        pose: Mapping[str, object],
+        position: Sequence[float],
+        orientation: Sequence[float],
+        seed_state: Mapping[str, float],
+        deadline: float,
+    ) -> tuple[dict[str, float] | None, int | None]:
+        """Run one bounded compute_ik descent from a single seed."""
+        remaining = deadline - self._clock_fn()
+        budget = min(IK_SEARCH_TIMEOUT_S, max(IK_ATTEMPT_TIMEOUT_S, remaining))
+        request = factories.get_position_ik_request_factory()
+        ik = request.ik_request
+        ik.group_name = f"{robot_id}_arm_tcp"
+        ik.ik_link_name = str(pose.get("tip_link"))
+        ik.timeout.sec = int(budget)
+        ik.timeout.nanosec = int((budget % 1.0) * 1e9)
+        ik.pose_stamped.header.frame_id = str(pose.get("frame_id"))
+        ik.pose_stamped.pose.position.x = float(position[0])
+        ik.pose_stamped.pose.position.y = float(position[1])
+        ik.pose_stamped.pose.position.z = float(position[2])
+        ik.pose_stamped.pose.orientation.x = float(orientation[0])
+        ik.pose_stamped.pose.orientation.y = float(orientation[1])
+        ik.pose_stamped.pose.orientation.z = float(orientation[2])
+        ik.pose_stamped.pose.orientation.w = float(orientation[3])
+        seed_wire = {str(name): float(value) for name, value in seed_state.items()}
+        ik.robot_state.joint_state.name = list(seed_wire)
+        ik.robot_state.joint_state.position = list(seed_wire.values())
+        future = client.call_async(request)
+        if not self._wait_future(future, deadline):
+            return None, None
+        try:
+            response = future.result()
+            code = int(response.error_code.val)
+            names = [str(name) for name in response.solution.joint_state.name]
+            values = [
+                float(value) for value in response.solution.joint_state.position
+            ]
+        except (AttributeError, TypeError, ValueError):
+            return None, None
+        if code != SUCCESS_CODE:
+            return None, code
+        arm = set(self.arm_joint_names)
+        solved = {
+            name: value for name, value in zip(names, values) if name in arm
+        }
+        if set(solved) != arm or any(
+            not math.isfinite(value) for value in solved.values()
+        ):
+            return None, code
+        return solved, code
 
     def _compute_fk(
         self, state: Mapping[str, float], link: str, timeout_s: float
@@ -1643,6 +1904,37 @@ class RosMoveItRuntime:
             )
         return matrix, None
 
+    def unified_scene_fingerprint(self, timeout_s: float) -> str:
+        """Read world, attachments, transforms and ACM as one scene proof.
+
+        Returns:
+            A digest covering collision-affecting scene state, excluding joint motion.
+        """
+        import hashlib
+        from rosidl_runtime_py.convert import message_to_ordereddict
+
+        client = self._ensure_get_planning_scene_client()
+        if client is None or not self._service_ready(client):
+            raise RuntimeError("combined scene readback is unavailable")
+        request = self._resolve_factories().get_planning_scene_request_factory()
+        request.components.components = 4 | 16 | 32 | 64 | 128
+        future = client.call_async(request)
+        if not self._wait_future(future, self._clock_fn() + timeout_s):
+            raise TimeoutError("combined scene fingerprint timed out")
+        document = message_to_ordereddict(future.result().scene)
+        robot_state = document["robot_state"]
+        payload = {
+            "world": document["world"],
+            "attachments": robot_state["attached_collision_objects"],
+            "acm": document["allowed_collision_matrix"],
+            "transforms": document["fixed_frame_transforms"],
+        }
+        return hashlib.sha256(
+            json.dumps(
+                payload, sort_keys=True, separators=(",", ":"), allow_nan=False
+            ).encode()
+        ).hexdigest()
+
     def _read_world_collision_objects(
         self, timeout_s: float, factories: RosMoveItFactories
     ) -> tuple[Mapping[str, object] | None, str | None]:
@@ -1712,6 +2004,88 @@ class RosMoveItRuntime:
                 f"for {object_id!r}/{link_name!r}"
             )
         return True, None
+
+    def read_attached_planning_scene(
+        self, timeout_s: float
+    ) -> Mapping[str, object]:
+        """Read every attached collision object with normalized geometry."""
+        factories = self._resolve_factories()
+        client = self._ensure_get_planning_scene_client()
+        request_factory = factories.get_planning_scene_request_factory
+        if (
+            client is None
+            or not self._service_ready(client)
+            or request_factory is None
+        ):
+            return {
+                "passed": False,
+                "attached": [],
+                "error": "GetPlanningScene attached objects are unavailable",
+            }
+        try:
+            request = request_factory()
+            request.components.components = (
+                PLANNING_SCENE_ROBOT_STATE_ATTACHED_OBJECTS
+            )
+            future = client.call_async(request)
+            if not self._wait_future(future, self._clock_fn() + float(timeout_s)):
+                return {
+                    "passed": False,
+                    "attached": [],
+                    "error": "GetPlanningScene attached objects timed out",
+                }
+            attached = future.result().scene.robot_state.attached_collision_objects
+            normalized: list[dict[str, object]] = []
+            for item in attached:
+                collision = item.object
+                object_id = str(getattr(collision, "id", ""))
+                link_name = str(getattr(item, "link_name", ""))
+                frame_id = str(getattr(collision.header, "frame_id", ""))
+                record: dict[str, object] = {
+                    "object_id": object_id,
+                    "link_name": link_name,
+                    "frame_id": frame_id,
+                    "touch_links": [str(value) for value in item.touch_links],
+                }
+                primitives = list(collision.primitives)
+                poses = list(collision.primitive_poses)
+                if len(primitives) == 1 and len(poses) == 1:
+                    primitive = primitives[0]
+                    pose = poses[0]
+                    dimensions = tuple(float(value) for value in primitive.dimensions)
+                    center = (
+                        float(pose.position.x),
+                        float(pose.position.y),
+                        float(pose.position.z),
+                    )
+                    if len(dimensions) == 3 and all(
+                        math.isfinite(value) and value > 0.0
+                        for value in dimensions
+                    ) and all(math.isfinite(value) for value in center):
+                        minimum = tuple(
+                            center[index] - dimensions[index] / 2.0
+                            for index in range(3)
+                        )
+                        maximum = tuple(
+                            center[index] + dimensions[index] / 2.0
+                            for index in range(3)
+                        )
+                        record["minimum_m"] = list(minimum)
+                        record["maximum_m"] = list(maximum)
+                        record["geometry_digest"] = box_geometry_digest(
+                            object_id=object_id,
+                            frame_id=frame_id,
+                            minimum_m=minimum,
+                            maximum_m=maximum,
+                        )
+                normalized.append(record)
+            return {"passed": True, "attached": normalized, "error": None}
+        except (AttributeError, TypeError, ValueError) as error:
+            return {
+                "passed": False,
+                "attached": [],
+                "error": f"GetPlanningScene attached objects malformed: {error}",
+            }
 
     def apply_attached_planning_scene(
         self, payload: Mapping[str, object], timeout_s: float
@@ -2140,8 +2514,16 @@ class RosMoveItRuntime:
                 f"timeout_s must be finite and positive, got {timeout_s!r}"
             )
         client = self._scene_state_client
-        if client is None or not self._service_ready(client):
-            raise RuntimeError(f"{self.services.scene_state} client is not available")
+        if client is None:
+            raise RuntimeError(
+                f"{self.services.scene_state} client was never registered; "
+                "register_clients() must run before a scene query"
+            )
+        if not self._service_ready(client):
+            raise RuntimeError(
+                f"{self.services.scene_state} service is not discovered on "
+                "this participant"
+            )
         factories = self._resolve_factories()
         if factories.trigger_request_factory is None:
             raise RuntimeError(
@@ -2996,6 +3378,14 @@ class RosMoveItRuntime:
         *,
         contact_guard: Mapping[str, object] | None = None,
     ) -> ExecutionResult:
+        if self.actions.move_group == "/dual_arm/move_action":
+            return ExecutionResult(
+                status=ExecutionStatus.REJECTED,
+                details={
+                    "reason": "participant planning is forbidden; use unified pre-phase"
+                },
+                command_messages=0,
+            )
         decision = strict_action_admission(target)
         if not decision.accepted:
             return ExecutionResult(
@@ -3968,7 +4358,7 @@ class RosMoveItRobotSession:
         qos_sensor: Any = None,
         qos_state: Any = None,
         profile_factory: Callable[[str], RobotRuntimeProfile] = (
-            RobotRuntimeProfile.from_robot_id
+            RobotRuntimeProfile.unified_participant
         ),
         runtime_factory: (
             Callable[[str, RobotRuntimeProfile], RosMoveItRuntime] | None
@@ -4010,6 +4400,9 @@ class RosMoveItRobotSession:
         self._poll_interval_s = float(poll_interval_s)
         self._wait_step_s = float(wait_step_s)
         self.shutdown_errors: list[str] = []
+        # Diagnostics of the last unified readiness evaluation; purely
+        # observational so a freshness failure names the exact sample ages.
+        self._last_unified_timing: dict[str, Mapping[str, object]] = {}
 
         def default_runtime(
             robot_id: str, profile: RobotRuntimeProfile
@@ -4078,11 +4471,531 @@ class RosMoveItRobotSession:
                 sleep=self._sleep_fn,
                 wait_step_s=self._wait_step_s,
             )
+        if self._coordinated_runtime is not None:
+            for participant in self.runtimes.values():
+                participant._combined_ready = self._coordinated_runtime.ready
+        from rocobrick.unified_scene import UnifiedSceneBinding
+
+        self._scene_binding = UnifiedSceneBinding(self.runtimes[ids[0]])
+        self._planning_lock = threading.Lock()
+        self._joint_limits_cache: dict[str, tuple[float, float]] | None = None
         self._unified_runtime = (
             UnifiedDualArmRuntime(self, self._coordinated_runtime)
             if self._coordinated_runtime is not None
             else None
         )
+
+    def transfer_attached_planning_scene(
+        self, payload: Mapping[str, object], timeout_s: float
+    ) -> Mapping[str, object]:
+        """Transfer one attached object with readback and compensating rollback."""
+        with self._planning_lock:
+            donor_id = str(payload["donor_robot_id"])
+            receiver_id = str(payload["receiver_robot_id"])
+            object_id = str(payload["object_id"])
+            donor = self.runtimes[donor_id]
+            receiver = self.runtimes[receiver_id]
+
+            def read(runtime: object) -> Mapping[str, object]:
+                result = runtime.read_attached_planning_scene(timeout_s)
+                if result.get("passed") is not True:
+                    raise RuntimeError(str(result.get("error")))
+                return result
+
+            def objects(result: Mapping[str, object]) -> list[Mapping[str, object]]:
+                value = result.get("attached")
+                return [
+                    item for item in value
+                    if isinstance(item, Mapping)
+                ] if isinstance(value, list) else []
+
+            def donor_exact(items: list[Mapping[str, object]]) -> bool:
+                # The donor and receiver TCP frames are robot-local and may
+                # differ.  The transfer payload canonicalizes geometry in the
+                # receiver frame; donor identity is therefore proven by the
+                # exact physical object and attached donor link here, while
+                # receiver geometry/frame is proven by the post-attach
+                # readback below.
+                matches = [
+                    item for item in items
+                    if item.get("object_id") == object_id
+                    and item.get("link_name") == payload["donor_link_name"]
+                ]
+                return len(matches) == 1
+
+            def receiver_absent(items: list[Mapping[str, object]]) -> bool:
+                return not any(item.get("object_id") == object_id for item in items)
+
+            def receiver_exact(items: list[Mapping[str, object]]) -> bool:
+                matches = [
+                    item for item in items
+                    if item.get("object_id") == object_id
+                    and item.get("link_name") == payload["receiver_link_name"]
+                ]
+                return len(matches) == 1 and (
+                    matches[0].get("frame_id") == payload["frame_id"]
+                    and matches[0].get("geometry_digest")
+                    == payload["geometry_digest"]
+                )
+
+            try:
+                donor_before = read(donor)
+                receiver_before = read(receiver)
+                donor_items = objects(donor_before)
+                receiver_items = objects(receiver_before)
+            except (RuntimeError, KeyError) as error:
+                return {
+                    "passed": False,
+                    "transfer_status": "ROLLED_BACK",
+                    "terminal": True,
+                    "safe_to_release": True,
+                    "error": f"transfer precondition read failed: {error}",
+                }
+            if not donor_exact(donor_items) or not receiver_absent(receiver_items):
+                return {
+                    "passed": False,
+                    "transfer_status": "ROLLED_BACK",
+                    "terminal": True,
+                    "safe_to_release": True,
+                    "error": "transfer expected_before state did not match",
+                    "donor_before": donor_items,
+                    "receiver_before": receiver_items,
+                }
+
+            detach_payload = {
+                "scene_id": payload["transfer_id"],
+                "object_id": object_id,
+                "link_name": payload["donor_link_name"],
+                "operation": "detach",
+            }
+            attach_payload = {
+                "scene_id": payload["transfer_id"],
+                "object_id": object_id,
+                "link_name": payload["receiver_link_name"],
+                "frame_id": payload["frame_id"],
+                "minimum_m": payload["minimum_m"],
+                "maximum_m": payload["maximum_m"],
+                "geometry_digest": payload["geometry_digest"],
+                "touch_links": payload["touch_links"],
+            }
+
+            def rollback() -> Mapping[str, object]:
+                rollback_errors: list[str] = []
+                try:
+                    receiver.detach_attached_planning_scene(
+                        detach_payload | {"link_name": payload["receiver_link_name"]},
+                        timeout_s,
+                    )
+                except Exception as error:
+                    rollback_errors.append(f"receiver remove: {error}")
+                try:
+                    donor.apply_attached_planning_scene(
+                        attach_payload | {"link_name": payload["donor_link_name"]},
+                        timeout_s,
+                    )
+                except Exception as error:
+                    rollback_errors.append(f"donor restore: {error}")
+                try:
+                    donor_after = objects(read(donor))
+                    receiver_after = objects(read(receiver))
+                    restored = donor_exact(donor_after) and receiver_absent(receiver_after)
+                except Exception as error:
+                    rollback_errors.append(f"rollback readback: {error}")
+                    restored = False
+                return {
+                    "restored": restored,
+                    "errors": rollback_errors,
+                }
+
+            detached = donor.detach_attached_planning_scene(
+                detach_payload, timeout_s
+            )
+            if detached.get("passed") is not True:
+                return {
+                    "passed": False,
+                    "transfer_status": "UNKNOWN",
+                    "terminal": False,
+                    "safe_to_release": False,
+                    "error": str(detached.get("error")),
+                    "donor_detach": dict(detached),
+                }
+            try:
+                donor_after = objects(read(donor))
+            except Exception as error:
+                return {
+                    "passed": False,
+                    "transfer_status": "UNKNOWN",
+                    "terminal": False,
+                    "safe_to_release": False,
+                    "error": f"donor remove readback failed: {error}",
+                }
+            if not receiver_absent(donor_after):
+                rollback_result = rollback()
+                return {
+                    "passed": False,
+                    "transfer_status": (
+                        "ROLLED_BACK" if rollback_result["restored"] else "UNKNOWN"
+                    ),
+                    "terminal": bool(rollback_result["restored"]),
+                    "safe_to_release": bool(rollback_result["restored"]),
+                    "error": "donor remained attached after remove",
+                    "rollback": rollback_result,
+                }
+
+            attached = receiver.apply_attached_planning_scene(
+                attach_payload, timeout_s
+            )
+            if attached.get("passed") is not True:
+                rollback_result = rollback()
+                return {
+                    "passed": False,
+                    "transfer_status": (
+                        "ROLLED_BACK" if rollback_result["restored"] else "UNKNOWN"
+                    ),
+                    "terminal": bool(rollback_result["restored"]),
+                    "safe_to_release": bool(rollback_result["restored"]),
+                    "error": str(attached.get("error")),
+                    "receiver_attach": dict(attached),
+                    "rollback": rollback_result,
+                }
+            try:
+                donor_after = objects(read(donor))
+                receiver_after = objects(read(receiver))
+            except Exception as error:
+                return {
+                    "passed": False,
+                    "transfer_status": "UNKNOWN",
+                    "terminal": False,
+                    "safe_to_release": False,
+                    "error": f"transfer readback failed: {error}",
+                }
+            if donor_exact(donor_after) or not receiver_exact(receiver_after):
+                rollback_result = rollback()
+                return {
+                    "passed": False,
+                    "transfer_status": (
+                        "ROLLED_BACK" if rollback_result["restored"] else "UNKNOWN"
+                    ),
+                    "terminal": bool(rollback_result["restored"]),
+                    "safe_to_release": bool(rollback_result["restored"]),
+                    "error": "transfer exact readback failed",
+                    "rollback": rollback_result,
+                }
+            return {
+                "passed": True,
+                "transfer_status": "COMMITTED",
+                "terminal": True,
+                "safe_to_release": True,
+                "error": None,
+                "donor_before": donor_items,
+                "receiver_before": receiver_items,
+                "donor_after": donor_after,
+                "receiver_after": receiver_after,
+            }
+
+    def sync_unified_scene(self, request) -> Mapping[str, object]:
+        """Apply and bind one combined world snapshot.
+
+        Returns:
+            Actual Apply/GetPlanningScene readback proof.
+        """
+        proof = dict(self._scene_binding.sync(request))
+        proof["source_geometry"] = {
+            key: request.scene_snapshot.get(key)
+            for key in ("bricks", "connections", "environment_colliders", "ground")
+        }
+        return proof
+
+    def validate_unified_scene(self, proof: Mapping[str, object]) -> bool:
+        """Validate actual world geometry after planning.
+
+        Returns:
+            Whether scene version and full readback digest remain unchanged.
+        """
+        if not self._scene_binding.validate(proof):
+            return False
+        # The host snapshot contains live poses, sequence and sim time that
+        # advance while a no-motion plan is being computed. Planning-scene
+        # stability is already proven by the combined GetPlanningScene
+        # fingerprint/version readback above; comparing the dynamic host
+        # document byte-for-byte would reject a valid static planning scene.
+        return True
+
+    def unified_plan_only(self, request):
+        """Serialize all combined scene/planning access under one runtime owner.
+
+        Returns:
+            A plan-only result with no physical arrival or lease release claim.
+        """
+        from rocobrick.coordinated_session_entry import perform_coordinated_plan
+
+        with self._planning_lock:
+            return perform_coordinated_plan(self, request)
+
+    def execute_coordinated_pre_phase(self, request):
+        """Plan, dispatch and prove one combined free-space physical motion.
+
+        Returns:
+            Coordinated result whose lifecycle carries the participants'
+            prepare/start/terminal-safe arrival evidence.
+        """
+        from rocobrick.coordinated_session_entry import perform_coordinated_plan
+
+        with self._planning_lock:
+            return perform_coordinated_plan(
+                self,
+                request,
+                participants_executor=self._execute_coordinated_operation,
+            )
+
+    def _execute_coordinated_operation(self, operation) -> Mapping[str, object]:
+        """Run the split trajectories through the all-or-nothing lifecycle."""
+        from rocobrick.adapters.moveit.coordinated_arm import (
+            CoordinatedArmParticipant,
+        )
+        from rocobrick.coordinated_execution import CoordinatedExecutionCoordinator
+
+        participants = {
+            robot_id: CoordinatedArmParticipant(self.runtimes[robot_id])
+            for robot_id in operation.participants
+        }
+        coordinator = CoordinatedExecutionCoordinator(participants)
+        barrier = self.latest_shared_sim_time_s() + 0.2
+        lifecycle = coordinator.execute(operation, start_at_sim_time_s=barrier)
+        evidence = lifecycle.serialize()
+        evidence["start_barrier_sim_time_s"] = barrier
+        return evidence
+
+    def unified_joint_limits(self, timeout_s: float = 5.0) -> dict[str, tuple[float, float]]:
+        """Read combined arm joint limits from the live robot description.
+
+        Subscribes once to the latched ``/dual_arm/robot_description`` the
+        combined launch publishes, parses the per-joint limits of every
+        participant arm and caches them for the session.
+
+        Returns:
+            Wire-named arm joint limits of both participants.
+        """
+        if self._joint_limits_cache is not None:
+            return dict(self._joint_limits_cache)
+        import xml.etree.ElementTree as ET
+
+        from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
+        from std_msgs.msg import String
+
+        received: dict[str, str] = {}
+
+        def receive(message: object) -> None:
+            received["urdf"] = str(getattr(message, "data", ""))
+
+        qos = QoSProfile(
+            depth=1,
+            durability=DurabilityPolicy.TRANSIENT_LOCAL,
+            reliability=ReliabilityPolicy.RELIABLE,
+        )
+        subscription = self.node.create_subscription(
+            String, COMBINED_ROBOT_DESCRIPTION_TOPIC, receive, qos
+        )
+        try:
+            deadline = self._clock_fn() + float(timeout_s)
+            while not received and self._clock_fn() < deadline:
+                self._spin_fn()
+                self._sleep_fn(0.02)
+        finally:
+            self.node.destroy_subscription(subscription)
+        if not received:
+            raise RuntimeError(
+                f"{COMBINED_ROBOT_DESCRIPTION_TOPIC} did not answer "
+                f"within {timeout_s}s"
+            )
+        arm_joints = {
+            f"{robot_id}_joint{index}"
+            for robot_id in self.robot_ids
+            for index in range(1, 7)
+        }
+        limits: dict[str, tuple[float, float]] = {}
+        for joint in ET.fromstring(received["urdf"]).findall("joint"):
+            name = joint.get("name")
+            limit = joint.find("limit")
+            if (
+                name in arm_joints
+                and joint.get("type") in ("revolute", "continuous")
+                and limit is not None
+            ):
+                limits[name] = (float(limit.get("lower")), float(limit.get("upper")))
+        if set(limits) != arm_joints:
+            raise RuntimeError(
+                "combined robot description does not cover every arm joint"
+            )
+        self._joint_limits_cache = limits
+        return dict(limits)
+
+    def unified_start_state(self) -> Mapping[str, float]:
+        """Return a complete wire-named combined start state, including mimic parents."""
+        result: dict[str, float] = {}
+        for robot_id in self.robot_ids:
+            state = self.runtimes[robot_id].latest_joint_state()
+            if not state:
+                raise RuntimeError(f"no live joint state for {robot_id}")
+            result.update({f"{robot_id}_{name}": float(value) for name, value in state.items()})
+            finger = f"{robot_id}_gripper_joint1"
+            parent = f"{robot_id}_gripper"
+            if parent not in result and finger in result:
+                result[parent] = 2.0 * result[finger]
+        return result
+
+    def unified_joint_targets(self, request) -> dict[str, dict[str, float]]:
+        """Compose one joint-space combined goal from per-arm pose targets.
+
+        The combined ``dual_arm`` group plans in joint space, so every pose
+        target is realized per arm here: a moving arm is solved through the
+        unified ``/dual_arm/compute_ik`` seeded by its own live measured
+        state, and a ``maintain_pose`` participant holds its currently
+        measured arm joints. Any missing live state, IK failure or malformed
+        target raises so the coordinated entry fails closed.
+
+        Returns:
+            Wire-named arm joint positions for every robot needing solving.
+        """
+        if tuple(request.robots) != self.robot_ids:
+            raise ValueError("unified request robots do not match session")
+        limits: dict[str, tuple[float, float]] = {}
+        seeds: dict[str, dict[str, float]] = {}
+        for robot_id in self.robot_ids:
+            canonical = self.runtimes[robot_id].latest_joint_state()
+            if not canonical:
+                raise RuntimeError(
+                    f"no live joint state to seed combined IK for {robot_id}"
+                )
+            seeds[robot_id] = {
+                f"{robot_id}_{name}": float(value)
+                for name, value in canonical.items()
+            }
+        solved: dict[str, dict[str, float]] = {}
+        for robot_id in self.robot_ids:
+            target = request.targets.get(robot_id) or {}
+            arm = set(self.runtimes[robot_id].arm_joint_names)
+            if robot_id not in request.participants:
+                solved[robot_id] = {
+                    joint: seeds[robot_id][joint] for joint in sorted(arm)
+                }
+                continue
+            positions = target.get("joint_positions")
+            if (
+                isinstance(positions, Mapping)
+                and set(positions) == arm
+                and all(
+                    isinstance(value, (int, float))
+                    and math.isfinite(float(value))
+                    for value in positions.values()
+                )
+            ):
+                continue
+            if target.get("maintain_pose") is True:
+                solved[robot_id] = {
+                    joint: seeds[robot_id][joint] for joint in sorted(arm)
+                }
+                continue
+            if not limits:
+                limit_reader = getattr(self, "unified_joint_limits", None)
+                if callable(limit_reader):
+                    limits = limit_reader(request.timeout_s)
+            arm_limits = {
+                joint: limits[joint] for joint in arm if joint in limits
+            }
+            extra = (
+                ik_seed_candidates(
+                    seeds[robot_id],
+                    arm_limits,
+                    IK_SEED_ATTEMPTS - 1,
+                    f"{request.coordination_id}|{robot_id}",
+                )
+                if arm_limits
+                else ()
+            )
+            solved[robot_id] = self.runtimes[robot_id].solve_tcp_ik(
+                robot_id,
+                target,
+                seeds[robot_id],
+                request.timeout_s,
+                extra_seeds=extra,
+            )
+        return solved
+
+    @property
+    def unified_planning_scene_version(self) -> int:
+        """Return the current unified planning-scene version."""
+        refresh = getattr(self._scene_binding, "refresh_version", None)
+        if callable(refresh):
+            try:
+                return int(refresh(5.0))
+            except (ImportError, ModuleNotFoundError):
+                pass
+        return int(self._scene_binding.version)
+
+    def latest_shared_sim_time_s(self) -> float:
+        """Return the newest shared ``/clock`` sample across participants.
+
+        Every participant subscribes to the one session clock, so the newest
+        sample is the live shared simulation time an observation answer can be
+        freshness-bound to.
+        """
+        samples = [
+            clocks[-1] * 1e-9
+            for runtime in self.runtimes.values()
+            if (clocks := runtime.clock_values())
+        ]
+        if not samples:
+            raise RuntimeError("no shared /clock sample has been observed")
+        return float(max(samples))
+
+    def observe_all(self, timeout_s: float = 1.0) -> Mapping[str, object]:
+        """Fetch and validate one complete global scene snapshot.
+
+        Returns:
+            The complete shared document, never independently queried robot snapshots.
+        """
+        try:
+            shared = self.runtimes[self.robot_ids[0]].query_scene_state(timeout_s)
+            robots = shared.get("robots")
+            if not isinstance(robots, Mapping) or set(robots) != set(self.robot_ids):
+                raise RuntimeError(
+                    "shared scene snapshot does not cover all robots: "
+                    f"scene_error={shared.get('error')!r} "
+                    "robots="
+                    f"{sorted(robots) if isinstance(robots, Mapping) else robots!r}"
+                )
+            for robot_id in self.robot_ids:
+                robot_scene_view(shared, robot_id)
+            if not isinstance(shared.get("session_id"), str) or not shared.get(
+                "session_id"
+            ):
+                raise RuntimeError("shared snapshot has no session provenance")
+            manifest = shared.get("manifest_sha256")
+            if not isinstance(manifest, str) or len(manifest) != 64:
+                raise RuntimeError("shared snapshot has no manifest provenance")
+            import hashlib
+
+            canonical = json.dumps(
+                {key: value for key, value in shared.items() if key != "scene_digest"},
+                sort_keys=True,
+                separators=(",", ":"),
+                allow_nan=False,
+            )
+            if hashlib.sha256(canonical.encode()).hexdigest() != shared.get(
+                "scene_digest"
+            ):
+                raise RuntimeError(
+                    "shared snapshot digest is not bound to complete observation"
+                )
+            sequence = shared.get("sequence")
+            if type(sequence) is not int or sequence < 0:
+                raise RuntimeError("shared snapshot sequence is invalid")
+            return shared
+        except Exception as error:
+            for robot in self.runtimes.values():
+                robot._last_scene_error = f"{type(error).__name__}: {error}"
+            raise
 
     def unified_readiness(
         self, request, *, probe_scene: bool = True
@@ -4094,31 +5007,107 @@ class RosMoveItRobotSession:
         if runtime is None:
             raise RuntimeError("unified dual-arm runtime is not configured")
         runtime.register()
-        shared = self.runtimes[self.robot_ids[0]].query_scene_state(1.0)
+        shared = request.scene_snapshot
+        if not isinstance(shared, Mapping) or not shared:
+            raise RuntimeError("plan request must bind one shared scene snapshot")
         robots = shared.get("robots")
         if not isinstance(robots, Mapping) or set(robots) != set(self.robot_ids):
             raise RuntimeError("shared scene snapshot does not cover all robots")
         digest = shared.get("scene_digest")
+        import hashlib
+
+        payload = {key: value for key, value in shared.items() if key != "scene_digest"}
+        computed = hashlib.sha256(
+            json.dumps(
+                payload, sort_keys=True, separators=(",", ":"), allow_nan=False
+            ).encode()
+        ).hexdigest()
+        if digest != computed:
+            raise RuntimeError("bound scene snapshot digest is invalid")
         if digest != request.scene_digest:
             raise RuntimeError("shared scene digest does not match request")
         sequence = shared.get("sequence")
         if type(sequence) is not int or sequence < 0:
             raise RuntimeError("shared scene sequence is invalid")
         sim_time = shared.get("sim_time_s")
-        if not isinstance(sim_time, (int, float)):
+        if (
+            not isinstance(sim_time, (int, float))
+            or isinstance(sim_time, bool)
+            or not math.isfinite(sim_time)
+            or sim_time < 0
+        ):
             raise RuntimeError("shared scene simulation time is invalid")
+        for robot_id in self.robot_ids:
+            robot_scene_view(shared, robot_id)
         controller_ready: dict[str, bool] = {}
+        timing_by_robot: dict[str, Mapping[str, object]] = {}
         state_complete = True
         clock_increasing = True
+        fresh = True
+        stamps = []
         for robot_id in self.robot_ids:
             robot = self.runtimes[robot_id]
-            state_complete = state_complete and robot.latest_isaac_state() is not None
-            controller_ready[robot_id] = robot.readiness_snapshot().controllers_active
+            report = robot.readiness_snapshot()
+            state_complete = (
+                state_complete
+                and report.isaac_state_complete
+                and report.joint_state_complete
+                and report.broadcaster_match
+            )
+            clock_increasing = clock_increasing and report.clock_increasing
+            controller_ready[robot_id] = (
+                report.controllers_active
+                and report.arm_action_ready
+                and robot._action_ready(robot._gripper_client)
+            )
+            timing = robot.state_timing()
+            timing_by_robot[robot_id] = dict(timing)
+            fresh = fresh and all(
+                isinstance(timing[name], (int, float)) and 0 <= timing[name] <= 0.5
+                for name in ("isaac_age_s", "joint_age_s")
+            )
+            stamp = timing["joint_stamp_s"]
+            if not isinstance(stamp, (int, float)) or not math.isfinite(stamp):
+                fresh = False
+            else:
+                stamps.append(stamp)
+            clocks = robot.clock_values()
+            clock_s = clocks[-1] * 1e-9 if clocks else None
+            scene_delta = (
+                float(clock_s - sim_time) if clock_s is not None else None
+            )
+            joint_delta = (
+                float(clock_s - stamp)
+                if clock_s is not None and isinstance(stamp, (int, float))
+                else None
+            )
+            timing_by_robot[robot_id] = {
+                **dict(timing),
+                "clock_s": clock_s,
+                "scene_sim_time_s": float(sim_time),
+                "clock_minus_scene_s": scene_delta,
+                "clock_minus_joint_stamp_s": joint_delta,
+                "fresh_age_ok": all(
+                    isinstance(timing[name], (int, float))
+                    and 0 <= timing[name] <= 0.5
+                    for name in ("isaac_age_s", "joint_age_s")
+                ),
+                "scene_clock_ok": scene_delta is not None
+                and abs(scene_delta) <= 0.5,
+                "joint_clock_ok": joint_delta is not None
+                and abs(joint_delta) <= 0.5,
+            }
+            fresh = fresh and timing_by_robot[robot_id]["fresh_age_ok"] is True
+            fresh = fresh and bool(clocks)
+            fresh = fresh and timing_by_robot[robot_id]["scene_clock_ok"] is True
+            fresh = fresh and timing_by_robot[robot_id]["joint_clock_ok"] is True
+        fresh = fresh and len(stamps) == len(self.robot_ids)
+        self._last_unified_timing = dict(timing_by_robot)
         return UnifiedDualArmReadiness(
             robots=self.robot_ids,
             clock_increasing=clock_increasing,
             combined_joint_state_complete=state_complete,
-            scene_snapshot_fresh=True,
+            scene_snapshot_fresh=fresh,
             scene_digest_match=True,
             combined_move_group_ready=runtime.ready(),
             controllers_ready=controller_ready,
@@ -4134,8 +5123,46 @@ class RosMoveItRobotSession:
             raise ValueError("coordinated request robots do not match session")
         readiness = self.unified_readiness(request)
         if not readiness.passed:
-            raise RuntimeError("unified dual-arm readiness failed")
-        return readiness.serialize()
+            components = {
+                "clock_increasing": readiness.clock_increasing,
+                "combined_joint_state_complete": readiness.combined_joint_state_complete,
+                "scene_snapshot_fresh": readiness.scene_snapshot_fresh,
+                "scene_digest_match": readiness.scene_digest_match,
+                "combined_move_group_ready": readiness.combined_move_group_ready,
+                **{
+                    f"controller:{robot}": ready
+                    for robot, ready in readiness.controllers_ready.items()
+                },
+            }
+            failed = [name for name, passed in components.items() if not passed]
+            raise RuntimeError(
+                "unified dual-arm readiness failed: "
+                + ", ".join(failed)
+                + f"; timing_by_robot={dict(self._last_unified_timing)}"
+            )
+        return {
+            "coordination_id": request.coordination_id,
+            "participants": list(request.participants),
+            "scene_digest": request.scene_digest,
+            "scene_sequence": request.scene_snapshot["sequence"],
+            "scene_sim_time_s": request.scene_snapshot["sim_time_s"],
+            "move_group_action": "/dual_arm/move_action",
+            "planning_group": "dual_arm",
+            "diagnostics": {
+                "timing_by_robot": dict(self._last_unified_timing),
+            },
+            "components": {
+                "clock_increasing": readiness.clock_increasing,
+                "combined_joint_state_complete": readiness.combined_joint_state_complete,
+                "scene_snapshot_fresh": readiness.scene_snapshot_fresh,
+                "scene_digest_match": readiness.scene_digest_match,
+                "combined_move_group_ready": readiness.combined_move_group_ready,
+                **{
+                    f"controller:{robot}": ready
+                    for robot, ready in readiness.controllers_ready.items()
+                },
+            },
+        }
 
     def coordinated_plan_runtime(self):
         """Return the combined MoveIt plan-only transport."""
@@ -4191,6 +5218,27 @@ class RosMoveItRobotSession:
         against the live per-robot scene response (fail-closed), which is what
         the session readiness gate uses.
         """
+        if probe_scene and any(
+            profile.move_group_action == "/dual_arm/move_action"
+            for profile in self.profiles.values()
+        ):
+            try:
+                shared = self.observe_all()
+                scene_query_ready = True
+            except (RuntimeError, ValueError) as error:
+                scene_query_ready = False
+                for robot in self.runtimes.values():
+                    robot._last_scene_error = f"{type(error).__name__}: {error}"
+            reports = {
+                robot_id: self.runtimes[robot_id].capability_readiness(
+                    probe_scene=False
+                )
+                for robot_id in self.robot_ids
+            }
+            return {
+                robot_id: replace(report, scene_query_ready=scene_query_ready)
+                for robot_id, report in reports.items()
+            }
         return {
             robot_id: self.runtimes[robot_id].capability_readiness(
                 probe_scene=probe_scene
@@ -4233,6 +5281,11 @@ class RosMoveItRobotSession:
 
     def shutdown(self) -> None:
         """Best-effort teardown of every robot runtime; errors recorded."""
+        if self._coordinated_runtime is not None:
+            try:
+                self._coordinated_runtime.shutdown()
+            except Exception as error:
+                self.shutdown_errors.append(f"combined: {error}")
         for robot_id in self.robot_ids:
             runtime = self.runtimes[robot_id]
             try:

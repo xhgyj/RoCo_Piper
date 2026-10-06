@@ -15,6 +15,10 @@ from collections.abc import Mapping
 from dataclasses import asdict, dataclass
 from typing import Protocol
 
+from rocobrick.coordinated_session import (
+    FreeSpaceMotionEvidence,
+    FreeSpaceMotionRequest,
+)
 from rocobrick.execution.operation_state_ledger import OperationStateLedger
 from rocobrick.isaac_backend import (
     RuntimeOperation,
@@ -48,6 +52,15 @@ class PlaceUpObservationTransport(Protocol):
 
     async def observe(self, robot_id: str) -> Mapping[str, object]:
         """Return one measured scene for the named robot."""
+
+
+class PlaceUpFreeSpaceTransport(Protocol):
+    """Dispatch the dual-arm free-space approach only."""
+
+    async def execute_free_space(
+        self, request: FreeSpaceMotionRequest
+    ) -> FreeSpaceMotionEvidence:
+        """Execute the skill-owned pre-contact approach."""
 
 
 class PlaceUpMotionTransport(Protocol):
@@ -116,6 +129,7 @@ class PlaceUpHandler:
         session_id: str,
         manifest_sha256: str,
         motion_transport: PlaceUpMotionTransport | None = None,
+        free_space_transport: PlaceUpFreeSpaceTransport | None = None,
         context: TransitContext | None = None,
         poll_interval_s: float = 0.2,
     ) -> None:
@@ -125,10 +139,39 @@ class PlaceUpHandler:
         self._session_id = session_id
         self._manifest_sha256 = manifest_sha256
         self._motion = motion_transport
+        self._free_space = free_space_transport
         self._context = context
         self._poll_interval_s = float(poll_interval_s)
         self._active_requests: dict[str, str] = {}
         self._cancelled_operations: set[str] = set()
+
+    async def execute_free_space_phase(
+        self,
+        operation: RobotOperation,
+        *,
+        scene_snapshot: Mapping[str, object],
+        scene_version: int,
+        targets: Mapping[str, Mapping[str, object]],
+        start_state: Mapping[str, float],
+        session_robots: tuple[str, ...] | None = None,
+    ) -> FreeSpaceMotionEvidence:
+        """Execute pre-contact dual-arm approach, never insertion or release."""
+        if self._free_space is None:
+            raise RuntimeError("PLACE_UP free-space transport is unavailable")
+        session_ids = session_robots or tuple(
+            getattr(self._free_space, "robot_ids", operation.participants)
+        )
+        request = FreeSpaceMotionRequest(
+            motion_id=f"{operation.operation_id}:free-space",
+            session_robots=tuple(session_ids),
+            participants=tuple(operation.participants),
+            scene_snapshot=scene_snapshot,
+            scene_version=scene_version,
+            targets=targets,
+            start_state=start_state,
+            timeout_s=60.0,
+        )
+        return await self._free_space.execute_free_space(request)
 
     async def preflight(self, operation: RobotOperation) -> PlaceUpAdmission:
         """Validate the upward pair, holding state and supporting fact.
@@ -283,7 +326,7 @@ class PlaceUpHandler:
         """Build a measured world planning scene for the upward pair."""
         if self._context is None:
             raise ValueError("PLACE_UP context unavailable")
-        frame_id = f"{admission.robot_id}_world"
+        frame_id = "dual_world"
         boxes = [
             box_from_aabb(
                 object_id=admission.upper_physical_instance_id,

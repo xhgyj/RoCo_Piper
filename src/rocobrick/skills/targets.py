@@ -261,20 +261,21 @@ def grasp_orientation_xyzw(closing_yaw_deg: float) -> QuaternionXYZW:
 
 
 def closing_yaw_deg(aabb_min: Sequence[float], aabb_max: Sequence[float]) -> float:
-    """Return 0.0 for the wide brick layout, else 90.0.
+    """Return the Piper-L-compatible closing yaw for the brick footprint.
 
-    The physical fingers translate along the tool y axis (URDF ground
-    truth: ``gripper_joint1/2`` prismatic axes map to link6 ±y), so yaw 0.0
-    closes across the brick's y-extent and 90.0 across its x-extent.  The
-    rule keeps the planner-proven yaw per layout; yaw 90 goal regions
-    failed OMPL goal sampling outright at the pregrasp pose (headed run,
-    2026-10-01).
+    The physical fingers translate along the tool y axis (URDF ground truth),
+    so yaw 0 closes across the brick's y extent and yaw 90 across x. For a
+    square footprint, choose the 180-degree symmetric yaw: it has the same
+    closing axis as yaw 0 while remaining exactly reachable on piper_1's
+    calibrated joint-limit manifold.
     """
     dx = float(aabb_max[0]) - float(aabb_min[0])
     dy = float(aabb_max[1]) - float(aabb_min[1])
     if not (math.isfinite(dx) and math.isfinite(dy)):
         raise ValueError("brick AABB extents must be finite")
-    return 0.0 if dy <= dx else 90.0
+    if abs(dy - dx) <= 1e-4:
+        return 180.0
+    return 90.0 if dy > dx else 0.0
 
 
 def brick_span_m(aabb_min: Sequence[float], aabb_max: Sequence[float]) -> float:
@@ -375,8 +376,13 @@ class PickTargets:
     """
 
     pregrasp: TcpPoseTarget  # xy = brick center; z = center + standoff
-    approach: TcpPoseTarget  # z = brick center (TCP contact mid-height)
+    precontact_boundary: TcpPoseTarget  # final free-space pose before contact
     lift: TcpPoseTarget  # z = center + standoff + lift height
+    @property
+    def approach(self) -> TcpPoseTarget:
+        """Compatibility alias for the pre-contact free-space boundary."""
+        return self.precontact_boundary
+
     reach_opening_m: float  # logical command; pads at span + open_extra_m
     close_opening_m: float  # logical command; pads pressed to span - squeeze_m
     reach_expected_window_m: tuple[float, float]  # reach opening ± free slop
@@ -428,7 +434,7 @@ def pick_targets(
             provenance,
             params,
         ),
-        approach=_tcp_pose_target(
+        precontact_boundary=_tcp_pose_target(
             (
                 center_xy[0],
                 center_xy[1],

@@ -28,7 +28,7 @@ derives the same names for the generated model/config files and
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from rocobrick.moveit_contract import (
     ARM_JOINT_NAMES,
@@ -106,9 +106,16 @@ class RobotRuntimeProfile:
         if self.joint_names != self.arm_joint_names + self.gripper_joint_names:
             raise ValueError("joint slices must reconstruct joint_names")
         for name in (
-            self.clock, self.isaac_joint_states, self.joint_states,
-            self.isaac_joint_command, self.move_group_action, self.arm_follow,
-            self.gripper_follow, self.list_controllers, self.plan, self.compute_fk,
+            self.clock,
+            self.isaac_joint_states,
+            self.joint_states,
+            self.isaac_joint_command,
+            self.move_group_action,
+            self.arm_follow,
+            self.gripper_follow,
+            self.list_controllers,
+            self.plan,
+            self.compute_fk,
         ):
             if not name.startswith("/"):
                 raise ValueError("runtime names must be absolute")
@@ -120,8 +127,11 @@ class RobotRuntimeProfile:
         if not self.link6_planning_group:
             object.__setattr__(self, "link6_planning_group", prefix + "arm")
         for name in (
-            self.base_frame, self.tip_link, self.planning_group,
-            self.link6_link, self.link6_planning_group,
+            self.base_frame,
+            self.tip_link,
+            self.planning_group,
+            self.link6_link,
+            self.link6_planning_group,
         ):
             if not name or name.startswith("/"):
                 raise ValueError(
@@ -166,6 +176,20 @@ class RobotRuntimeProfile:
             planning_group=prefix + "arm_tcp",
             link6_link=prefix + "link6",
             link6_planning_group=prefix + "arm",
+        )
+
+    @classmethod
+    def unified_participant(cls, robot_id: str) -> "RobotRuntimeProfile":
+        """Route controller state independently but planning services to one owner.
+
+        Returns:
+            A participant view with no independent production planning endpoint.
+        """
+        return replace(
+            cls.from_robot_id(robot_id),
+            move_group_action="/dual_arm/move_action",
+            plan="/dual_arm/plan_kinematic_path",
+            compute_fk="/dual_arm/compute_fk",
         )
 
     @classmethod
@@ -224,14 +248,26 @@ def assert_profiles_disjoint(profiles: tuple[RobotRuntimeProfile, ...]) -> None:
         elif profile.clock not in shared:
             raise ValueError("profiles disagree on the shared session clock")
         checked = (
-            profile.isaac_joint_states, profile.joint_states,
-            profile.isaac_joint_command, profile.move_group_action,
-            profile.arm_follow, profile.gripper_follow,
-            profile.list_controllers, profile.plan, profile.compute_fk,
-            profile.base_frame, profile.tip_link, profile.planning_group,
-            profile.link6_link, profile.link6_planning_group,
+            profile.isaac_joint_states,
+            profile.joint_states,
+            profile.isaac_joint_command,
+            profile.arm_follow,
+            profile.gripper_follow,
+            profile.list_controllers,
+            profile.base_frame,
+            profile.tip_link,
+            profile.planning_group,
+            profile.link6_link,
+            profile.link6_planning_group,
             *profile.joint_names,
         )
+        if profile.move_group_action != "/dual_arm/move_action":
+            checked += (profile.move_group_action, profile.plan, profile.compute_fk)
+        elif (profile.plan, profile.compute_fk) != (
+            "/dual_arm/plan_kinematic_path",
+            "/dual_arm/compute_fk",
+        ):
+            raise ValueError("unified participant planning services are inconsistent")
         for name in checked:
             owner = names.setdefault(name, profile.robot_id)
             if owner != profile.robot_id:

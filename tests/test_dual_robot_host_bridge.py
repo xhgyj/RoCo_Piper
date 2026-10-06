@@ -866,6 +866,8 @@ def _stub_scene_bridge(bridge_module, robot_grippers, articulations=None):
     bridge._brick_connections = lambda: {PAIR_KEY: True}
     bridge._scene_sequence = 0
     bridge._state.scene_session_id = "test-session"
+    bridge._state.tcp_provenance = {"runtime_model_sha256": "a" * 64, "source_sha256": "b" * 64}
+    bridge._environment_colliders = lambda: {"ground": {"aabb_min": [-1., -1., -0.01], "aabb_max": [1., 1., 0.]}}
     bridge._state.scene_manifest_sha256 = "a" * 64
     bridge._live_rigid_poses = lambda: (
         {instance_id: {

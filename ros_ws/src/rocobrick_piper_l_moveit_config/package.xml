@@ -13,6 +13,7 @@
   <buildtool_depend>ament_cmake</buildtool_depend>
 
   <exec_depend>agx_arm_description</exec_depend>
+  <exec_depend>control_msgs</exec_depend>
   <exec_depend>controller_manager</exec_depend>
   <exec_depend>joint_state_broadcaster</exec_depend>
   <exec_depend>joint_trajectory_controller</exec_depend>

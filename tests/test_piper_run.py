@@ -78,6 +78,12 @@ ALLOWED_ROCOBRICK = {
     "rocobrick.adapters.moveit.transit",
     "rocobrick.execution.operation_state_ledger",
     "rocobrick.isaac_snapshot_host_adapter",
+    "rocobrick.isaac_backend",
+    "rocobrick.moveit_contract",
+    "rocobrick.skills.contracts",
+    "rocobrick.skills.handover",
+    "rocobrick.skills.observation",
+    "rocobrick.skills.targets",
     "rocobrick.skills.pick",
     "rocobrick.skills.place_down",
     "rocobrick.skills.place_up",
@@ -969,6 +975,10 @@ def test_operation_phase_imports_its_owned_dependencies():
         "SessionTcpMotionAdapter": "rocobrick.adapters.moveit.transit",
         "load_transit_contexts": "rocobrick.adapters.moveit.transit",
         "SkillOperationExecutor": "rocobrick.robot_operation_executor",
+        "HandoverRequest": "rocobrick.skills.contracts",
+        "HandoverHandler": "rocobrick.skills.handover",
+        "HandoverOperationBackend": "rocobrick.skills.handover",
+        "gripper_target_from_payload": "rocobrick.isaac_backend",
     }
     for name, module in expected.items():
         assert sources[name] == module
@@ -985,7 +995,11 @@ def test_operation_phase_imports_its_owned_dependencies():
             "SessionTcpMotionAdapter, load_transit_contexts; "
             "from rocobrick.execution.operation_state_ledger import "
             "OperationStateLedger; "
-            "from rocobrick.robot_operation_executor import SkillOperationExecutor",
+            "from rocobrick.robot_operation_executor import SkillOperationExecutor; "
+            "from rocobrick.skills.contracts import HandoverRequest; "
+            "from rocobrick.skills.handover import "
+            "HandoverHandler, HandoverOperationBackend; "
+            "from rocobrick.isaac_backend import gripper_target_from_payload",
         ],
         capture_output=True,
         text=True,
@@ -1057,7 +1071,7 @@ from rocobrick.multi_robot_scheduler import (  # noqa: E402
 )
 
 OPERATION_PLAN = (
-    ROOT / "artifacts" / "scene" / "example1-robot-operation-plan.json"
+    ROOT / "tests/fixtures/robot_operation_plans/example1-robot-operation-plan.json"
 )
 PLAN_ROBOTS = ("piper_0", "piper_1")
 SCENE_STATE_SCHEMA = "rocobrick-scene-state/v1"
@@ -1627,7 +1641,7 @@ def test_operation_plan_bytes_are_captured_verbatim(tmp_path, monkeypatch):
     assert preflight["robot_operation_plan"]["sha256"] == digest
     assert preflight["robot_operation_plan"]["validated"] is True
     assert preflight["robot_operation_plan"]["plan_id"] == (
-        "robot-operation-plan-example1-v1"
+        "robot-operation-plan-example1-v2"
     )
     assert preflight["robot_operation_plan"]["robots"] == list(PLAN_ROBOTS)
     inputs = run_document["inputs"]
@@ -1910,17 +1924,13 @@ def test_full_example1_plan_fails_capability_unavailable_without_motion(
         )
     )
     operations = run_document["operations"]
-    assert operations["example1-piper0-transit-to-pick"]["status"] == "FAILED"
+    assert operations["example1-piper0-pick"]["status"] == "FAILED"
     assert "CAPABILITY_UNAVAILABLE" in (
-        operations["example1-piper0-transit-to-pick"]["reason"]
+        operations["example1-piper0-pick"]["reason"]
     )
-    assert operations["example1-piper0-transit-to-pick"]["motion_sent"] is False
+    assert operations["example1-piper0-pick"]["motion_sent"] is False
     assert operations["example1-piper1-wait-stable"]["status"] == "CANCELLED"
-    for operation_id in (
-        "example1-piper0-pick",
-        "example1-piper0-transit-to-place",
-        "example1-piper0-place-down",
-    ):
+    for operation_id in ("example1-piper0-place-down",):
         assert operations[operation_id]["status"] == "BLOCKED"
     assert all(
         item["motion_sent"] is not True for item in operations.values()
@@ -2570,7 +2580,7 @@ def test_executor_error_reports_execution_failed_with_cleanup(
     assert run_document["passed"] is False
     assert run_document["motion_sent"] is False
     assert run_document["operations"][
-        "example1-piper0-transit-to-pick"
+        "example1-piper0-pick"
     ]["reason"].startswith("executor raised RuntimeError")
 
 
@@ -2608,9 +2618,9 @@ def test_strict_results_reject_a_legacy_executor(tmp_path, monkeypatch):
         item.get("legacy") for item in run_document["operations"].values()
     ) is False
     assert run_document["passed"] is False
-    transit = run_document["operations"]["example1-piper0-transit-to-pick"]
-    assert "non-contract executor result rejected" in transit["reason"]
-    assert transit["motion_sent"] is not True
+    pick = run_document["operations"]["example1-piper0-pick"]
+    assert "non-contract executor result rejected" in pick["reason"]
+    assert pick["motion_sent"] is not True
 
 
 def test_production_factory_builds_the_real_a6_session(tmp_path):

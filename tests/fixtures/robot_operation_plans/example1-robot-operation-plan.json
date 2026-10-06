@@ -1,0 +1,143 @@
+{
+  "schema": "robot-operation-plan/v1",
+  "plan_id": "robot-operation-plan-example1-v2",
+  "source_plan_id": "assembly-plan-25a5d5cc586a1e5c65f2141d",
+  "robots": [
+    "piper_0",
+    "piper_1"
+  ],
+  "operations": [
+    {
+      "operation_id": "example1-piper1-wait-stable",
+      "source_task_id": "assemble-768de5a17827920c48d4",
+      "skill": "WAIT",
+      "executor_robot_id": "piper_1",
+      "participants": [
+        "piper_1"
+      ],
+      "role_bindings": {
+        "executor": "piper_1"
+      },
+      "target": null,
+      "parameters": {
+        "observation": {
+          "kind": "structural_fact",
+          "fact": "stable",
+          "physical_instance_id": "brick-4bbba49bec24496bb21e"
+        },
+        "duration_s": 1
+      },
+      "preconditions": [
+        "scene_ready"
+      ],
+      "effects": [
+        "scene_stable_observed"
+      ],
+      "resources": [
+        "robot:piper_1"
+      ],
+      "evidence_requirements": [
+        "real_scene_observation",
+        "wait_duration_confirmed"
+      ]
+    },
+    {
+      "operation_id": "example1-piper0-pick",
+      "source_task_id": "assemble-768de5a17827920c48d4",
+      "skill": "PICK",
+      "executor_robot_id": "piper_0",
+      "participants": [
+        "piper_0"
+      ],
+      "role_bindings": {
+        "executor": "piper_0"
+      },
+      "target": {
+        "physical_instance_id": "brick-768de5a17827920c48d4"
+      },
+      "parameters": {},
+      "preconditions": [],
+      "effects": [
+        "holding:brick-768de5a17827920c48d4"
+      ],
+      "resources": [
+        "robot:piper_0",
+        "part:brick-768de5a17827920c48d4"
+      ],
+      "evidence_requirements": [
+        "gripper_feedback_confirmed",
+        "holding_confirmed"
+      ]
+    },
+    {
+      "operation_id": "example1-piper0-place-down",
+      "source_task_id": "assemble-768de5a17827920c48d4",
+      "skill": "PLACE_DOWN",
+      "executor_robot_id": "piper_0",
+      "participants": [
+        "piper_0"
+      ],
+      "role_bindings": {
+        "executor": "piper_0"
+      },
+      "target": {
+        "connection_id": "conn-example1-upper-lower",
+        "upper_physical_instance_id": "brick-768de5a17827920c48d4",
+        "lower_physical_instance_id": "brick-4bbba49bec24496bb21e"
+      },
+      "parameters": {},
+      "preconditions": [
+        "holding:brick-768de5a17827920c48d4"
+      ],
+      "effects": [
+        "assembled:brick-768de5a17827920c48d4"
+      ],
+      "resources": [
+        "robot:piper_0",
+        "connection:conn-example1-upper-lower",
+        "part:brick-768de5a17827920c48d4",
+        "part:brick-4bbba49bec24496bb21e"
+      ],
+      "evidence_requirements": [
+        "connection_confirmed",
+        "release_confirmed",
+        "retreat_confirmed"
+      ]
+    }
+  ],
+  "dependencies": [
+    {
+      "predecessor_operation_id": "example1-piper0-pick",
+      "successor_operation_id": "example1-piper0-place-down",
+      "reason": "holding before placement"
+    }
+  ],
+  "execution_layers": [
+    [
+      "example1-piper1-wait-stable",
+      "example1-piper0-pick"
+    ],
+    [
+      "example1-piper0-place-down"
+    ]
+  ],
+  "planned_schedule": [
+    [
+      {
+        "operation_id": "example1-piper1-wait-stable",
+        "robot_id": "piper_1"
+      },
+      {
+        "operation_id": "example1-piper0-pick",
+        "robot_id": "piper_0"
+      }
+    ],
+    [
+      {
+        "operation_id": "example1-piper0-place-down",
+        "robot_id": "piper_0"
+      }
+    ]
+  ],
+  "evidence_requirements": []
+}

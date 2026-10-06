@@ -22,6 +22,7 @@ from launch.actions import (
     LogInfo,
     OpaqueFunction,
     RegisterEventHandler,
+    TimerAction,
 )
 from launch.event_handlers import OnProcessStart
 from launch.substitutions import LaunchConfiguration
@@ -67,7 +68,9 @@ def _launch_setup(context):
     """Generate the combined model and launch one MoveIt instance."""
     package_dir = Path(get_package_share_directory(PACKAGE_NAME))
     output = LaunchConfiguration("config_output_dir").perform(context).strip()
-    output_dir = Path(output) if output else Path(tempfile.mkdtemp(prefix="rocobrick_dual_arm_"))
+    output_dir = (
+        Path(output) if output else Path(tempfile.mkdtemp(prefix="rocobrick_dual_arm_"))
+    )
     robot_ids = ("piper_0", "piper_1")
     single = _load_module(package_dir / "launch" / HELPER_FILE, "dual_robot_config")
     combined = _load_module(package_dir / "launch" / COMBINED_HELPER, "dual_arm_config")
@@ -76,12 +79,9 @@ def _launch_setup(context):
         output_dir=output_dir / "robots",
         package_dir=package_dir,
     )
-    # These are the frozen user-config base poses used by the current runtime;
-    # production should pass them from the same immutable config snapshot.
-    base_poses = {
-        "piper_0": ((0.25, -0.25, 0.0), (0.0, 0.0, 0.0)),
-        "piper_1": ((-0.25, -0.25, 0.0), (0.0, 0.0, 0.0)),
-    }
+    config_path = Path(LaunchConfiguration("runtime_config_path").perform(context))
+    config_sha256 = LaunchConfiguration("runtime_config_sha256").perform(context)
+    base_poses = combined.load_base_poses(config_path, config_sha256, robot_ids)
     paths = combined.generate_dual_arm_configs(configs, output_dir, base_poses)
     moveit_config = _moveit_config(paths)
     use_sim_time = _boolean(LaunchConfiguration("use_sim_time").perform(context))
@@ -91,6 +91,7 @@ def _launch_setup(context):
         executable="robot_state_publisher",
         namespace="/dual_arm",
         output="screen",
+        remappings=[("joint_states", "/dual_arm/joint_states")],
         parameters=[robot_description, {"use_sim_time": use_sim_time}],
     )
     joint_aggregator = Node(
@@ -98,7 +99,7 @@ def _launch_setup(context):
         executable="dual_joint_state_aggregator.py",
         namespace="/dual_arm",
         output="screen",
-        parameters=[{"robot_ids": list(robot_ids)}],
+        parameters=[{"robot_ids": list(robot_ids), "use_sim_time": use_sim_time}],
     )
     node = Node(
         package="moveit_ros_move_group",
@@ -109,6 +110,9 @@ def _launch_setup(context):
             moveit_config.to_dict(),
             {
                 "use_sim_time": use_sim_time,
+                "allow_trajectory_execution": _boolean(
+                    LaunchConfiguration("allow_trajectory_execution").perform(context)
+                ),
                 "trajectory_execution": {
                     "allowed_execution_duration_scaling": 1.2,
                 },
@@ -116,7 +120,7 @@ def _launch_setup(context):
         ],
     )
     controllers = []
-    for config in configs:
+    for index, config in enumerate(configs):
         namespace = config.endpoints.namespace
         control_node = Node(
             package="controller_manager",
@@ -143,11 +147,15 @@ def _launch_setup(context):
                     "60",
                 ],
             )
-            for controller in ("joint_state_broadcaster", "arm_controller", "gripper_controller")
+            for controller in (
+                "joint_state_broadcaster",
+                "arm_controller",
+                "gripper_controller",
+            )
         ]
         controllers.extend(
             [
-                control_node,
+                (control_node if index == 0 else TimerAction(period=3.0, actions=[control_node])),
                 RegisterEventHandler(
                     OnProcessStart(target_action=control_node, on_start=spawners)
                 ),
@@ -167,6 +175,9 @@ def generate_launch_description() -> LaunchDescription:
     return LaunchDescription(
         [
             DeclareLaunchArgument("use_sim_time", default_value="true"),
+            DeclareLaunchArgument("runtime_config_path"),
+            DeclareLaunchArgument("runtime_config_sha256"),
+            DeclareLaunchArgument("allow_trajectory_execution", default_value="false"),
             DeclareLaunchArgument("config_output_dir", default_value=""),
             OpaqueFunction(function=_launch_setup),
         ]

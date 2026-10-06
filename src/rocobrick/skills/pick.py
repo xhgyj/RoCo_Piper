@@ -8,6 +8,10 @@ from collections.abc import Mapping
 from dataclasses import asdict, dataclass, replace
 from typing import Protocol
 
+from rocobrick.coordinated_session import (
+    FreeSpaceMotionEvidence,
+    FreeSpaceMotionRequest,
+)
 from rocobrick.execution.operation_state_ledger import OperationStateLedger
 from rocobrick.isaac_backend import (
     RuntimeOperation,
@@ -91,10 +95,24 @@ class PickMotionTransport(Protocol):
     def run_motion_operation(
         self, robot_id: str, operation: RuntimeOperation
     ) -> Mapping[str, object]:
-        """Run one runtime operation and return its strict record."""
+        """Run one validated runtime operation."""
 
     def cancel_motion_operation(self, operation_id: str) -> Mapping[str, object]:
         """Cancel one currently active runtime request."""
+
+
+class PickFreeSpaceTransport(Protocol):
+    """Dispatch one skill-neutral free-space phase."""
+
+    async def free_space_context(
+        self, participants: tuple[str, ...]
+    ) -> tuple[Mapping[str, object], int, Mapping[str, float]]:
+        """Read the shared scene/version and complete combined start state."""
+
+    async def execute_free_space(
+        self, request: FreeSpaceMotionRequest
+    ) -> FreeSpaceMotionEvidence:
+        """Execute free-space targets and return measured lifecycle evidence."""
 
 
 @dataclass(frozen=True)
@@ -130,6 +148,7 @@ class PickHandler:
         session_id: str,
         manifest_sha256: str,
         motion_transport: PickMotionTransport | None = None,
+        free_space_transport: PickFreeSpaceTransport | None = None,
         context: TransitContext | None = None,
         poll_interval_s: float = 0.2,
     ) -> None:
@@ -139,9 +158,66 @@ class PickHandler:
         self._session_id = session_id
         self._manifest_sha256 = manifest_sha256
         self._motion = motion_transport
+        self._free_space = free_space_transport
         self._context = context
         self._poll_interval_s = float(poll_interval_s)
         self._active_requests: dict[str, str] = {}
+
+    def _free_space_target(
+        self, robot_id: str, target_pose: TcpPoseTarget
+    ) -> Mapping[str, object]:
+        """Serialize one calibrated TCP target for unified free-space motion."""
+        return {
+            robot_id: {
+                "tcp_pose": {
+                    "position": tuple(target_pose.position),
+                    "orientation_xyzw": tuple(target_pose.orientation_xyzw),
+                    "frame_id": f"{robot_id}_base_link",
+                    "tip_link": f"{robot_id}_rocobrick_tcp",
+                    "runtime_model_sha256": target_pose.runtime_model_sha256,
+                    "source_sha256": target_pose.source_sha256,
+                    "position_tolerance_m": target_pose.position_tolerance_m,
+                    "orientation_tolerance_rad": target_pose.orientation_tolerance_rad,
+                }
+            }
+        }
+
+    async def execute_free_space_phase(
+        self,
+        operation: RobotOperation,
+        *,
+        scene_snapshot: Mapping[str, object],
+        scene_version: int,
+        targets: Mapping[str, Mapping[str, object]],
+        start_state: Mapping[str, float],
+        session_robots: tuple[str, ...] | None = None,
+        phase_id: str = "free-space",
+        physical_facts: Mapping[str, Mapping[str, object]] | None = None,
+    ) -> FreeSpaceMotionEvidence:
+        """Execute an optional skill-owned free-space phase.
+
+        This seam carries no PICK/contact meaning into the unified runtime. The
+        caller remains responsible for deciding which phase is free space and
+        for interpreting the returned lifecycle evidence.
+        """
+        if self._free_space is None:
+            raise RuntimeError("PICK free-space transport is unavailable")
+        participants = tuple(operation.participants)
+        session_ids = session_robots or tuple(
+            getattr(self._free_space, "robot_ids", operation.participants)
+        )
+        request = FreeSpaceMotionRequest(
+            motion_id=f"{operation.operation_id}:{phase_id}",
+            session_robots=tuple(session_ids),
+            participants=participants,
+            scene_snapshot=scene_snapshot,
+            scene_version=scene_version,
+            targets=targets,
+            start_state=start_state,
+            timeout_s=60.0,
+            physical_facts=dict(physical_facts or {}),
+        )
+        return await self._free_space.execute_free_space(request)
 
     async def preflight(self, operation: RobotOperation) -> PickAdmission:
         """Validate target identity, ownership, arrival and fresh scene."""
@@ -204,7 +280,7 @@ class PickHandler:
         minimum = tuple(float(value) for value in sample.aabb_min)
         maximum = tuple(float(value) for value in sample.aabb_max)
         object_id = admission.physical_instance_id
-        frame_id = f"{admission.robot_id}_world"
+        frame_id = "dual_world"
         boxes = [
             box_from_aabb(
                 object_id=object_id,
@@ -507,10 +583,10 @@ class PickHandler:
             approach_z = contact_base[2]
             targets = replace(
                 targets,
-                approach=replace(
-                    targets.approach,
-                    position=(targets.approach.position[0],
-                              targets.approach.position[1], approach_z),
+                precontact_boundary=replace(
+                    targets.precontact_boundary,
+                    position=(targets.precontact_boundary.position[0],
+                              targets.precontact_boundary.position[1], approach_z),
                 ),
             )
             evidence["approach_contact_surface"] = {
@@ -554,10 +630,8 @@ class PickHandler:
                         goal_tolerance=context.params.gripper_goal_tolerance,
                         expected_opening_m=targets.reach_expected_window_m,
                     ), 60.0, f"{operation.operation_id}:open_gripper")),
-                ("reach_pregrasp", tcp_pose_operation(targets.pregrasp, 60.0,
-                    f"{operation.operation_id}:reach_pregrasp")),
-                ("approach", tcp_pose_operation(targets.approach, 60.0,
-                    f"{operation.operation_id}:approach")),
+                ("precontact_boundary", tcp_pose_operation(targets.precontact_boundary, 60.0,
+                    f"{operation.operation_id}:precontact_boundary")),
                 ("close_gripper", gripper_operation(
                     GripperTarget(
                         opening_m=targets.close_opening_m,
@@ -567,8 +641,67 @@ class PickHandler:
                     ), 60.0, f"{operation.operation_id}:close_gripper")),
             )
             for phase, runtime_operation in phases:
-                result = await self._dispatch(operation, phase, runtime_operation)
-                evidence.update(result.evidence)
+                if phase == "precontact_boundary" and self._free_space is not None:
+                    try:
+                        scene, version, start_state = (
+                            await self._free_space.free_space_context(
+                                tuple(operation.participants)
+                            )
+                        )
+                        target_pose = targets.precontact_boundary
+                        target = self._free_space_target(
+                            operation.executor_robot_id, target_pose
+                        )
+                        free_result = await self.execute_free_space_phase(
+                            operation,
+                            scene_snapshot=scene,
+                            scene_version=version,
+                            targets=target,
+                            start_state=start_state,
+                            session_robots=tuple(
+                                getattr(self._free_space, "robot_ids", operation.participants)
+                            ),
+                            phase_id=phase,
+                        )
+                        result_passed = all(
+                            (
+                                free_result.planned,
+                                free_result.prepared,
+                                free_result.started,
+                                free_result.arrival_confirmed,
+                                free_result.terminal,
+                                free_result.safe_to_release,
+                            )
+                        )
+                        phase_evidence = dict(free_result.evidence)
+                        phase_evidence["free_space"] = {
+                            "motion_id": free_result.motion_id,
+                            "participants": list(free_result.participants),
+                            "arrival_confirmed": free_result.arrival_confirmed,
+                            "terminal": free_result.terminal,
+                            "safe_to_release": free_result.safe_to_release,
+                        }
+                        evidence[phase] = phase_evidence
+                        if not result_passed:
+                            return self._failed(
+                                operation,
+                                free_result.reason or "free-space pregrasp failed",
+                                evidence,
+                                terminal=free_result.terminal,
+                                motion_sent=free_result.started,
+                            )
+                        result = _MotionEvidence(
+                            True, free_result.terminal, free_result.safe_to_release,
+                            free_result.started, phase_evidence, None,
+                        )
+                    except Exception as error:
+                        return self._failed(
+                            operation, f"PICK_FREE_SPACE_FAILED: {error}", evidence,
+                            terminal=True, motion_sent=False,
+                        )
+                else:
+                    result = await self._dispatch(operation, phase, runtime_operation)
+                    evidence.update(result.evidence)
                 motion_sent = motion_sent or result.motion_sent
                 if not result.passed:
                     return self._failed(operation, result.reason or f"{phase} failed", evidence,
@@ -586,7 +719,7 @@ class PickHandler:
                             terminal=result.terminal,
                             motion_sent=motion_sent,
                         )
-                if phase == "reach_pregrasp":
+                if phase == "precontact_boundary":
                     self._ledger.confirm(
                         admission.robot_id,
                         "robot_at_pick_region",
@@ -632,13 +765,88 @@ class PickHandler:
             if not result.passed:
                 return self._failed(operation, result.reason or "attach failed", evidence,
                                     terminal=result.terminal, motion_sent=motion_sent)
-            lift = tcp_pose_operation(targets.lift, 60.0, f"{operation.operation_id}:lift")
-            result = await self._dispatch(operation, "lift", lift)
-            evidence.update(result.evidence)
-            motion_sent = motion_sent or result.motion_sent
-            if not result.passed:
-                return self._failed(operation, result.reason or "lift failed", evidence,
-                                    terminal=result.terminal, motion_sent=motion_sent)
+            if self._free_space is not None:
+                scene, version, start_state = await self._free_space.free_space_context(
+                    tuple(operation.participants)
+                )
+                # The lift plan must treat the brick as attached to this
+                # robot's TCP, not as a second world box: carry the attach
+                # phase's measured attachment payload as a request-scoped
+                # physical fact. This is NOT a ledger holding confirmation;
+                # holding stays provable only by the post-lift follow samples.
+                attach_payload = {
+                    "scene_id": f"{operation.operation_id}-attach",
+                    "object_id": admission.physical_instance_id,
+                    "link_name": attach_frame,
+                    "frame_id": attach_frame,
+                    "minimum_m": list(attach_minimum),
+                    "maximum_m": list(attach_maximum),
+                    "geometry_digest": attach_geometry_digest,
+                    "touch_links": [
+                        f"{admission.robot_id}_gripper_link1",
+                        f"{admission.robot_id}_gripper_link2",
+                    ],
+                }
+                lift_result = await self.execute_free_space_phase(
+                    operation,
+                    scene_snapshot=scene,
+                    scene_version=version,
+                    targets=self._free_space_target(
+                        operation.executor_robot_id, targets.lift
+                    ),
+                    start_state=start_state,
+                    session_robots=tuple(
+                        getattr(self._free_space, "robot_ids", operation.participants)
+                    ),
+                    phase_id="lift",
+                    physical_facts={
+                        admission.robot_id: {
+                            f"holding:{admission.physical_instance_id}": {
+                                "attachment": attach_payload,
+                                "operation_id": operation.operation_id,
+                                "phase": "attach",
+                            }
+                        }
+                    },
+                )
+                evidence["lift_free_space"] = dict(lift_result.evidence)
+                evidence["lift_free_space"]["lifecycle"] = {
+                    "prepared": lift_result.prepared,
+                    "started": lift_result.started,
+                    "arrival_confirmed": lift_result.arrival_confirmed,
+                    "terminal": lift_result.terminal,
+                    "safe_to_release": lift_result.safe_to_release,
+                }
+                if not all(
+                    (
+                        lift_result.planned,
+                        lift_result.prepared,
+                        lift_result.started,
+                        lift_result.arrival_confirmed,
+                        lift_result.terminal,
+                        lift_result.safe_to_release,
+                    )
+                ):
+                    return self._failed(
+                        operation,
+                        lift_result.reason or "lift free-space failed",
+                        evidence,
+                        terminal=lift_result.terminal,
+                        motion_sent=lift_result.started,
+                    )
+                motion_sent = motion_sent or lift_result.started
+            else:
+                lift = tcp_pose_operation(
+                    targets.lift, 60.0, f"{operation.operation_id}:lift"
+                )
+                result = await self._dispatch(operation, "lift", lift)
+                evidence.update(result.evidence)
+                motion_sent = motion_sent or result.motion_sent
+                if not result.passed:
+                    return self._failed(
+                        operation, result.reason or "lift failed", evidence,
+                        terminal=result.terminal, motion_sent=motion_sent
+                    )
             lift_start = parse_pick_observation(
                 await self._observations.observe(admission.robot_id),
                 robot_id=admission.robot_id,

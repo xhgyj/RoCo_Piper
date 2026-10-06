@@ -38,7 +38,10 @@ EXAMPLE1_STAP_PATH = (
     REPO_ROOT / "runs" / "scene-smoke-20260914T093942Z" / "input" / "plan.json"
 )
 EXAMPLE1_PLAN_PATH = (
-    REPO_ROOT / "artifacts" / "scene" / "example1-robot-operation-plan.json"
+    REPO_ROOT
+    / "runs"
+    / "example1-v2-plan-fixture"
+    / "example1-v2-robot-operation-plan.json"
 )
 
 
@@ -202,17 +205,6 @@ def _plan(
 def _default_operations():
     return [
         _operation(
-            "a-transit",
-            "task-mid",
-            "TRANSIT",
-            "piper_a",
-            target=_transit(
-                _ref("robot_current"),
-                _ref("part", part="brick-mid"),
-            ),
-            resources=["robot:piper_a"],
-        ),
-        _operation(
             "a-pick",
             "task-mid",
             "PICK",
@@ -236,17 +228,12 @@ def _default_operations():
             evidence=["connection_confirmed"],
         ),
         _operation(
-            "b-transit",
+            "b-pick",
             "task-top",
-            "TRANSIT",
+            "PICK",
             "piper_b",
-            target=_transit(
-                _ref("part", part="brick-mid"),
-                _ref("connection", connection="conn-top-mid"),
-                carrying="brick-top",
-            ),
-            resources=["robot:piper_b", "part:brick-top", "part:brick-mid"],
-            evidence=["carrying_state_confirmed"],
+            target={"physical_instance_id": "brick-top"},
+            resources=["robot:piper_b", "part:brick-top"],
         ),
         _operation(
             "b-place",
@@ -266,17 +253,15 @@ def _default_operations():
 
 
 _DEFAULT_LAYERS = (
-    ("a-transit",),
     ("a-pick",),
     ("a-place",),
-    ("b-transit",),
+    ("b-pick",),
     ("b-place",),
 )
 _DEFAULT_SCHEDULE = _schedule(
-    ({"operation_id": "a-transit", "robot_id": "piper_a"},),
     ({"operation_id": "a-pick", "robot_id": "piper_a"},),
     ({"operation_id": "a-place", "robot_id": "piper_a"},),
-    ({"operation_id": "b-transit", "robot_id": "piper_b"},),
+    ({"operation_id": "b-pick", "robot_id": "piper_b"},),
     ({"operation_id": "b-place", "robot_id": "piper_b"},),
 )
 def _dependency(before, after, reason):
@@ -288,10 +273,9 @@ def _dependency(before, after, reason):
 
 
 _DEFAULT_DEPENDENCIES = (
-    _dependency("a-transit", "a-pick", "pick requires transit"),
     _dependency("a-pick", "a-place", "place requires holding"),
-    _dependency("a-place", "b-transit", "carry onto placed support"),
-    _dependency("b-transit", "b-place", "place requires carry"),
+    _dependency("a-place", "b-pick", "pick after support placed"),
+    _dependency("b-pick", "b-place", "place requires holding"),
 )
 
 
@@ -349,14 +333,12 @@ def test_example1_stap_fixture_matches_the_artifact() -> None:
 def test_example1_artifact_parses_with_validated_stap() -> None:
     stap = parse_stap_plan(_load(EXAMPLE1_STAP_PATH))
     parsed = parse_robot_operation_plan(_load(EXAMPLE1_PLAN_PATH), source_plan=stap)
-    assert parsed.plan_id == "robot-operation-plan-example1-v1"
+    assert parsed.plan_id == "robot-operation-plan-example1-v2"
     assert parsed.source_plan_id == stap.plan_id
     assert parsed.robots == ("piper_0", "piper_1")
     assert [operation.skill for operation in parsed.operations.values()] == [
-        "TRANSIT",
         "WAIT",
         "PICK",
-        "TRANSIT",
         "PLACE_DOWN",
     ]
     assert parsed.operations["example1-piper0-place-down"].target.values[
@@ -369,10 +351,8 @@ def test_example1_artifact_parses_with_raw_stap_payload() -> None:
         _load(EXAMPLE1_PLAN_PATH), source_plan=_load(EXAMPLE1_STAP_PATH)
     )
     assert set(parsed.operations) == {
-        "example1-piper0-transit-to-pick",
         "example1-piper1-wait-stable",
         "example1-piper0-pick",
-        "example1-piper0-transit-to-place",
         "example1-piper0-place-down",
     }
 
@@ -407,13 +387,12 @@ def test_example1_artifact_input_order_is_preserved_and_never_mutated() -> None:
 def test_synthetic_plan_binds_to_its_stap() -> None:
     parsed = parse_robot_operation_plan(_default_plan(), source_plan=_synthetic_stap())
     assert list(parsed.operations) == [
-        "a-transit",
         "a-pick",
         "a-place",
-        "b-transit",
+        "b-pick",
         "b-place",
     ]
-    assert parsed.dependencies[1].predecessor_operation_id == "a-pick"
+    assert parsed.dependencies[1].predecessor_operation_id == "a-place"
     assert isinstance(parsed.planned_schedule[0][0], ScheduledOperation)
     assert parsed.planned_schedule[0][0].slot == 0
 
@@ -484,15 +463,29 @@ def test_rejects_unknown_source_task() -> None:
 
 
 def test_rejects_motion_executor_outside_allocation() -> None:
-    raw = _default_plan()
-    operation = raw["operations"][3]
-    operation["executor_robot_id"] = "piper_a"
-    operation["participants"] = ["piper_a"]
-    operation["role_bindings"] = {"executor": "piper_a"}
-    operation["resources"] = ["robot:piper_a", "part:brick-top", "part:brick-mid"]
-    raw["planned_schedule"][3] = [{"operation_id": "b-transit", "robot_id": "piper_a"}]
+    """HANDOVER receiver must remain inside the task allocation."""
+    stap = _synthetic_stap()
+    operation = _operation(
+        "handover",
+        "task-mid",
+        "HANDOVER",
+        "piper_b",
+        participants=["piper_a", "piper_b"],
+        role_bindings={"executor": "piper_b", "donor": "piper_a", "receiver": "piper_b"},
+        target={
+            "physical_instance_id": "brick-mid",
+            "donor_robot_id": "piper_a",
+            "receiver_robot_id": "piper_b",
+        },
+        parameters={
+            "grasp_profile_id": "brick-side-grasp-v1",
+            "co_hold_timeout_s": 10.0,
+            "follow_samples": 4,
+        },
+        resources=["robot:piper_a", "robot:piper_b", "part:brick-mid"],
+    )
     with pytest.raises(RobotOperationPlanError, match="allocation"):
-        parse_robot_operation_plan(raw, source_plan=_synthetic_stap())
+        parse_robot_operation_plan(_one(operation), source_plan=stap)
 
 
 def test_rejects_motion_participants_beyond_allocation() -> None:
@@ -544,45 +537,55 @@ def test_rejects_pick_of_a_foreign_part() -> None:
         parse_robot_operation_plan(_one(operation), source_plan=stap)
 
 
-def test_rejects_transit_part_outside_task_and_supports() -> None:
+def test_rejects_handover_of_a_foreign_part() -> None:
+    """HANDOVER may only transfer the source task part or a support."""
     stap = _synthetic_stap()
     operation = _operation(
-        "a-transit",
+        "handover",
         "task-mid",
-        "TRANSIT",
-        "piper_a",
-        target=_transit(_ref("robot_current"), _ref("part", part="brick-side")),
-        resources=["robot:piper_a"],
-    )
-    with pytest.raises(RobotOperationPlanError, match="TRANSIT"):
-        parse_robot_operation_plan(_one(operation), source_plan=stap)
-
-
-def test_rejects_transit_carrying_a_foreign_part() -> None:
-    stap = _synthetic_stap()
-    operation = _operation(
-        "b-transit",
-        "task-top",
-        "TRANSIT",
+        "HANDOVER",
         "piper_b",
-        target=_transit(
-            _ref("robot_current"),
-            _ref("part", part="brick-mid"),
-            carrying="brick-base",
-        ),
-        resources=["robot:piper_b", "part:brick-base"],
+        participants=["piper_a", "piper_b"],
+        role_bindings={"executor": "piper_b", "donor": "piper_a", "receiver": "piper_b"},
+        target={
+            "physical_instance_id": "brick-side",
+            "donor_robot_id": "piper_a",
+            "receiver_robot_id": "piper_b",
+        },
+        parameters={
+            "grasp_profile_id": "brick-side-grasp-v1",
+            "co_hold_timeout_s": 10.0,
+            "follow_samples": 4,
+        },
+        resources=["robot:piper_a", "robot:piper_b", "part:brick-side"],
     )
-    with pytest.raises(RobotOperationPlanError, match="carries"):
+    with pytest.raises(RobotOperationPlanError, match="HANDOVER part"):
         parse_robot_operation_plan(_one(operation), source_plan=stap)
 
 
-def test_rejects_transit_connection_not_placed_by_its_source_task() -> None:
-    raw = _default_plan()
-    raw["operations"][3]["target"]["to"] = _ref(
-        "connection", connection="conn-mid-base"
+def test_rejects_handover_role_with_invalid_participant() -> None:
+    """HANDOVER target roles and participants must agree exactly."""
+    operation = _operation(
+        "handover",
+        "task-mid",
+        "HANDOVER",
+        "piper_b",
+        participants=["piper_a", "piper_b"],
+        role_bindings={"executor": "piper_b", "donor": "piper_a", "receiver": "piper_b"},
+        target={
+            "physical_instance_id": "brick-mid",
+            "donor_robot_id": "piper_a",
+            "receiver_robot_id": "piper_b",
+        },
+        parameters={
+            "grasp_profile_id": "brick-side-grasp-v1",
+            "co_hold_timeout_s": 10.0,
+            "follow_samples": 4,
+        },
+        resources=["robot:piper_a", "robot:piper_b", "part:brick-mid"],
     )
-    with pytest.raises(RobotOperationPlanError, match="not placed"):
-        parse_robot_operation_plan(raw, source_plan=_synthetic_stap())
+    with pytest.raises(RobotOperationPlanError, match="allocation"):
+        parse_robot_operation_plan(_one(operation), source_plan=_synthetic_stap())
 
 
 def test_rejects_place_down_upper_not_the_task_part() -> None:
@@ -762,7 +765,7 @@ def test_rejects_ungrounded_connection_without_a_source_plan() -> None:
         ),
         resources=["robot:piper_a"],
     )
-    with pytest.raises(RobotOperationPlanError, match="grounds"):
+    with pytest.raises(RobotOperationPlanError, match="unsupported"):
         parse_robot_operation_plan(_one(operation))
 
 
@@ -965,18 +968,6 @@ def test_rejects_same_layer_resource_conflict() -> None:
         resources=["robot:piper_a", "part:brick-mid"],
     )
     second = _operation(
-        "b-transit",
-        "task-top",
-        "TRANSIT",
-        "piper_b",
-        target=_transit(
-            _ref("part", part="brick-mid"),
-            _ref("connection", connection="conn-top-mid"),
-            carrying="brick-top",
-        ),
-        resources=["robot:piper_b", "part:brick-top", "part:brick-mid"],
-    )
-    third = _operation(
         "b-place",
         "task-top",
         "PLACE_DOWN",
@@ -990,14 +981,13 @@ def test_rejects_same_layer_resource_conflict() -> None:
         ],
     )
     raw = _plan(
-        [first, second, third],
-        [["a-pick", "b-transit"], ["b-place"]],
+        [first, second],
+        [["a-pick", "b-place"]],
         _schedule(
             (
                 {"operation_id": "a-pick", "robot_id": "piper_a"},
-                {"operation_id": "b-transit", "robot_id": "piper_b"},
+                {"operation_id": "b-place", "robot_id": "piper_b"},
             ),
-            ({"operation_id": "b-place", "robot_id": "piper_b"},),
         ),
     )
     with pytest.raises(RobotOperationPlanError, match="resource conflict"):
@@ -1024,14 +1014,14 @@ def test_rejects_operation_listed_twice_in_layers() -> None:
 
 
 def test_rejects_schedule_coverage_gap() -> None:
-    raw = _default_plan(schedule=_DEFAULT_SCHEDULE[:4])
+    raw = _default_plan(schedule=_DEFAULT_SCHEDULE[:3])
     with pytest.raises(RobotOperationPlanError, match="planned_schedule"):
         parse_robot_operation_plan(raw, source_plan=_synthetic_stap())
 
 
 def test_rejects_schedule_robot_mismatch() -> None:
     raw = _default_plan()
-    raw["planned_schedule"][0] = [{"operation_id": "a-transit", "robot_id": "piper_b"}]
+    raw["planned_schedule"][0] = [{"operation_id": "a-pick", "robot_id": "piper_b"}]
     with pytest.raises(RobotOperationPlanError, match="executor"):
         parse_robot_operation_plan(raw, source_plan=_synthetic_stap())
 
@@ -1045,7 +1035,7 @@ def test_rejects_unknown_dependency_operation() -> None:
 
 def test_rejects_dependency_without_layer_order() -> None:
     raw = _default_plan(
-        layers=(("a-transit", "a-pick"), ("a-place",), ("b-transit",), ("b-place",))
+        layers=(("a-place", "a-pick"), ("b-pick",), ("b-place",))
     )
     with pytest.raises(RobotOperationPlanError, match="order"):
         parse_robot_operation_plan(raw, source_plan=_synthetic_stap())
@@ -1054,10 +1044,9 @@ def test_rejects_dependency_without_layer_order() -> None:
 def test_rejects_dependency_without_schedule_slot_order() -> None:
     raw = _default_plan(
         schedule=_schedule(
-            ({"operation_id": "a-pick", "robot_id": "piper_a"},),
-            ({"operation_id": "a-transit", "robot_id": "piper_a"},),
             ({"operation_id": "a-place", "robot_id": "piper_a"},),
-            ({"operation_id": "b-transit", "robot_id": "piper_b"},),
+            ({"operation_id": "a-pick", "robot_id": "piper_a"},),
+            ({"operation_id": "b-pick", "robot_id": "piper_b"},),
             ({"operation_id": "b-place", "robot_id": "piper_b"},),
         )
     )

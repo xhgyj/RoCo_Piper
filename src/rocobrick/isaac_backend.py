@@ -114,6 +114,21 @@ DETACHED_SCENE_PAYLOAD_KEYS = frozenset({
     "scene_id", "object_id", "link_name", "operation",
 })
 
+TRANSFER_ATTACHED_SCENE_PAYLOAD_KEYS = frozenset({
+    "transfer_id",
+    "object_id",
+    "donor_robot_id",
+    "donor_link_name",
+    "receiver_robot_id",
+    "receiver_link_name",
+    "frame_id",
+    "minimum_m",
+    "maximum_m",
+    "geometry_digest",
+    "touch_links",
+    "expected_before",
+})
+
 
 class OperationKind(StrEnum):
     """Exact operation vocabulary exchanged across the container boundary."""
@@ -126,6 +141,7 @@ class OperationKind(StrEnum):
     GRIPPER_TARGET = "GRIPPER_TARGET"
     APPLY_PLANNING_SCENE = "APPLY_PLANNING_SCENE"
     ATTACH_PLANNING_SCENE = "ATTACH_PLANNING_SCENE"
+    TRANSFER_ATTACHED_PLANNING_SCENE = "TRANSFER_ATTACHED_PLANNING_SCENE"
     SCENE_QUERY = "SCENE_QUERY"
 
 
@@ -542,6 +558,67 @@ def detached_planning_scene_operation(
     return RuntimeOperation(
         kind=OperationKind.ATTACH_PLANNING_SCENE,
         payload=dict(payload), timeout_s=float(timeout_s), request_id=request_id,
+    )
+
+
+def transfer_attached_planning_scene_operation(
+    payload: Mapping[str, object], timeout_s: float, request_id: str
+) -> RuntimeOperation:
+    """Build one strict session-level attachment transfer request."""
+    if not _is_finite(timeout_s) or float(timeout_s) <= 0.0:
+        raise OperationContractError("transfer timeout_s must be finite and positive")
+    if not isinstance(request_id, str) or not request_id:
+        raise OperationContractError("request_id must be a non-empty string")
+    _require_exact_keys(
+        payload, TRANSFER_ATTACHED_SCENE_PAYLOAD_KEYS, "transfer scene payload"
+    )
+    for key in (
+        "transfer_id",
+        "object_id",
+        "donor_robot_id",
+        "donor_link_name",
+        "receiver_robot_id",
+        "receiver_link_name",
+        "frame_id",
+    ):
+        if not isinstance(payload[key], str) or not payload[key]:
+            raise OperationContractError(f"transfer {key} must be non-empty")
+    if payload["donor_robot_id"] == payload["receiver_robot_id"]:
+        raise OperationContractError("transfer donor and receiver must differ")
+    if not _is_sha256_digest(payload["geometry_digest"]):
+        raise OperationContractError("transfer geometry_digest is invalid")
+    minimum = _require_finite_sequence(payload["minimum_m"], 3, "minimum_m")
+    maximum = _require_finite_sequence(payload["maximum_m"], 3, "maximum_m")
+    if any(low >= high for low, high in zip(minimum, maximum)):
+        raise OperationContractError("transfer maximum_m must exceed minimum_m")
+    expected = box_geometry_digest(
+        object_id=str(payload["object_id"]),
+        frame_id=str(payload["frame_id"]),
+        minimum_m=minimum,
+        maximum_m=maximum,
+    )
+    if expected != payload["geometry_digest"]:
+        raise OperationContractError("transfer geometry_digest does not match")
+    touch_links = payload["touch_links"]
+    if (
+        not isinstance(touch_links, (list, tuple))
+        or not touch_links
+        or any(not isinstance(link, str) or not link for link in touch_links)
+        or len(set(touch_links)) != len(touch_links)
+    ):
+        raise OperationContractError("transfer touch_links must be unique strings")
+    before = payload["expected_before"]
+    if not isinstance(before, Mapping) or set(before) != {
+        "donor_attached", "receiver_attached"
+    } or before["donor_attached"] is not True or before["receiver_attached"] is not False:
+        raise OperationContractError(
+            "transfer expected_before must require donor attached and receiver absent"
+        )
+    return RuntimeOperation(
+        kind=OperationKind.TRANSFER_ATTACHED_PLANNING_SCENE,
+        payload=dict(payload),
+        timeout_s=float(timeout_s),
+        request_id=request_id,
     )
 
 
@@ -972,6 +1049,8 @@ def target_for_operation(
         )
     if operation.kind in (
         OperationKind.APPLY_PLANNING_SCENE,
+        OperationKind.ATTACH_PLANNING_SCENE,
+        OperationKind.TRANSFER_ATTACHED_PLANNING_SCENE,
         OperationKind.SCENE_QUERY,
     ):
         raise OperationContractError(
@@ -1006,6 +1085,7 @@ __all__ = [
     "SCENE_QUERY_PAYLOAD_KEYS",
     "TCP_PAYLOAD_KEYS",
     "ATTACHED_SCENE_PAYLOAD_KEYS",
+    "TRANSFER_ATTACHED_SCENE_PAYLOAD_KEYS",
     "OperationContractError",
     "OperationKind",
     "OperationRejected",

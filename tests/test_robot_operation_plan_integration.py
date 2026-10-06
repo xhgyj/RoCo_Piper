@@ -54,7 +54,9 @@ SRC = ROOT / "src/rocobrick"
 PIPER_RUN_SOURCE = SRC / "piper_run.py"
 TASK_DIR = ROOT / "tasks/type1/example1"
 STAP_PLAN = ROOT / "runs/scene-smoke-20260914T093942Z/input/plan.json"
-OPERATION_PLAN = ROOT / "artifacts/scene/example1-robot-operation-plan.json"
+OPERATION_PLAN = (
+    ROOT / "tests/fixtures/robot_operation_plans/example1-robot-operation-plan.json"
+)
 SCENE_MANIFEST = ROOT / "artifacts/scene/example1-scene-manifest.json"
 USER_CONFIG = ROOT / "config/user_config.json"
 
@@ -664,29 +666,24 @@ def test_full_example1_plan_runs_zero_motion_with_injected_observation(
     assert document["passed"] is False
     operations = document["operations"]
     assert set(operations) == {
-        TRANSIT_TO_PICK,
         PIPER1_WAIT,
         PIPER0_PICK,
-        PIPER0_TRANSIT_TO_PLACE,
         PIPER0_PLACE_DOWN,
     }
 
-    # The motion skills fail closed before any motion command exists.
-    transit = operations[TRANSIT_TO_PICK]
-    assert transit["robot_id"] == "piper_0"
-    assert transit["status"] == "FAILED"
-    assert transit["passed"] is False
-    assert transit["terminal"] is True
-    assert transit["motion_sent"] is False
-    assert transit["evidence"] == {}
-    assert REASON_CAPABILITY_UNAVAILABLE in transit["reason"]
+    # A motion operation without the injected physical session capability fails
+    # closed before any motion command exists.
+    pick = operations[PIPER0_PICK]
+    assert pick["robot_id"] == "piper_0"
+    assert pick["status"] == "FAILED"
+    assert pick["passed"] is False
+    assert pick["terminal"] is True
+    assert pick["motion_sent"] is False
+    assert pick["evidence"] == {}
+    assert REASON_CAPABILITY_UNAVAILABLE in pick["reason"]
 
-    # The dependent layers are blocked, not silently skipped or confirmed.
-    for operation_id in (
-        PIPER0_PICK,
-        PIPER0_TRANSIT_TO_PLACE,
-        PIPER0_PLACE_DOWN,
-    ):
+    # The dependent placement layer is blocked, not silently skipped.
+    for operation_id in (PIPER0_PLACE_DOWN,):
         blocked = operations[operation_id]
         assert blocked["status"] == "BLOCKED", operation_id
         assert blocked["passed"] is False, operation_id
@@ -725,13 +722,13 @@ def test_full_example1_plan_runs_zero_motion_with_injected_observation(
     # Layer barriers and evidence follow the plan's execution layers.
     assert [
         (layer["layer_index"], layer["status"]) for layer in document["layers"]
-    ] == [(0, "FAILED"), (1, "BLOCKED"), (2, "BLOCKED"), (3, "BLOCKED")]
+    ] == [(0, "FAILED"), (1, "BLOCKED")]
     assert document["layers"][0]["operation_ids"] == [
-        TRANSIT_TO_PICK,
         PIPER1_WAIT,
+        PIPER0_PICK,
     ]
     for layer_index, operation_id in enumerate(
-        (PIPER0_PICK, PIPER0_TRANSIT_TO_PLACE, PIPER0_PLACE_DOWN), start=1
+        (PIPER0_PLACE_DOWN,), start=1
     ):
         assert document["layers"][layer_index]["operation_ids"] == [
             operation_id
@@ -745,8 +742,8 @@ def test_full_example1_plan_runs_zero_motion_with_injected_observation(
     resources = document["resources"]
     assert resources
     assert {item["operation_id"] for item in resources} == {
-        TRANSIT_TO_PICK,
         PIPER1_WAIT,
+        PIPER0_PICK,
     }
     for item in resources:
         assert item["acquired"] is True
@@ -930,7 +927,7 @@ def test_a_peer_failure_cancels_a_pending_wait_without_unsafe_terminal(
 @pytest.mark.parametrize(
     ("operation_id", "robot_id"),
     [
-        (TRANSIT_TO_PICK, "piper_0"),
+
         (PIPER0_PICK, "piper_0"),
         (PIPER0_PLACE_DOWN, "piper_0"),
     ],

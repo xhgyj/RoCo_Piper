@@ -1746,10 +1746,19 @@ def test_query_scene_state_rejects_a_non_json_message():
         world.runtime.query_scene_state(5.0)
 
 
-def test_query_scene_state_raises_when_the_client_is_unavailable():
+def test_query_scene_state_raises_when_the_service_is_undiscovered():
+    """An undiscovered scene service fails explicitly before any call."""
     world = make_world()
     world.scene_state.ready = False
-    with pytest.raises(RuntimeError, match="not available"):
+    with pytest.raises(RuntimeError, match="is not discovered"):
+        world.runtime.query_scene_state(5.0)
+
+
+def test_query_scene_state_raises_when_the_client_was_never_registered():
+    """A missing Trigger client is distinct from an undiscovered service."""
+    world = make_world()
+    world.runtime._scene_state_client = None
+    with pytest.raises(RuntimeError, match="was never registered"):
         world.runtime.query_scene_state(5.0)
 
 

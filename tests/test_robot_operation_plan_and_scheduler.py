@@ -79,22 +79,59 @@ def plan(
     }
 
 
-def test_parses_all_four_skills() -> None:
+def handover_operation(operation_id: str, donor: str, receiver: str) -> dict:
+    """Build one generic HANDOVER operation document.
+
+    Returns:
+        The raw ``robot-operation-plan/v1`` operation document.
+    """
+    return {
+        "operation_id": operation_id,
+        "source_task_id": "task-" + operation_id,
+        "skill": "HANDOVER",
+        "executor_robot_id": receiver,
+        "participants": [receiver, donor],
+        "role_bindings": {
+            "executor": receiver,
+            "donor": donor,
+            "receiver": receiver,
+        },
+        "target": {
+            "physical_instance_id": "brick-1",
+            "donor_robot_id": donor,
+            "receiver_robot_id": receiver,
+        },
+        "parameters": {
+            "grasp_profile_id": "brick-side-grasp-v1",
+            "co_hold_timeout_s": 10.0,
+            "follow_samples": 4,
+        },
+        "preconditions": [],
+        "effects": [],
+        "resources": [
+            f"robot:{receiver}",
+            f"robot:{donor}",
+            "part:brick-1",
+        ],
+        "evidence_requirements": [],
+    }
+
+
+def test_parses_handover_and_core_skills() -> None:
+    """HANDOVER parses alongside the core skills and binds donor/receiver."""
     ops = [
         operation("pick", "piper_0", "PICK"),
-        operation("transit", "piper_1", "TRANSIT"),
+        handover_operation("handover", "piper_0", "piper_1"),
         operation("wait", "piper_0", "WAIT"),
         operation("place", "piper_1", "PLACE_DOWN"),
     ]
     parsed = parse_robot_operation_plan(
         plan(
             ops,
-            [["pick", "transit"], ["wait", "place"]],
+            [["pick"], ["handover"], ["wait", "place"]],
             [
-                [
-                    {"operation_id": "pick", "robot_id": "piper_0"},
-                    {"operation_id": "transit", "robot_id": "piper_1"},
-                ],
+                [{"operation_id": "pick", "robot_id": "piper_0"}],
+                [{"operation_id": "handover", "robot_id": "piper_1"}],
                 [
                     {"operation_id": "wait", "robot_id": "piper_0"},
                     {"operation_id": "place", "robot_id": "piper_1"},
@@ -102,7 +139,24 @@ def test_parses_all_four_skills() -> None:
             ],
         )
     )
-    assert set(parsed.operations) == {"pick", "transit", "wait", "place"}
+    assert set(parsed.operations) == {"pick", "handover", "wait", "place"}
+    handover = parsed.operations["handover"]
+    assert handover.target.values["donor_robot_id"] == "piper_0"
+    assert handover.target.values["receiver_robot_id"] == "piper_1"
+    assert handover.executor_robot_id == "piper_1"
+    assert "part:brick-1" in handover.resources
+
+
+def test_transit_skill_is_rejected_by_the_frozen_plan() -> None:
+    """The plan vocabulary no longer accepts standalone TRANSIT operations."""
+    with pytest.raises(RobotOperationPlanError, match="unsupported"):
+        parse_robot_operation_plan(
+            plan(
+                [operation("transit", "piper_1", "TRANSIT")],
+                [["transit"]],
+                [[{"operation_id": "transit", "robot_id": "piper_1"}]],
+            )
+        )
 
 
 def upward_operation(operation_id: str, robot: str, skill: str, partner: str) -> dict:
@@ -310,7 +364,118 @@ class Canceler:
         self.ids.append(operation_id)
 
 
-def test_scheduler_runs_same_layer_concurrently_and_barriers() -> None:
+def test_scheduler_accepts_skill_internal_free_space_plan_without_transit() -> None:
+    """PICK/SUPPORT_TOP/PLACE_UP carry their own free-space phases."""
+    pick = {
+        "operation_id": "pick-lower",
+        "source_task_id": "task-place-up",
+        "skill": "PICK",
+        "executor_robot_id": "piper_1",
+        "participants": ["piper_1"],
+        "role_bindings": {"executor": "piper_1"},
+        "target": {"physical_instance_id": "brick-lower"},
+        "parameters": {},
+        "preconditions": [],
+        "effects": ["holding:brick-lower"],
+        "resources": ["robot:piper_1", "part:brick-lower"],
+        "evidence_requirements": [],
+    }
+    support = {
+        "operation_id": "support-upper",
+        "source_task_id": "task-place-up",
+        "skill": "SUPPORT_TOP",
+        "executor_robot_id": "piper_0",
+        "participants": ["piper_0"],
+        "role_bindings": {"executor": "piper_0"},
+        "target": {
+            "connection_id": "conn-lower-upper",
+            "upper_physical_instance_id": "brick-upper",
+            "lower_physical_instance_id": "brick-lower",
+            "placement_robot_id": "piper_1",
+        },
+        "parameters": {},
+        "preconditions": [],
+        "effects": ["supporting:brick-upper"],
+        "resources": [
+            "robot:piper_0",
+            "connection:conn-lower-upper",
+            "part:brick-upper",
+        ],
+        "evidence_requirements": [],
+    }
+    place_up = {
+        "operation_id": "place-up-lower",
+        "source_task_id": "task-place-up",
+        "skill": "PLACE_UP",
+        "executor_robot_id": "piper_1",
+        "participants": ["piper_1", "piper_0"],
+        "role_bindings": {"executor": "piper_1", "support": "piper_0"},
+        "target": {
+            "connection_id": "conn-lower-upper",
+            "upper_physical_instance_id": "brick-upper",
+            "lower_physical_instance_id": "brick-lower",
+            "support_robot_id": "piper_0",
+        },
+        "parameters": {},
+        "preconditions": ["holding:brick-lower", "supporting:brick-upper"],
+        "effects": ["assembled:brick-lower"],
+        "resources": [
+            "robot:piper_1",
+            "robot:piper_0",
+            "connection:conn-lower-upper",
+            "part:brick-upper",
+            "part:brick-lower",
+        ],
+        "evidence_requirements": [],
+    }
+    raw = plan(
+        [pick, support, place_up],
+        [["pick-lower"], ["support-upper"], ["place-up-lower"]],
+        [
+            [{"operation_id": "pick-lower", "robot_id": "piper_1"}],
+            [{"operation_id": "support-upper", "robot_id": "piper_0"}],
+            [{"operation_id": "place-up-lower", "robot_id": "piper_1"}],
+        ],
+        deps=[
+            {
+                "predecessor_operation_id": "pick-lower",
+                "successor_operation_id": "support-upper",
+                "reason": "support follows grasp",
+            },
+            {
+                "predecessor_operation_id": "pick-lower",
+                "successor_operation_id": "place-up-lower",
+                "reason": "placement follows grasp",
+            },
+            {
+                "predecessor_operation_id": "support-upper",
+                "successor_operation_id": "place-up-lower",
+                "reason": "placement follows support",
+            },
+        ],
+    )
+    parsed = parse_robot_operation_plan(raw)
+    assert {item.skill for item in parsed.operations.values()} == {
+        "PICK",
+        "SUPPORT_TOP",
+        "PLACE_UP",
+    }
+
+    class RecordingExecutor(Executor):
+        def __init__(self):
+            super().__init__()
+            self.skills: list[str] = []
+
+        async def execute(self, op):
+            self.skills.append(op.skill)
+            return await super().execute(op)
+
+    executor = RecordingExecutor()
+    result = asyncio.run(schedule(parsed, executor))
+    assert result.passed
+    assert executor.skills == ["PICK", "SUPPORT_TOP", "PLACE_UP"]
+    assert all("transit" not in operation_id for operation_id in result.operations)
+
     raw = plan(
         [
             operation("a", "piper_0"),

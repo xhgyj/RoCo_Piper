@@ -53,7 +53,9 @@ BRIDGE_PATH = ROOT / "isaac" / "p05_host_bridge.py"
 # Frozen repository fixtures (read-only provenance inputs): the example1
 # robot-operation-plan/v1, its explicit structure files and scene manifest
 # bind together exactly (pinned by tests/test_structure_scene.py).
-OPERATION_PLAN = ROOT / "artifacts/scene/example1-robot-operation-plan.json"
+OPERATION_PLAN = (
+    ROOT / "tests/fixtures/robot_operation_plans/example1-robot-operation-plan.json"
+)
 TASK_DIR = ROOT / "tasks/type1/example1"
 START = TASK_DIR / "structure_start.json"
 GOAL = TASK_DIR / "structure_goal.json"

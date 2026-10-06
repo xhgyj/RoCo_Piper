@@ -726,7 +726,7 @@ def test_motion_skills_fail_capability_unavailable_before_any_motion(
 def test_motion_skills_reject_invalid_targets_before_any_motion(
     skill, target
 ) -> None:
-    """A malformed target fails closed as TARGET_INVALID without motion."""
+    """Malformed current skills and retired TRANSIT both fail before motion."""
     transport = RecordingTransport({})
     executor = make_executor(transport)
     result = asyncio.run(
@@ -737,7 +737,10 @@ def test_motion_skills_reject_invalid_targets_before_any_motion(
     assert result.motion_sent is False
     assert result.evidence == {}
     assert result.reason is not None
-    assert result.reason.startswith(REASON_TARGET_INVALID)
+    expected = (
+        REASON_CAPABILITY_UNAVAILABLE if skill == "TRANSIT" else REASON_TARGET_INVALID
+    )
+    assert result.reason.startswith(expected)
     assert transport.calls == []
 
 
@@ -890,33 +893,29 @@ def test_scheduler_confirms_the_wait_and_fails_the_motion_skill() -> None:
     payload = _wait_plan(duration_s=1.0)
     payload["operations"].append(
         {
-            "operation_id": "plan-transit",
-            "source_task_id": "task-transit",
-            "skill": "TRANSIT",
+            "operation_id": "plan-pick",
+            "source_task_id": "task-pick",
+            "skill": "PICK",
             "executor_robot_id": ROBOT_0,
             "participants": [ROBOT_0],
             "role_bindings": {"executor": ROBOT_0},
-            "target": {
-                "from": reference("robot_current"),
-                "to": reference("part", physical_instance_id=BRICK_A),
-                "carrying_physical_instance_id": None,
-            },
+            "target": {"physical_instance_id": BRICK_A},
             "parameters": {},
             "preconditions": [],
             "effects": [],
-            "resources": [f"robot:{ROBOT_0}"],
-            "evidence_requirements": ["transit_feedback_confirmed"],
+            "resources": [f"robot:{ROBOT_0}", f"part:{BRICK_A}"],
+            "evidence_requirements": ["holding_confirmed"],
         }
     )
-    payload["execution_layers"] = [["plan-wait"], ["plan-transit"]]
+    payload["execution_layers"] = [["plan-wait"], ["plan-pick"]]
     payload["planned_schedule"] = [
         [{"operation_id": "plan-wait", "robot_id": ROBOT_1}],
-        [{"operation_id": "plan-transit", "robot_id": ROBOT_0}],
+        [{"operation_id": "plan-pick", "robot_id": ROBOT_0}],
     ]
     payload["dependencies"] = [
         {
             "predecessor_operation_id": "plan-wait",
-            "successor_operation_id": "plan-transit",
+            "successor_operation_id": "plan-pick",
             "reason": "test ordering",
         }
     ]
@@ -935,13 +934,13 @@ def test_scheduler_confirms_the_wait_and_fails_the_motion_skill() -> None:
     assert wait.motion_sent is False
     assert wait.evidence[LABEL_REAL_SCENE_OBSERVATION]
     assert wait.evidence[LABEL_WAIT_DURATION_CONFIRMED]
-    transit = result.operations["plan-transit"]
-    assert transit.status is OperationStatus.FAILED
-    assert transit.passed is False
-    assert transit.terminal is True
-    assert transit.motion_sent is False
-    assert transit.evidence == {}
-    assert transit.reason == REASON_CAPABILITY_UNAVAILABLE
+    pick = result.operations["plan-pick"]
+    assert pick.status is OperationStatus.FAILED
+    assert pick.passed is False
+    assert pick.terminal is True
+    assert pick.motion_sent is False
+    assert pick.evidence == {}
+    assert pick.reason == REASON_CAPABILITY_UNAVAILABLE
     assert set(transport.calls) == {ROBOT_1}
 
 

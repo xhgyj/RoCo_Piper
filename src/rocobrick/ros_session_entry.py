@@ -551,6 +551,56 @@ def filter_scene_state(document: Mapping, query: Mapping) -> dict[str, object]:
     return filtered
 
 
+def perform_transfer_operation(
+    operation: RuntimeOperation,
+    *,
+    session: object,
+) -> RuntimeOperationResult:
+    """Run one session-level attachment transfer with strict status evidence."""
+    try:
+        transfer = getattr(session, "transfer_attached_planning_scene", None)
+        if not callable(transfer):
+            raise RuntimeError("session has no attachment transfer boundary")
+        outcome = transfer(operation.payload, timeout_s=operation.timeout_s)
+        if not isinstance(outcome, Mapping):
+            raise RuntimeError("attachment transfer returned a non-mapping result")
+        status = str(outcome.get("transfer_status", "UNKNOWN"))
+        passed = status == "COMMITTED" and outcome.get("passed") is True
+        execution = {
+            "motion_sent": False,
+            "goals_sent": 0,
+            "passed": passed,
+            "transfer_status": status,
+            "terminal": outcome.get("terminal") is True,
+            "safe_to_release": outcome.get("safe_to_release") is True,
+            "details": _jsonable(dict(outcome)),
+        }
+        return RuntimeOperationResult(
+            request_id=operation.request_id,
+            kind=operation.kind,
+            passed=passed,
+            execution=execution,
+            evidence={"motion_sent": False, "transfer_status": status},
+            error=None if passed else str(outcome.get("error") or status),
+        )
+    except Exception as error:  # noqa: BLE001 - child must always answer
+        return RuntimeOperationResult(
+            request_id=operation.request_id,
+            kind=operation.kind,
+            passed=False,
+            execution={
+                "motion_sent": False,
+                "goals_sent": 0,
+                "passed": False,
+                "transfer_status": "UNKNOWN",
+                "terminal": False,
+                "safe_to_release": False,
+            },
+            evidence={"motion_sent": False, "transfer_status": "UNKNOWN"},
+            error=f"{type(error).__name__}: {error}",
+        )
+
+
 def perform_operation(
     operation: RuntimeOperation,
     *,
@@ -1064,15 +1114,21 @@ def perform_session(
                     dispatched=False,
                 ))
                 break
-            outcome = perform_operation(
-                item.operation,
-                runtime=session.runtime_for(item.robot_id),
-                executor=session.executor_for(item.robot_id),
-                fk_timeout_s=fk_timeout_s,
-                robot_scoped=True,
-                readiness_report=(readiness[item.robot_id]
-                                  if consolidated_readiness else None),
-            )
+            if item.operation.kind is OperationKind.TRANSFER_ATTACHED_PLANNING_SCENE:
+                outcome = perform_transfer_operation(
+                    item.operation,
+                    session=session,
+                )
+            else:
+                outcome = perform_operation(
+                    item.operation,
+                    runtime=session.runtime_for(item.robot_id),
+                    executor=session.executor_for(item.robot_id),
+                    fk_timeout_s=fk_timeout_s,
+                    robot_scoped=True,
+                    readiness_report=(readiness[item.robot_id]
+                                      if consolidated_readiness else None),
+                )
             records.append(_operation_record(item, outcome, dispatched=True))
             if consolidated_readiness and not outcome.passed:
                 break

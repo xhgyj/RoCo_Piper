@@ -9,11 +9,10 @@ Wire shape ``robot-operation-plan/v1`` (frozen):
   ``executor_robot_id``, ``participants``, ``role_bindings``, ``target``,
   ``parameters``, ``preconditions``, ``effects``, ``resources``,
   ``evidence_requirements``;
-* skills: ``PICK``, ``TRANSIT``, ``WAIT``, ``PLACE_DOWN``, ``PLACE_UP``,
+* skills: ``PICK``, ``HANDOVER``, ``WAIT``, ``PLACE_DOWN``, ``PLACE_UP``,
   ``SUPPORT_TOP``;
-* target shapes: ``PICK`` is ``{physical_instance_id}``; ``TRANSIT`` is
-  ``{from, to, carrying_physical_instance_id}`` where ``from``/``to`` are
-  references ``{kind, physical_instance_id, connection_id, robot_id}``;
+* target shapes: ``PICK`` is ``{physical_instance_id}``; ``HANDOVER`` is
+  ``{physical_instance_id, donor_robot_id, receiver_robot_id}``;
   ``PLACE_DOWN`` is ``{connection_id, upper_physical_instance_id,
   lower_physical_instance_id}``; ``PLACE_UP`` is ``{connection_id,
   upper_physical_instance_id, lower_physical_instance_id, support_robot_id}``
@@ -70,7 +69,9 @@ from dataclasses import dataclass
 from rocobrick.stap_contract import StapContractError, StapPlan, parse_stap_plan
 
 ROBOT_OPERATION_PLAN_SCHEMA = "robot-operation-plan/v1"
-SKILLS = frozenset({"PICK", "TRANSIT", "WAIT", "PLACE_DOWN", "PLACE_UP", "SUPPORT_TOP"})
+SKILLS = frozenset(
+    {"PICK", "HANDOVER", "WAIT", "PLACE_DOWN", "PLACE_UP", "SUPPORT_TOP"}
+)
 
 _TOP = frozenset(
     {
@@ -197,6 +198,29 @@ def _ref(value: object, path: str) -> Mapping:
     return item
 
 
+def _handover_parameters(value: object, path: str) -> Mapping:
+    """Validate immutable HANDOVER strategy parameters."""
+    item = _obj(value, path)
+    expected = frozenset({"grasp_profile_id", "co_hold_timeout_s", "follow_samples"})
+    _keys(item, expected, path)
+    _text(item["grasp_profile_id"], path + ".grasp_profile_id")
+    timeout = item["co_hold_timeout_s"]
+    if (
+        isinstance(timeout, bool)
+        or not isinstance(timeout, (int, float))
+        or timeout <= 0
+    ):
+        raise RobotOperationPlanError(
+            f"{path}.co_hold_timeout_s must be a positive number"
+        )
+    samples = item["follow_samples"]
+    if type(samples) is not int or samples < 3:
+        raise RobotOperationPlanError(
+            f"{path}.follow_samples must be an integer >= 3"
+        )
+    return item
+
+
 def _target(
     skill: str, value: object, path: str, executor: str
 ) -> "OperationTarget | None":
@@ -208,22 +232,17 @@ def _target(
     if skill == "PICK":
         _keys(item, frozenset({"physical_instance_id"}), f"{path}.target")
         _text(item["physical_instance_id"], f"{path}.target.physical_instance_id")
-    elif skill == "TRANSIT":
-        _keys(
-            item,
-            frozenset({"from", "to", "carrying_physical_instance_id"}),
-            f"{path}.target",
+    elif skill == "HANDOVER":
+        expected = frozenset(
+            {"physical_instance_id", "donor_robot_id", "receiver_robot_id"}
         )
-        for key in ("from", "to"):
-            reference = _ref(item[key], f"{path}.target.{key}")
-            if reference["robot_id"] is not None and reference["robot_id"] != executor:
-                raise RobotOperationPlanError(
-                    f"{path}.target.{key}.robot_id must be the executor robot"
-                )
-        _opt(
-            item["carrying_physical_instance_id"],
-            f"{path}.target.carrying_physical_instance_id",
-        )
+        _keys(item, expected, f"{path}.target")
+        for key in sorted(expected):
+            _text(item[key], f"{path}.target.{key}")
+        if item["donor_robot_id"] == item["receiver_robot_id"]:
+            raise RobotOperationPlanError(
+                f"{path}.target donor and receiver must be different robots"
+            )
     elif skill == "PLACE_DOWN":
         expected = frozenset(
             {
@@ -280,17 +299,18 @@ def _resources(
             part = values["physical_instance_id"]
             parts.add(part)
             required.add(f"part:{part}")
-        elif skill == "TRANSIT":
-            for key in ("from", "to"):
-                reference = values[key]
-                if reference["kind"] == "part":
-                    parts.add(reference["physical_instance_id"])
-                elif reference["kind"] == "connection":
-                    connections.add(reference["connection_id"])
-            carrying = values["carrying_physical_instance_id"]
-            if carrying is not None:
-                parts.add(carrying)
-                required.add(f"part:{carrying}")
+        elif skill == "HANDOVER":
+            part = values["physical_instance_id"]
+            parts.add(part)
+            required.add(f"part:{part}")
+            if set(participants) != {
+                values["donor_robot_id"],
+                values["receiver_robot_id"],
+            }:
+                raise RobotOperationPlanError(
+                    f"{path}.participants must exactly cover HANDOVER "
+                    "donor and receiver"
+                )
         else:
             connection = values["connection_id"]
             connections.add(connection)
@@ -321,7 +341,8 @@ def _resources(
                 if set(participants) != {participants[0]}:
                     raise RobotOperationPlanError(
                         f"{path}.participants must contain only support executor "
-                        f"{participants[0]!r}; placement robot {partner!r} is target metadata"
+                        f"{participants[0]!r}; placement robot {partner!r} "
+                        "is target metadata"
                     )
     for item in items:
         kind, separator, name = item.partition(":")
@@ -400,12 +421,6 @@ def _operation_connections(operation: RobotOperation) -> tuple[str, ...]:
     if operation.target is None:
         return ()
     values = operation.target.values
-    if operation.skill == "TRANSIT":
-        return tuple(
-            values[key]["connection_id"]
-            for key in ("from", "to")
-            if values[key]["kind"] == "connection"
-        )
     if operation.skill in {"PLACE_DOWN", "PLACE_UP", "SUPPORT_TOP"}:
         return (values["connection_id"],)
     return ()
@@ -515,21 +530,34 @@ def _bind_to_stap(operations: Mapping[str, RobotOperation], plan: StapPlan) -> N
                     f"{list(operation.participants)} must be exactly its executor"
                 )
         else:
-            if operation.executor_robot_id != task.primary_robot:
-                raise RobotOperationPlanError(
-                    f"operation {operation.operation_id!r} executor "
-                    f"{operation.executor_robot_id!r} does not match source task "
-                    f"allocation {task.primary_robot!r}"
-                )
             expected_participants = {task.primary_robot}
             if task.supporting_robot is not None:
                 expected_participants.add(task.supporting_robot)
-            if set(operation.participants) != expected_participants:
-                raise RobotOperationPlanError(
-                    f"operation {operation.operation_id!r} participants "
-                    f"{list(operation.participants)} do not match source task "
-                    f"allocation {sorted(expected_participants)}"
-                )
+            if operation.skill == "HANDOVER":
+                if set(operation.participants) != expected_participants:
+                    raise RobotOperationPlanError(
+                        f"operation {operation.operation_id!r} HANDOVER participants "
+                        f"{list(operation.participants)} do not match source task "
+                        f"allocation {sorted(expected_participants)}"
+                    )
+                if operation.executor_robot_id not in expected_participants:
+                    raise RobotOperationPlanError(
+                        f"operation {operation.operation_id!r} HANDOVER receiver "
+                        "is outside source task allocation"
+                    )
+            else:
+                if operation.executor_robot_id != task.primary_robot:
+                    raise RobotOperationPlanError(
+                        f"operation {operation.operation_id!r} executor "
+                        f"{operation.executor_robot_id!r} does not match source task "
+                        f"allocation {task.primary_robot!r}"
+                    )
+                if set(operation.participants) != expected_participants:
+                    raise RobotOperationPlanError(
+                        f"operation {operation.operation_id!r} participants "
+                        f"{list(operation.participants)} do not match source task "
+                        f"allocation {sorted(expected_participants)}"
+                    )
         supports = _supporting_instances(plan, task)
         if operation.skill == "PICK":
             picked = operation.target.values["physical_instance_id"]
@@ -538,26 +566,27 @@ def _bind_to_stap(operations: Mapping[str, RobotOperation], plan: StapPlan) -> N
                     f"operation {operation.operation_id!r} PICK part {picked!r} "
                     f"is not source task part {task.physical_instance_id!r}"
                 )
-        elif operation.skill == "TRANSIT":
+        elif operation.skill == "HANDOVER":
             values = operation.target.values
+            part = values["physical_instance_id"]
             allowed = {task.physical_instance_id} | supports
-            for key in ("from", "to"):
-                reference = values[key]
-                if (
-                    reference["kind"] == "part"
-                    and reference["physical_instance_id"] not in allowed
-                ):
-                    raise RobotOperationPlanError(
-                        f"operation {operation.operation_id!r} TRANSIT "
-                        f"{key}.physical_instance_id "
-                        f"{reference['physical_instance_id']!r} is neither the "
-                        "source task part nor one of its supports"
-                    )
-            carrying = values["carrying_physical_instance_id"]
-            if carrying is not None and carrying != task.physical_instance_id:
+            if part not in allowed:
                 raise RobotOperationPlanError(
-                    f"operation {operation.operation_id!r} carries {carrying!r}, "
-                    f"not source task part {task.physical_instance_id!r}"
+                    f"operation {operation.operation_id!r} HANDOVER part {part!r} "
+                    "is neither the source task part nor one of its supports"
+                )
+            if operation.executor_robot_id != values["receiver_robot_id"]:
+                raise RobotOperationPlanError(
+                    f"operation {operation.operation_id!r} HANDOVER executor must "
+                    "be receiver_robot_id"
+                )
+            if set(operation.participants) != {
+                values["donor_robot_id"],
+                values["receiver_robot_id"],
+            }:
+                raise RobotOperationPlanError(
+                    f"operation {operation.operation_id!r} HANDOVER participants "
+                    "must exactly cover donor and receiver"
                 )
         elif operation.skill == "PLACE_DOWN":
             connection = _bind_place_down(operation, plan, task, supports)
@@ -659,6 +688,23 @@ def parse_robot_operation_plan(payload, *, source_plan=None):
                 f"{path}.role_bindings must bind the executor and every participant"
             )
         target = _target(skill, item["target"], path, executor)
+        parameters = dict(_obj(item["parameters"], path + ".parameters"))
+        if skill == "HANDOVER":
+            _handover_parameters(parameters, path + ".parameters")
+            bindings_expected = {"executor", "donor", "receiver"}
+            if set(bindings) != bindings_expected:
+                raise RobotOperationPlanError(
+                    f"{path}.role_bindings must contain executor, donor and receiver"
+                )
+            handover_target = target.values if target is not None else {}
+            if (
+                bindings["donor"] != handover_target.get("donor_robot_id")
+                or bindings["receiver"] != handover_target.get("receiver_robot_id")
+                or bindings["executor"] != handover_target.get("receiver_robot_id")
+            ):
+                raise RobotOperationPlanError(
+                    f"{path}.role_bindings do not match HANDOVER target roles"
+                )
         if target is not None and skill in {"PLACE_UP", "SUPPORT_TOP"}:
             partner_key = (
                 "support_robot_id" if skill == "PLACE_UP" else "placement_robot_id"
@@ -693,7 +739,7 @@ def parse_robot_operation_plan(payload, *, source_plan=None):
             participants,
             bindings,
             target,
-            dict(_obj(item["parameters"], path + ".parameters")),
+            parameters,
             _texts(item["preconditions"], path + ".preconditions"),
             _texts(item["effects"], path + ".effects"),
             _resources(skill, participants, target, item["resources"], path),

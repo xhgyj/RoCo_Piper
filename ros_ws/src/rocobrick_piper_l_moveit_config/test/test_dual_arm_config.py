@@ -11,6 +11,7 @@ from rocobrick_piper_l_moveit_config.launch.dual_arm_config import (
     combine_joint_limits,
     combine_moveit_controllers,
     combine_srdfs,
+    load_base_poses,
     combine_urdfs,
 )
 
@@ -64,6 +65,22 @@ def config(tmp_path: Path, robot_id: str) -> SimpleNamespace:
     )
 
 
+def test_base_pose_loader_binds_hash_and_wxyz_rotation(tmp_path):
+    """Configured yaw is not replaced by a hardcoded identity rotation."""
+    import hashlib
+    import json
+    import math
+    import pytest
+    path = tmp_path / "runtime.json"
+    path.write_text(json.dumps({"Robot_Config": {"Robots": [{"Name": "piper_0", "Robot_Base_Frame": {"Position": [0.25, -0.25, 0.0], "Orientation": [0.7071, 0, 0, 0.7071]}}]}}))
+    digest = hashlib.sha256(path.read_bytes()).hexdigest()
+    xyz, rpy = load_base_poses(path, digest, ("piper_0",))["piper_0"]
+    assert xyz == (0.25, -0.25, 0.0)
+    assert rpy[2] == pytest.approx(math.pi / 2)
+    with pytest.raises(ValueError, match="hash"):
+        load_base_poses(path, "a" * 64, ("piper_0",))
+
+
 def test_combined_urdf_has_one_root_and_real_base_poses(tmp_path: Path) -> None:
     """The combined model removes per-robot roots and preserves base poses."""
     configs = (config(tmp_path, "piper_0"), config(tmp_path, "piper_1"))
@@ -88,8 +105,8 @@ def test_combined_srdf_has_joint_groups(tmp_path: Path) -> None:
     xml = combine_srdfs((config(tmp_path, "piper_0"), config(tmp_path, "piper_1")))
     assert f'name="{DUAL_ARM_GROUP}"' in xml
     assert f'name="{DUAL_ARM_TCP_GROUP}"' in xml
-    assert xml.count('name="piper_0_arm"') == 2
-    assert xml.count('name="piper_1_arm"') == 2
+    assert xml.count('name="piper_0_arm_tcp"') == 3
+    assert xml.count('name="piper_1_arm_tcp"') == 3
 
 
 def test_combined_limits_and_controllers_prefix_every_joint(tmp_path: Path) -> None:
