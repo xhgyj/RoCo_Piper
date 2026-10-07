@@ -184,6 +184,52 @@ def test_handover_no_dispatch_failure_does_not_claim_motion():
     assert result.evidence["owner_transfer_committed"] is False
 
 
+@pytest.mark.parametrize("failure", ["scene-transfer", "release"])
+def test_attempted_transfer_failure_invalidates_confirmed_holder(failure):
+    """Timeouts cannot leave the old ownership record as physical proof."""
+    class Handler(HandoverHandler):
+        async def _execute_free_space(self, req):
+            return FreeSpaceMotionEvidence(
+                req.operation_id, (req.receiver_robot_id,), True, True, True,
+                True, True, True,
+                {req.receiver_robot_id: {"arrival_confirmed": True}}, {}, None,
+            )
+
+        async def _dispatch_gripper(self, robot, payload, req, phase):
+            if phase == "donor_release":
+                raise TimeoutError("release result unavailable after dispatch")
+            return {"passed": True}
+
+        async def _samples(self, req):
+            return ({"sequence": 4},) * req.follow_samples
+
+        async def _dispatch_transfer(self, req, sample):
+            if failure == "scene-transfer":
+                raise TimeoutError("scene result unavailable after request")
+            return {"committed": True}
+
+    class Observations:
+        def verify_co_hold(self, req, samples):
+            return {"confirmed": True}
+
+    item = _handover_request()
+    ledger = OperationStateLedger(ROBOTS)
+    ledger.confirm_holding("piper_0", "brick-1", {"holding_confirmed": True})
+    result = asyncio.run(Handler(
+        ledger, free_space=object(), motion=object(),
+        observations=Observations(), poll_interval_s=0.0,
+    ).execute(item))
+    assert not result.ready_to_commit
+    assert not result.terminal and not result.safe_to_release
+    assert result.evidence["scene_transfer_attempted"] is True
+    assert (result.evidence.get("donor_release_attempted") is True) == (
+        failure == "release"
+    )
+    assert ledger.uncertain_handover("brick-1") is not None
+    assert ledger.observe("piper_0", "holding:brick-1") is None
+    assert ledger.observe("piper_1", "holding:brick-1") is None
+
+
 def _snapshot(sample):
     """Serialize one observation using the strict live scene schema.
 

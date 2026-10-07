@@ -695,7 +695,7 @@ def _direct_handover_plan(*, with_pick: bool) -> dict:
             "receiver_robot_id": receiver,
         },
         "parameters": {
-            "grasp_profile_id": "brick-side-grasp-v1",
+            "grasp_profile_id": "handover-bottom-coordinated-v1",
             "co_hold_timeout_s": 10.0,
             "follow_samples": 4,
         },
@@ -843,6 +843,62 @@ def test_direct_handover_preserves_pre_dispatch_gates(
     assert line["status"] == expected, line
     assert code == EXIT_CODES[expected], line
     assert calls == []
+    assert session_guard == []
+    _assert_no_motion_claim(Path(line["result_path"]).parent)
+
+
+@pytest.mark.parametrize("with_pick", [False, True])
+@pytest.mark.parametrize("profile_id", [
+    "brick-side-grasp-v1", "handover-bottom-coordinated-v1",
+])
+def test_handover_profile_admission_prevents_all_runtime_creation(
+    tmp_path, session_guard, with_pick, profile_id,
+):
+    """Unknown or unqualified profiles reject even a preceding donor PICK."""
+    document = _direct_handover_plan(with_pick=with_pick)
+    document["operations"][-1]["parameters"]["grasp_profile_id"] = profile_id
+    plan = tmp_path / "handover.json"
+    plan.write_text(json.dumps(document), encoding="utf-8")
+    complete_start = tmp_path / "complete-start.json"
+    complete_start.write_bytes(TASK_GOAL.read_bytes())
+    code, line, _ = _invoke(_structure_argv(
+        tmp_path / "run", goal=TASK_GOAL,
+        start=TASK_START if with_pick else complete_start,
+        plan=plan, preflight_only=False,
+    ))
+    expected = (
+        RunStatus.INVALID_INPUT if profile_id == "brick-side-grasp-v1"
+        else RunStatus.EXECUTION_NOT_IMPLEMENTED
+    )
+    assert line["status"] == expected, line
+    assert code == EXIT_CODES[expected]
+    assert session_guard == []
+    _assert_no_motion_claim(Path(line["result_path"]).parent)
+
+
+def test_profile_flag_cannot_activate_legacy_handover_handler(
+    tmp_path, session_guard, monkeypatch,
+):
+    """Qualification alone never substitutes for new production providers."""
+    from dataclasses import replace
+
+    from rocobrick.skills import handover_profile
+
+    qualified = replace(
+        handover_profile.resolve_handover_profile("handover-bottom-coordinated-v1"),
+        execution_qualified=True,
+    )
+    monkeypatch.setattr(
+        handover_profile, "resolve_handover_profile", lambda _: qualified
+    )
+    plan = tmp_path / "handover.json"
+    plan.write_text(json.dumps(_direct_handover_plan(with_pick=True)), encoding="utf-8")
+    code, line, _ = _invoke(_structure_argv(
+        tmp_path / "run", goal=TASK_GOAL, start=TASK_START, plan=plan,
+        preflight_only=False,
+    ))
+    assert line["status"] == RunStatus.EXECUTION_NOT_IMPLEMENTED
+    assert code == EXIT_CODES[RunStatus.EXECUTION_NOT_IMPLEMENTED]
     assert session_guard == []
     _assert_no_motion_claim(Path(line["result_path"]).parent)
 

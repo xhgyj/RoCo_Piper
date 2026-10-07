@@ -55,6 +55,8 @@ class OperationPlanRunner:
             ``readiness_by_robot``) attached to the serialized document.
         cleanup: Optional JSON-safe cleanup evidence attached to the
             serialized document.
+        layer_timeout_s_by_index: Finite skill-layer deadline overrides, without
+            changing the plan or other layers' existing timeouts.
     """
 
     plan: RobotOperationPlan
@@ -65,6 +67,7 @@ class OperationPlanRunner:
     allow_legacy_results: bool = True
     readiness: Mapping[str, JSONValue] | None = None
     cleanup: Mapping[str, JSONValue] | None = None
+    layer_timeout_s_by_index: Mapping[int, float] | None = None
 
     async def run(self) -> SchedulerResult:
         """Run the plan with fresh scheduler state.
@@ -94,22 +97,26 @@ class OperationPlanRunner:
     def _build_scheduler(self) -> MultiRobotScheduler:
         if self.operation_timeout_s is None and self.cancel_timeout_s is None:
             return MultiRobotScheduler(
-                allow_legacy_results=self.allow_legacy_results
+                allow_legacy_results=self.allow_legacy_results,
+                layer_timeout_s_by_index=self.layer_timeout_s_by_index,
             )
         if self.cancel_timeout_s is None:
             return MultiRobotScheduler(
                 operation_timeout_s=self.operation_timeout_s,
                 allow_legacy_results=self.allow_legacy_results,
+                layer_timeout_s_by_index=self.layer_timeout_s_by_index,
             )
         if self.operation_timeout_s is None:
             return MultiRobotScheduler(
                 cancel_timeout_s=self.cancel_timeout_s,
                 allow_legacy_results=self.allow_legacy_results,
+                layer_timeout_s_by_index=self.layer_timeout_s_by_index,
             )
         return MultiRobotScheduler(
             operation_timeout_s=self.operation_timeout_s,
             cancel_timeout_s=self.cancel_timeout_s,
             allow_legacy_results=self.allow_legacy_results,
+            layer_timeout_s_by_index=self.layer_timeout_s_by_index,
         )
 
 
@@ -156,9 +163,7 @@ def _operation_document(item: OperationResult) -> dict[str, object]:
         "resources_released": item.resources_released,
         "deadline_exceeded": item.deadline_exceeded,
         "late_terminal_confirmation": item.late_terminal_confirmation,
-        "cancel": (
-            _cancel_document(item.cancel) if item.cancel is not None else None
-        ),
+        "cancel": (_cancel_document(item.cancel) if item.cancel is not None else None),
     }
 
 
@@ -208,12 +213,8 @@ def serialize_run_result(
         },
         "layers": [_layer_document(layer) for layer in result.layers],
         "evidence": [to_json_value(item) for item in result.evidence],
-        "resources": [
-            _resource_document(item) for item in result.resources
-        ],
-        "cancellations": [
-            _cancel_document(item) for item in result.cancellations
-        ],
+        "resources": [_resource_document(item) for item in result.resources],
+        "cancellations": [_cancel_document(item) for item in result.cancellations],
         "unsafe_terminals": list(result.unsafe_terminals),
     }
     if readiness is not None:

@@ -8,10 +8,15 @@ a physical fact.
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from rocobrick.multi_robot_scheduler import JSONValue, is_json_safe, to_json_value
-from rocobrick.skills.contracts import HandoverEvidence, HandoverRequest
+from rocobrick.skills.contracts import (
+    HandoverEvidence,
+    HandoverRequest,
+    HandoverTransferIdentity,
+)
+from rocobrick.skills.handover_profile import digest, finite
 from rocobrick.unified_dual_arm_runtime import (
     SuccessorPrePhaseEvidence,
     SuccessorPrePhaseRequest,
@@ -39,6 +44,16 @@ class UncertainHandover:
     evidence: Mapping[str, JSONValue]
 
 
+@dataclass(frozen=True)
+class ProvisionalHandover:
+    """Co-hold admission with a protective owner, not confirmed receiver holding."""
+
+    identity: HandoverTransferIdentity
+    binding_sha256: str
+    co_hold_evidence: Mapping[str, JSONValue]
+    release_attempted: bool = False
+
+
 class OperationStateLedger:
     """Session-scoped, robot-isolated ledger of confirmed physical state."""
 
@@ -60,14 +75,23 @@ class OperationStateLedger:
         self._object_owners: dict[str, str] = {}
         self._uncertain: dict[tuple[str, str], str] = {}
         self._uncertain_handovers: dict[str, UncertainHandover] = {}
+        self._provisional_handovers: dict[str, ProvisionalHandover] = {}
 
     @property
     def robot_ids(self) -> tuple[str, ...]:
-        """Validated robot ids owned by this ledger."""
+        """Validated robot ids owned by this ledger.
+
+        Returns:
+            The identified, bound result; physical proof remains separately checked.
+        """
         return self._robot_ids
 
     def observe(self, robot_id: str, key: str) -> ConfirmedState | None:
-        """Return a confirmed fact, or None when it has not been proven."""
+        """Return a confirmed fact, or None when it has not been proven.
+
+        Returns:
+            The identified, bound result; physical proof remains separately checked.
+        """
         self._validate_robot(robot_id)
         self._validate_key(key)
         return self._states[robot_id].get(key)
@@ -118,7 +142,11 @@ class OperationStateLedger:
         return self.confirm(robot_id, f"holding:{physical_instance_id}", evidence)
 
     def owner_of_object(self, physical_instance_id: str) -> str | None:
-        """Return the protective owner, including an uncertain holding state."""
+        """Return the protective owner, including an uncertain holding state.
+
+        Returns:
+            The identified, bound result; physical proof remains separately checked.
+        """
         self._validate_instance_id(physical_instance_id)
         return self._object_owners.get(physical_instance_id)
 
@@ -171,11 +199,15 @@ class OperationStateLedger:
 
     def mark_handover_uncertain(
         self,
-        request: HandoverRequest,
+        request: HandoverRequest | HandoverTransferIdentity,
         reason: str,
         evidence: Mapping[str, JSONValue],
     ) -> UncertainHandover:
-        """Record an unknown post-release transfer without changing owner."""
+        """Record an unknown post-release transfer without changing owner.
+
+        Returns:
+            The identified, bound result; physical proof remains separately checked.
+        """
         self._validate_robot(request.donor_robot_id)
         self._validate_robot(request.receiver_robot_id)
         self._validate_instance_id(request.physical_instance_id)
@@ -198,12 +230,15 @@ class OperationStateLedger:
             to_json_value(evidence),
         )
         self._uncertain_handovers[request.physical_instance_id] = record
+        self._provisional_handovers.pop(request.physical_instance_id, None)
         return record
 
-    def uncertain_handover(
-        self, physical_instance_id: str
-    ) -> UncertainHandover | None:
-        """Return unresolved transfer state for one physical instance."""
+    def uncertain_handover(self, physical_instance_id: str) -> UncertainHandover | None:
+        """Return unresolved transfer state for one physical instance.
+
+        Returns:
+            The identified, bound result; physical proof remains separately checked.
+        """
         self._validate_instance_id(physical_instance_id)
         return self._uncertain_handovers.get(physical_instance_id)
 
@@ -292,6 +327,173 @@ class OperationStateLedger:
         self._object_owners[request.physical_instance_id] = request.receiver_robot_id
         return confirmed
 
+    def begin_provisional_handover(
+        self,
+        identity: HandoverTransferIdentity,
+        binding_sha256: str,
+        co_hold: Mapping[str, JSONValue],
+    ) -> ProvisionalHandover:
+        """Admit verified co-hold without publishing receiver ownership.
+
+        Returns:
+            An exact planning/physical binding whose owner remains protective.
+        """
+        digest(binding_sha256, "provisional planning binding")
+        for robot in (identity.donor_robot_id, identity.receiver_robot_id):
+            self._validate_robot(robot)
+            if self.uncertain_keys(robot):
+                raise ValueError("uncertain custody cannot enter provisional HANDOVER")
+        key = f"holding:{identity.physical_instance_id}"
+        if self.owner_of_object(
+            identity.physical_instance_id
+        ) != identity.donor_robot_id or (
+            self.observe(identity.donor_robot_id, key) is None
+            or self.observe(identity.receiver_robot_id, key) is not None
+            or identity.physical_instance_id in self._provisional_handovers
+        ):
+            raise ValueError("provisional custody requires exclusive confirmed giver")
+        if (
+            not is_json_safe(co_hold)
+            or co_hold.get("confirmed") is not True
+            or any(
+                co_hold.get(name) != getattr(identity, name)
+                for name in (
+                    "donor_robot_id",
+                    "receiver_robot_id",
+                    "physical_instance_id",
+                )
+            )
+            or co_hold.get("proof") != "same_tick_opposed_pad_contacts_and_se3"
+        ):
+            raise ValueError(
+                "provisional custody requires bound physical co-hold proof"
+            )
+        record = ProvisionalHandover(identity, binding_sha256, to_json_value(co_hold))
+        for name in ("manifest_sha256", "profile_sha256"):
+            digest(co_hold.get(name), name)
+        if not isinstance(co_hold.get("session_id"), str) or not co_hold["session_id"]:
+            raise ValueError("co-hold proof lacks exact physical session")
+        for name in ("samples", "first_sequence", "last_sequence"):
+            if type(co_hold.get(name)) is not int:
+                raise ValueError("co-hold proof requires measured integer samples")
+        if co_hold["samples"] < 3 or not (
+            0 <= co_hold["first_sequence"] < co_hold["last_sequence"]
+        ):
+            raise ValueError("co-hold proof is not a measured observation window")
+        self._provisional_handovers[identity.physical_instance_id] = record
+        return record
+
+    def provisional_handover(
+        self, physical_instance_id: str
+    ) -> ProvisionalHandover | None:
+        """Return provisional custody without asserting final holding.
+
+        Returns:
+            The identified, bound result; physical proof remains separately checked.
+        """
+        return self._provisional_handovers.get(physical_instance_id)
+
+    def mark_provisional_release(
+        self,
+        identity: HandoverTransferIdentity,
+        binding_sha256: str,
+    ) -> None:
+        """Revoke giver confirmation BEFORE dispatch that could release the object."""
+        record = self._provisional_handovers.get(identity.physical_instance_id)
+        if (
+            record is None
+            or record.identity != identity
+            or (record.binding_sha256 != binding_sha256 or record.release_attempted)
+        ):
+            raise ValueError("release requires exact unreleased provisional custody")
+        key = f"holding:{identity.physical_instance_id}"
+        self._states[identity.donor_robot_id].pop(key, None)
+        for robot in (identity.donor_robot_id, identity.receiver_robot_id):
+            self._uncertain[(robot, key)] = "PROVISIONAL_HANDOVER_RELEASE"
+        self._provisional_handovers[identity.physical_instance_id] = replace(
+            record, release_attempted=True
+        )
+
+    def commit_provisional_handover(
+        self,
+        identity: HandoverTransferIdentity,
+        binding_sha256: str,
+        evidence: HandoverEvidence,
+    ) -> ConfirmedState:
+        """Atomically confirm the receiver only after release/separation/follow.
+
+        Returns:
+            The one confirmed receiver fact; no old giver confirmation remains.
+        """
+        record = self._provisional_handovers.get(identity.physical_instance_id)
+        if (
+            record is None
+            or record.identity != identity
+            or (
+                record.binding_sha256 != binding_sha256
+                or not record.release_attempted
+                or not evidence.matches(identity)
+                or not evidence.ready_to_commit
+                or self.owner_of_object(identity.physical_instance_id)
+                != identity.donor_robot_id
+                or evidence.evidence.get("planning_binding_sha256") != binding_sha256
+                or evidence.evidence.get("giver_separated") is not True
+            )
+        ):
+            raise ValueError(
+                "provisional adoption requires exact complete physical proof"
+            )
+        follow = evidence.evidence.get("receiver_follow_proof")
+        if (
+            not isinstance(follow, Mapping)
+            or follow.get("confirmed") is not True
+            or (
+                follow.get("receiver_robot_id") != identity.receiver_robot_id
+                or follow.get("physical_instance_id") != identity.physical_instance_id
+                or follow.get("proof") != "released_giver_and_measured_rigid_follow"
+            )
+        ):
+            raise ValueError(
+                "provisional adoption lacks bound physical receiver follow"
+            )
+        for name in ("session_id", "manifest_sha256", "profile_sha256"):
+            if follow.get(name) != record.co_hold_evidence.get(name):
+                raise ValueError("receiver follow belongs to another session/policy")
+        for name in ("samples", "first_sequence", "last_sequence"):
+            if type(follow.get(name)) is not int:
+                raise ValueError("receiver follow lacks measured integer samples")
+        if follow["samples"] < record.co_hold_evidence["samples"] or not (
+            record.co_hold_evidence["last_sequence"]
+            < follow["first_sequence"]
+            < follow["last_sequence"]
+        ):
+            raise ValueError("receiver follow predates release or is incomplete")
+        for name in ("tcp_distance_m", "object_distance_m"):
+            finite(follow.get(name), name, positive=True)
+        key = f"holding:{identity.physical_instance_id}"
+        if any(
+            self._uncertain.get((robot, key)) != "PROVISIONAL_HANDOVER_RELEASE"
+            for robot in (identity.donor_robot_id, identity.receiver_robot_id)
+        ):
+            raise ValueError("unknown custody cannot be silently reconciled by commit")
+        proof = {
+            **dict(evidence.evidence),
+            "holding_confirmed": True,
+            "handover_operation_id": identity.operation_id,
+            "donor_robot_id": identity.donor_robot_id,
+            "receiver_robot_id": identity.receiver_robot_id,
+            "physical_instance_id": identity.physical_instance_id,
+        }
+        confirmed = ConfirmedState(
+            identity.receiver_robot_id, key, to_json_value(proof)
+        )
+        self._states[identity.receiver_robot_id][key] = confirmed
+        for robot in (identity.donor_robot_id, identity.receiver_robot_id):
+            self._uncertain.pop((robot, key), None)
+        self._object_owners[identity.physical_instance_id] = identity.receiver_robot_id
+        del self._provisional_handovers[identity.physical_instance_id]
+        return confirmed
+
     def reconcile_pre_phase(
         self, request: SuccessorPrePhaseRequest, evidence: SuccessorPrePhaseEvidence
     ) -> None:
@@ -349,7 +551,11 @@ class OperationStateLedger:
         self._states.update(replacements)
 
     def snapshot(self, robot_id: str) -> Mapping[str, ConfirmedState]:
-        """Return an immutable-by-copy view of one robot's confirmed facts."""
+        """Return an immutable-by-copy view of one robot's confirmed facts.
+
+        Returns:
+            The identified, bound result; physical proof remains separately checked.
+        """
         self._validate_robot(robot_id)
         return dict(self._states[robot_id])
 
@@ -359,11 +565,12 @@ class OperationStateLedger:
         A non-empty answer means the robot's holding/supporting state is
         unknown, so pre-phase admission must refuse the robot outright
         instead of guessing a home/empty state.
+
+        Returns:
+            The identified, bound result; physical proof remains separately checked.
         """
         self._validate_robot(robot_id)
-        return tuple(
-            key for (owner, key) in self._uncertain if owner == robot_id
-        )
+        return tuple(key for (owner, key) in self._uncertain if owner == robot_id)
 
     def _validate_robot(self, robot_id: str) -> None:
         if robot_id not in self._states:

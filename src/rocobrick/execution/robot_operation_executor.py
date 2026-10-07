@@ -1172,6 +1172,18 @@ class SkillOperationExecutor:
                     )
                 },
             )
+        if record.skill == HANDOVER:
+            cancel_handover = getattr(self._handover_backend, "cancel", None)
+            if not callable(cancel_handover):
+                return CancelEvidence(operation_id, False, False, False, {})
+            raw = await cancel_handover(operation_id)
+            bound = isinstance(raw, Mapping) and raw.get("operation_id") == operation_id
+            return CancelEvidence(
+                operation_id=operation_id, acknowledged=bound,
+                terminal=bound and raw.get("terminal") is True,
+                safe=bound and raw.get("safe_to_release") is True,
+                evidence=dict(raw) if isinstance(raw, Mapping) else {},
+            )
         if record.skill in {PLACE_DOWN, PLACE_UP, SUPPORT_TOP}:
             backends = {
                 PLACE_DOWN: self._place_backends,

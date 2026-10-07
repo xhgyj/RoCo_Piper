@@ -779,6 +779,9 @@ class MultiRobotScheduler:
         cancel_timeout_s: Bound for one cancel acknowledgement round-trip.
         allow_legacy_results: When True, non-contract executor results are
             accepted through the compatibility shim and marked ``legacy``.
+        layer_timeout_s_by_index: Optional finite skill-layer deadline overrides;
+            other layers retain operation_timeout_s. Coordinated execute_layer
+            groups own their lifecycle deadlines and cannot use this override.
     """
 
     def __init__(
@@ -787,6 +790,7 @@ class MultiRobotScheduler:
         operation_timeout_s: float | None = 30.0,
         cancel_timeout_s: float = 5.0,
         allow_legacy_results: bool = True,
+        layer_timeout_s_by_index: Mapping[int, float] | None = None,
     ) -> None:
         """Validate bounds and store the scheduler configuration.
 
@@ -808,6 +812,20 @@ class MultiRobotScheduler:
         self._operation_timeout_s = operation_timeout_s
         self._cancel_timeout_s = float(cancel_timeout_s)
         self._allow_legacy_results = allow_legacy_results
+        overrides = {} if layer_timeout_s_by_index is None else layer_timeout_s_by_index
+        if not isinstance(overrides, Mapping) or any(
+            type(index) is not int
+            or index < 0
+            or isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or not math.isfinite(value)
+            or not 0 < value <= 3600
+            for index, value in overrides.items()
+        ):
+            raise ValueError(
+                "layer timeout overrides require indices and finite bounds"
+            )
+        self._layer_timeout_s_by_index = dict(overrides)
 
     async def schedule(
         self,
@@ -834,6 +852,16 @@ class MultiRobotScheduler:
                 propagate; executor and cancel failures are recorded and fail
                 the run closed.
         """
+        for index in self._layer_timeout_s_by_index:
+            if index >= len(plan.execution_layers):
+                raise ValueError("layer timeout references an unavailable layer")
+            if (
+                coordinated_layer_group(
+                    tuple(plan.operations[oid] for oid in plan.execution_layers[index])
+                )
+                is not None
+            ):
+                raise ValueError("coordinated layer owns its lifecycle deadline")
         state = _RunState()
         predecessors = _predecessors(plan)
         confirmed: set[str] = set()
@@ -978,10 +1006,11 @@ class MultiRobotScheduler:
             return OperationStatus.FAILED, results
         owners = {task: oid for oid, task in running.items()}
         pending: set[asyncio.Task[object]] = set(running.values())
+        layer_timeout = self._layer_timeout_s_by_index.get(
+            layer_index, self._operation_timeout_s
+        )
         deadline = (
-            time.monotonic() + self._operation_timeout_s
-            if self._operation_timeout_s is not None
-            else None
+            time.monotonic() + layer_timeout if layer_timeout is not None else None
         )
         failed = False
         timed_out = False

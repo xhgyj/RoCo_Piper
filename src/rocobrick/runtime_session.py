@@ -2920,6 +2920,21 @@ class MultiRobotIsaacMoveItSession:
             )
         return snapshot
 
+    def observe_handover_scene(self) -> Mapping[str, object]:
+        """Read live physical contacts while actions own both participants.
+
+        Returns:
+            Physics only; never a planning/lease admission snapshot.
+        """
+        self._require_ready("observe_handover_scene")
+        if not self.config.persistent_ros_client:
+            raise MultiRobotSessionError(
+                "HANDOVER monitor requires persistent ROS transport"
+            )
+        return self._persistent_worker().observe_monitor(
+            self.config.robot_ids, self.config.operation_timeout_s,
+        )
+
     def observe_shared_scene(self) -> Mapping[str, object]:
         """Read one complete shared observation with planning-scene binding.
 
@@ -3001,6 +3016,57 @@ class MultiRobotIsaacMoveItSession:
             )
         raise MultiRobotSessionError(
             "coordinated execution requires the persistent ROS transport"
+        )
+
+    def plan_readonly_combined(self, request: CoordinatedSessionRequest):
+        """Query one combined path in the existing session without scene writes.
+
+        Returns:
+            A strictly identified no-motion planning result.
+        """
+        self._require_ready("plan_readonly_combined")
+        if request.robots != self.config.robot_ids or not request.plan_only:
+            raise MultiRobotSessionError("read-only planning/session identity mismatch")
+        if not self.config.persistent_ros_client:
+            raise MultiRobotSessionError(
+                "read-only planning requires persistent ROS transport"
+            )
+        directory = self.session_dir / "coordinated"
+        result_path = directory / f"{request.coordination_id}-readonly-result.json"
+        request_path = directory / f"{request.coordination_id}-readonly-request.json"
+        if request_path.exists() or result_path.exists():
+            raise MultiRobotSessionError("read-only planning identity already consumed")
+        _write_json_atomic(request_path, request.serialize())
+        return self._persistent_worker().call_plan_only(
+            request, result_path, request.timeout_s + CHILD_EXEC_MARGIN_S,
+            read_only=True,
+        )
+
+    def execute_prepared_motion(self, request):
+        """Send a frozen, prevalidated path through this existing ROS session.
+
+        Returns:
+            Exact prepared-path execution and actual feedback evidence.
+        """
+        from rocobrick.execution.prepared_motion import PreparedMotionRequest
+
+        self._require_ready("execute_prepared_motion")
+        if not isinstance(request, PreparedMotionRequest) or (
+            request.robots != self.config.robot_ids
+        ):
+            raise MultiRobotSessionError("prepared request/session identity mismatch")
+        if not self.config.persistent_ros_client:
+            raise MultiRobotSessionError(
+                "prepared motion requires persistent ROS transport"
+            )
+        directory = self.session_dir / "coordinated"
+        request_path = directory / f"{request.coordination_id}-prepared-request.json"
+        result_path = directory / f"{request.coordination_id}-prepared-result.json"
+        if request_path.exists() or result_path.exists():
+            raise MultiRobotSessionError("prepared motion identity already consumed")
+        _write_json_atomic(request_path, request.serialize())
+        return self._persistent_worker().execute_coordinated(
+            request, result_path, request.timeout_s + CHILD_EXEC_MARGIN_S + 60.0
         )
 
     def execute_free_space(self, request):

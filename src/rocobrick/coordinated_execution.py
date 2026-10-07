@@ -6,8 +6,9 @@ this module owns the all-or-nothing admission and fail-closed evidence rules.
 
 from __future__ import annotations
 
-from concurrent.futures import ThreadPoolExecutor
-from collections.abc import Mapping
+import math
+from collections.abc import Callable, Mapping
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from typing import Protocol
 
@@ -85,6 +86,8 @@ class CoordinatedExecutionCoordinator:
         operation: CoordinatedOperation,
         *,
         start_at_sim_time_s: float | None = None,
+        require_synchronization_feedback: bool = False,
+        before_start: Callable[[], None] | None = None,
     ) -> CoordinatedLifecycleResult:
         """Prepare all, start all at one barrier, and fail closed on any error.
 
@@ -101,6 +104,12 @@ class CoordinatedExecutionCoordinator:
             if start_at_sim_time_s is None
             else float(start_at_sim_time_s)
         )
+        if (
+            type(require_synchronization_feedback) is not bool
+            or not math.isfinite(start_at)
+            or start_at < 0
+        ):
+            raise ValueError("coordinated barrier/synchronization policy is invalid")
         prepared: dict[str, Mapping[str, object]] = {}
         cancel_evidence: dict[str, Mapping[str, object]] = {}
         try:
@@ -111,39 +120,126 @@ class CoordinatedExecutionCoordinator:
                 prepared[trajectory.robot_id] = dict(evidence)
                 if evidence.get("prepared") is not True:
                     return self._failed_prepare(
-                        operation, prepared, cancel_evidence,
+                        operation,
+                        prepared,
+                        cancel_evidence,
                         f"participant {trajectory.robot_id} did not prepare",
                     )
             started: dict[str, Mapping[str, object]] = {}
+            if before_start is not None:
+                before_start()
+            failure: str | None = None
+            cancel_sent = False
             # All participants are already prepared. Start their action goals
             # concurrently against the same simulation-time barrier; iterating
             # start() calls serially would create an unbounded start skew.
             with ThreadPoolExecutor(max_workers=len(expected)) as pool:
                 futures = {
-                    robot_id: pool.submit(
+                    pool.submit(
                         self._participants[robot_id].start,
                         start_at_sim_time_s=start_at,
-                    )
+                    ): robot_id
                     for robot_id in expected
                 }
-                for robot_id in expected:
-                    evidence = futures[robot_id].result()
+                for future in as_completed(futures):
+                    robot_id = futures[future]
+                    try:
+                        evidence = future.result()
+                    except Exception as error:  # noqa: BLE001 - cancel owned peers
+                        evidence = {
+                            "started": False,
+                            "terminal": False,
+                            "safe": False,
+                            "error": f"{type(error).__name__}: {error}",
+                        }
                     started[robot_id] = dict(evidence)
-                    if evidence.get("started") is not True:
-                        merged = {**prepared, **started}
-                        return self._failed_start(
-                            operation, merged, cancel_evidence,
-                            f"participant {robot_id} did not start",
-                        )
+                    if evidence.get("started") is not True or (
+                        evidence.get("terminal") is not True
+                        or evidence.get("safe") is not True
+                        or require_synchronization_feedback
+                        and evidence.get("synchronization_feedback_confirmed")
+                        is not True
+                    ):
+                        failure = f"participant {robot_id} did not complete safely"
+                        if not cancel_sent and any(not f.done() for f in futures):
+                            # Abort immediately even when the failing robot is
+                            # second in participant order. Keep waiting for all
+                            # action lanes before a FINAL cancellation proof:
+                            # an early idle cancel cannot settle a late send.
+                            self.cancel(operation)
+                            cancel_sent = True
+            if failure is not None:
+                return self._failed_start(
+                    operation, {**prepared, **started}, cancel_evidence, failure
+                )
             terminal = all(
                 evidence.get("terminal") is True and evidence.get("safe") is True
                 for evidence in started.values()
             )
             if not terminal:
                 return self._failed_start(
-                    operation, {**prepared, **started}, cancel_evidence,
+                    operation,
+                    {**prepared, **started},
+                    cancel_evidence,
                     "coordinated participants did not reach terminal-safe evidence",
                 )
+            if require_synchronization_feedback:
+                intervals = []
+                for robot_id, evidence in started.items():
+                    value = evidence.get("controller_start_sim_time_s")
+                    interval = evidence.get("controller_start_interval_s")
+                    if evidence.get(
+                        "synchronization_feedback_confirmed"
+                    ) is not True or (
+                        isinstance(value, bool)
+                        or not isinstance(value, (int, float))
+                        or not math.isfinite(value)
+                        or value < 0
+                        or evidence.get("feedback_source")
+                        != "controller_phase_and_stamped_isaac_joints"
+                    ):
+                        return self._failed_start(
+                            operation,
+                            {**prepared, **started},
+                            cancel_evidence,
+                            f"participant {robot_id} lacks verified "
+                            "controller/physics synchronization",
+                        )
+                    if (
+                        not isinstance(interval, (list, tuple))
+                        or not 1 <= len(interval) <= 2
+                        or any(
+                            isinstance(v, bool)
+                            or not isinstance(v, (int, float))
+                            or not math.isfinite(v)
+                            for v in interval
+                        )
+                        or interval[0] != value
+                        or interval[-1] < interval[0]
+                    ):
+                        return self._failed_start(
+                            operation,
+                            {**prepared, **started},
+                            cancel_evidence,
+                            "synchronized start interval is invalid",
+                        )
+                    intervals.extend(float(v) for v in interval)
+                skew = max(intervals) - min(intervals)
+                if skew > operation.synchronization_tolerance_s or any(
+                    abs(value - start_at) > operation.synchronization_tolerance_s
+                    for value in intervals
+                ):
+                    return self._failed_start(
+                        operation,
+                        {**prepared, **started},
+                        cancel_evidence,
+                        "measured controller phase start skew exceeds budget",
+                    )
+                for robot_id, evidence in started.items():
+                    started[robot_id] = {
+                        **evidence,
+                        "measured_controller_start_skew_s": skew,
+                    }
             return CoordinatedLifecycleResult(
                 coordination_id=operation.coordination_id,
                 prepared=True,

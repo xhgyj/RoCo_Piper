@@ -24,6 +24,7 @@ import importlib.util
 import os
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -149,11 +150,16 @@ def test_single_rclpy_participant_contract(bridge_module) -> None:
     evidence_defaults = bridge_module.initial_evidence(
         bridge_module.parse_args(
             [
-                "--max-steps", "10",
-                "--time-limit", "30",
-                "--ready-timeout", "5",
-                "--hold-steps", "5",
-                "--hold-seconds", "1",
+                "--max-steps",
+                "10",
+                "--time-limit",
+                "30",
+                "--ready-timeout",
+                "5",
+                "--hold-steps",
+                "5",
+                "--hold-seconds",
+                "1",
             ]
         )
     )
@@ -365,19 +371,43 @@ def test_kit_child_regime_without_simulation_app(
 def test_kit_launch_argv_round_trips_every_argument(bridge_module) -> None:
     """The rebuilt bridge argv must parse back into the identical arguments."""
     base = [
-        "--max-steps", "600", "--time-limit", "180", "--ready-timeout", "90",
-        "--hold-steps", "60", "--hold-seconds", "2.0",
-        "--evidence-out", "/tmp/e.json",
-        "--scene-manifest", "/tmp/m.json", "--scene-snapshot-out", "/tmp/s.json",
-        "--host-instance-id", "repro-001",
-        "--plan", "/tmp/plan.json", "--config", "/tmp/config.json",
+        "--max-steps",
+        "600",
+        "--time-limit",
+        "180",
+        "--ready-timeout",
+        "90",
+        "--hold-steps",
+        "60",
+        "--hold-seconds",
+        "2.0",
+        "--evidence-out",
+        "/tmp/e.json",
+        "--scene-manifest",
+        "/tmp/m.json",
+        "--scene-snapshot-out",
+        "/tmp/s.json",
+        "--host-instance-id",
+        "repro-001",
+        "--plan",
+        "/tmp/plan.json",
+        "--config",
+        "/tmp/config.json",
     ]
     parsed = bridge_module.parse_args(base)
     rebuilt = bridge_module.parse_args(bridge_module._argv_from_args(parsed))
     for field in (
-        "max_steps", "time_limit", "ready_timeout", "hold_steps", "hold_seconds",
-        "evidence_out", "scene_manifest", "scene_snapshot_out",
-        "host_instance_id", "plan", "config",
+        "max_steps",
+        "time_limit",
+        "ready_timeout",
+        "hold_steps",
+        "hold_seconds",
+        "evidence_out",
+        "scene_manifest",
+        "scene_snapshot_out",
+        "host_instance_id",
+        "plan",
+        "config",
     ):
         assert getattr(rebuilt, field) == getattr(parsed, field)
     minimal = bridge_module.parse_args(["--evidence-out", "/tmp/e.json"])
@@ -514,10 +544,7 @@ def test_passed_protocol_survives_kit_fast_shutdown(
     assert shutdown_body.index('status["app_close_initiated"] = True') < (
         shutdown_body.index("                get_app().shutdown()")
     )
-    assert (
-        'self.evidence["passed"] = evaluate_passed(self.evidence)'
-        in bridge_source
-    )
+    assert 'self.evidence["passed"] = evaluate_passed(self.evidence)' in bridge_source
     complete = {
         "ready": True,
         "hold_completed": True,
@@ -578,7 +605,7 @@ def test_runner_stops_host_orderly_and_writes_aggregate(runner_source: str) -> N
     assert "stop_host" in runner_source
     assert "kill -INT" in runner_source
     assert "kill -KILL" in runner_source
-    assert "wait \"$HOST_PID\"" in runner_source
+    assert 'wait "$HOST_PID"' in runner_source
     assert "artifacts/phase0.5/p05-integration.json" in runner_source
     assert "rocobrick-p05-integration/v1" in runner_source
     assert "rocobrick-p05-integration-probe/v1" in runner_source
@@ -620,3 +647,64 @@ def test_probe_file_exists_and_runner_is_executable() -> None:
     """The probe script and the executable runner must be in place."""
     assert PROBE_PATH.is_file()
     assert os.access(RUNNER_PATH, os.X_OK)
+
+
+def test_exit_capture_rejects_foreign_windows(bridge_module, tmp_path):
+    """Never capture another user's window or the full desktop."""
+    calls = []
+
+    def run(args, **kwargs):
+        calls.append(args)
+        assert kwargs["timeout"] <= 4
+        if args[0] == "xwininfo":
+            return SimpleNamespace(stdout='0x123 "Isaac Sim": ()\n')
+        return SimpleNamespace(stdout="_NET_WM_PID(CARDINAL) = 999\n")
+
+    result = bridge_module.capture_owned_window(
+        tmp_path / "final.png", run_command=run, owner_pid=123
+    )
+    assert "error" in result
+    assert all(command[0] != "import" for command in calls)
+
+
+def test_exit_capture_records_matching_process_window(bridge_module, tmp_path):
+    """The native screenshot targets the verified host window, not root."""
+    calls = []
+
+    def run(args, **kwargs):
+        calls.append(args)
+        if args[0] == "xwininfo":
+            return SimpleNamespace(stdout='0x123 "Isaac Sim": ()\n')
+        return SimpleNamespace(stdout="_NET_WM_PID(CARDINAL) = 123\n")
+
+    target = tmp_path / "final.png"
+    result = bridge_module.capture_owned_window(target, run_command=run, owner_pid=123)
+    assert result["owner_pid"] == 123
+    assert calls[-1] == ["import", "-window", "0x123", str(target)]
+
+
+def test_exit_capture_errors_are_nonfatal(bridge_module, tmp_path):
+    """Unavailable display tools must not prevent safe teardown."""
+
+    def run(args, **kwargs):
+        raise FileNotFoundError("no display tool")
+
+    result = bridge_module.capture_owned_window(tmp_path / "final.png", run_command=run)
+    assert "FileNotFoundError" in result["error"]
+
+
+def test_exit_diagnostics_default_off(bridge_module, monkeypatch):
+    """Ordinary runs incur no screenshot or simulator imports."""
+    monkeypatch.delenv("ROCOBRICK_EXIT_DIAGNOSTICS", raising=False)
+    state = bridge_module.BridgeState()
+    state.capture_exit_diagnostics("before-stop")
+    assert state.evidence is None
+
+
+def test_exit_frames_bracket_world_stop_and_precede_app_shutdown(bridge_source):
+    """Post-stop rendering uses async Kit updates, never reentrant app.update."""
+    final = bridge_source[bridge_source.index("async def _child_bridge") :]
+    assert final.index('"before-stop"') < final.index("state.shutdown()")
+    assert final.index("state.shutdown()") < final.index('"after-stop"')
+    assert final.index('"after-stop"') < final.rindex("get_app().shutdown()")
+    assert "next_update_async()" in final and "app.update(" not in final

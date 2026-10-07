@@ -164,13 +164,12 @@ def ik_seed_candidates(
     candidates: list[dict[str, float]] = []
     for _ in range(max(0, count)):
         candidates.append(
-            {
-                name: rng.uniform(*limits[name])
-                for name in joints
-            }
+            {name: rng.uniform(*limits[name]) for name in joints}
             | {name: value for name, value in measured.items() if name not in limits}
         )
     return candidates
+
+
 # Bound of the read-only robot-scoped scene probe used by readiness.
 SCENE_PROBE_TIMEOUT_S = 2.0
 
@@ -933,6 +932,9 @@ class RosMoveItRuntime:
         self._lock = threading.Lock()
         self._clock_values: deque[int] = deque(maxlen=STATE_HISTORY)
         self._isaac_states: deque[dict[str, float]] = deque(maxlen=STATE_HISTORY)
+        self._stamped_isaac_states: deque[
+            tuple[int, float, float, dict[str, float]]
+        ] = deque(maxlen=STATE_HISTORY)
         self._isaac_receipts: deque[float] = deque(maxlen=STATE_HISTORY)
         self._joint_states: deque[dict[str, float]] = deque(maxlen=STATE_HISTORY)
         self._joint_receipts: deque[float] = deque(maxlen=STATE_HISTORY)
@@ -1222,7 +1224,10 @@ class RosMoveItRuntime:
             self._arm_client = factories.action_client_factory(
                 node, factories.follow_joint_trajectory_type(), self.actions.arm_follow
             )
-        if self.actions.move_group != "/dual_arm/move_action" and self._move_group_client is None:
+        if (
+            self.actions.move_group != "/dual_arm/move_action"
+            and self._move_group_client is None
+        ):
             self._move_group_client = factories.action_client_factory(
                 node, factories.move_group_type(), self.actions.move_group
             )
@@ -1279,6 +1284,22 @@ class RosMoveItRuntime:
             self._isaac_states.append(state)
             self._isaac_receipts.append(self._clock_fn())
             self._isaac_state_count += 1
+            stamp = getattr(getattr(message, "header", None), "stamp", None)
+            sec, nanosec = getattr(stamp, "sec", None), getattr(stamp, "nanosec", None)
+            if (
+                type(sec) is int
+                and type(nanosec) is int
+                and sec >= 0
+                and 0 <= nanosec < 1_000_000_000
+            ):
+                self._stamped_isaac_states.append(
+                    (
+                        self._isaac_state_count,
+                        sec + nanosec * 1e-9,
+                        self._isaac_receipts[-1],
+                        dict(state),
+                    )
+                )
 
     def _on_joint_state(self, message: Any) -> None:
         state = self._normalized_state(message)
@@ -1312,6 +1333,26 @@ class RosMoveItRuntime:
             if not self._joint_states:
                 return None
             return dict(self._joint_states[-1])
+
+    def latest_stamped_isaac_state(self) -> Mapping[str, object] | None:
+        """Read the latest physics sample only when its own timestamp exists.
+
+        Returns:
+            Identified measured joints, physics time and receipt age; None
+            rather than a preceding stamp when the newest sample is unstamped.
+        """
+        with self._lock:
+            if not self._stamped_isaac_states:
+                return None
+            count, stamp, receipt, joints = self._stamped_isaac_states[-1]
+            if count != self._isaac_state_count:
+                return None
+            return {
+                "sample_count": count,
+                "sim_time_s": stamp,
+                "age_s": self._clock_fn() - receipt,
+                "joints": dict(joints),
+            }
 
     def state_timing(self) -> Mapping[str, float | None]:
         """Return actual receipt ages and broadcaster simulation timestamp.
@@ -1640,9 +1681,7 @@ class RosMoveItRuntime:
             raise ValueError("combined IK target pose is malformed")
         client = self._ik_client
         if client is None or not self._service_ready(client):
-            raise RuntimeError(
-                f"{self.services.compute_ik} service is not discovered"
-            )
+            raise RuntimeError(f"{self.services.compute_ik} service is not discovered")
         deadline = self._clock_fn() + float(timeout_s)
         last_code: int | None = None
         attempts = 0
@@ -1707,17 +1746,13 @@ class RosMoveItRuntime:
             response = future.result()
             code = int(response.error_code.val)
             names = [str(name) for name in response.solution.joint_state.name]
-            values = [
-                float(value) for value in response.solution.joint_state.position
-            ]
+            values = [float(value) for value in response.solution.joint_state.position]
         except (AttributeError, TypeError, ValueError):
             return None, None
         if code != SUCCESS_CODE:
             return None, code
         arm = set(self.arm_joint_names)
-        solved = {
-            name: value for name, value in zip(names, values) if name in arm
-        }
+        solved = {name: value for name, value in zip(names, values) if name in arm}
         if set(solved) != arm or any(
             not math.isfinite(value) for value in solved.values()
         ):
@@ -2005,18 +2040,12 @@ class RosMoveItRuntime:
             )
         return True, None
 
-    def read_attached_planning_scene(
-        self, timeout_s: float
-    ) -> Mapping[str, object]:
+    def read_attached_planning_scene(self, timeout_s: float) -> Mapping[str, object]:
         """Read every attached collision object with normalized geometry."""
         factories = self._resolve_factories()
         client = self._ensure_get_planning_scene_client()
         request_factory = factories.get_planning_scene_request_factory
-        if (
-            client is None
-            or not self._service_ready(client)
-            or request_factory is None
-        ):
+        if client is None or not self._service_ready(client) or request_factory is None:
             return {
                 "passed": False,
                 "attached": [],
@@ -2024,9 +2053,7 @@ class RosMoveItRuntime:
             }
         try:
             request = request_factory()
-            request.components.components = (
-                PLANNING_SCENE_ROBOT_STATE_ATTACHED_OBJECTS
-            )
+            request.components.components = PLANNING_SCENE_ROBOT_STATE_ATTACHED_OBJECTS
             future = client.call_async(request)
             if not self._wait_future(future, self._clock_fn() + float(timeout_s)):
                 return {
@@ -2058,10 +2085,13 @@ class RosMoveItRuntime:
                         float(pose.position.y),
                         float(pose.position.z),
                     )
-                    if len(dimensions) == 3 and all(
-                        math.isfinite(value) and value > 0.0
-                        for value in dimensions
-                    ) and all(math.isfinite(value) for value in center):
+                    if (
+                        len(dimensions) == 3
+                        and all(
+                            math.isfinite(value) and value > 0.0 for value in dimensions
+                        )
+                        and all(math.isfinite(value) for value in center)
+                    ):
                         minimum = tuple(
                             center[index] - dimensions[index] / 2.0
                             for index in range(3)
@@ -4504,10 +4534,11 @@ class RosMoveItRobotSession:
 
             def objects(result: Mapping[str, object]) -> list[Mapping[str, object]]:
                 value = result.get("attached")
-                return [
-                    item for item in value
-                    if isinstance(item, Mapping)
-                ] if isinstance(value, list) else []
+                return (
+                    [item for item in value if isinstance(item, Mapping)]
+                    if isinstance(value, list)
+                    else []
+                )
 
             def donor_exact(items: list[Mapping[str, object]]) -> bool:
                 # The donor and receiver TCP frames are robot-local and may
@@ -4517,7 +4548,8 @@ class RosMoveItRobotSession:
                 # receiver geometry/frame is proven by the post-attach
                 # readback below.
                 matches = [
-                    item for item in items
+                    item
+                    for item in items
                     if item.get("object_id") == object_id
                     and item.get("link_name") == payload["donor_link_name"]
                 ]
@@ -4528,14 +4560,14 @@ class RosMoveItRobotSession:
 
             def receiver_exact(items: list[Mapping[str, object]]) -> bool:
                 matches = [
-                    item for item in items
+                    item
+                    for item in items
                     if item.get("object_id") == object_id
                     and item.get("link_name") == payload["receiver_link_name"]
                 ]
                 return len(matches) == 1 and (
                     matches[0].get("frame_id") == payload["frame_id"]
-                    and matches[0].get("geometry_digest")
-                    == payload["geometry_digest"]
+                    and matches[0].get("geometry_digest") == payload["geometry_digest"]
                 )
 
             try:
@@ -4598,7 +4630,9 @@ class RosMoveItRobotSession:
                 try:
                     donor_after = objects(read(donor))
                     receiver_after = objects(read(receiver))
-                    restored = donor_exact(donor_after) and receiver_absent(receiver_after)
+                    restored = donor_exact(donor_after) and receiver_absent(
+                        receiver_after
+                    )
                 except Exception as error:
                     rollback_errors.append(f"rollback readback: {error}")
                     restored = False
@@ -4607,9 +4641,7 @@ class RosMoveItRobotSession:
                     "errors": rollback_errors,
                 }
 
-            detached = donor.detach_attached_planning_scene(
-                detach_payload, timeout_s
-            )
+            detached = donor.detach_attached_planning_scene(detach_payload, timeout_s)
             if detached.get("passed") is not True:
                 return {
                     "passed": False,
@@ -4642,9 +4674,7 @@ class RosMoveItRobotSession:
                     "rollback": rollback_result,
                 }
 
-            attached = receiver.apply_attached_planning_scene(
-                attach_payload, timeout_s
-            )
+            attached = receiver.apply_attached_planning_scene(attach_payload, timeout_s)
             if attached.get("passed") is not True:
                 rollback_result = rollback()
                 return {
@@ -4748,6 +4778,37 @@ class RosMoveItRobotSession:
                 participants_executor=self._execute_coordinated_operation,
             )
 
+    def execute_prepared_motion(self, request, *, cancel_requested=None):
+        """Execute an admitted path without replanning or shared scene writes.
+
+        Returns:
+            Bound tracking, synchronization and terminal lifecycle evidence.
+        """
+        from rocobrick.adapters.moveit.prepared_execution import (
+            perform_prepared_motion,
+        )
+        from rocobrick.execution.prepared_motion import PreparedMotionRequest
+
+        if not isinstance(request, PreparedMotionRequest):
+            raise ValueError("prepared execution requires PreparedMotionRequest")
+        with self._planning_lock:
+            return perform_prepared_motion(
+                self, request, cancel_requested=cancel_requested
+            )
+
+    def plan_readonly_combined(self, request):
+        """Query the current combined scene without synchronization/apply calls.
+
+        Returns:
+            One combined trajectory, never physical execution evidence.
+        """
+        from rocobrick.adapters.moveit.readonly_combined_plan import (
+            perform_readonly_combined_plan,
+        )
+
+        with self._planning_lock:
+            return perform_readonly_combined_plan(self, request)
+
     def _execute_coordinated_operation(self, operation) -> Mapping[str, object]:
         """Run the split trajectories through the all-or-nothing lifecycle."""
         from rocobrick.adapters.moveit.coordinated_arm import (
@@ -4766,7 +4827,9 @@ class RosMoveItRobotSession:
         evidence["start_barrier_sim_time_s"] = barrier
         return evidence
 
-    def unified_joint_limits(self, timeout_s: float = 5.0) -> dict[str, tuple[float, float]]:
+    def unified_joint_limits(
+        self, timeout_s: float = 5.0
+    ) -> dict[str, tuple[float, float]]:
         """Read combined arm joint limits from the live robot description.
 
         Subscribes once to the latched ``/dual_arm/robot_description`` the
@@ -4805,8 +4868,7 @@ class RosMoveItRobotSession:
             self.node.destroy_subscription(subscription)
         if not received:
             raise RuntimeError(
-                f"{COMBINED_ROBOT_DESCRIPTION_TOPIC} did not answer "
-                f"within {timeout_s}s"
+                f"{COMBINED_ROBOT_DESCRIPTION_TOPIC} did not answer within {timeout_s}s"
             )
         arm_joints = {
             f"{robot_id}_joint{index}"
@@ -4837,7 +4899,9 @@ class RosMoveItRobotSession:
             state = self.runtimes[robot_id].latest_joint_state()
             if not state:
                 raise RuntimeError(f"no live joint state for {robot_id}")
-            result.update({f"{robot_id}_{name}": float(value) for name, value in state.items()})
+            result.update(
+                {f"{robot_id}_{name}": float(value) for name, value in state.items()}
+            )
             finger = f"{robot_id}_gripper_joint1"
             parent = f"{robot_id}_gripper"
             if parent not in result and finger in result:
@@ -4868,8 +4932,7 @@ class RosMoveItRobotSession:
                     f"no live joint state to seed combined IK for {robot_id}"
                 )
             seeds[robot_id] = {
-                f"{robot_id}_{name}": float(value)
-                for name, value in canonical.items()
+                f"{robot_id}_{name}": float(value) for name, value in canonical.items()
             }
         solved: dict[str, dict[str, float]] = {}
         for robot_id in self.robot_ids:
@@ -4885,8 +4948,7 @@ class RosMoveItRobotSession:
                 isinstance(positions, Mapping)
                 and set(positions) == arm
                 and all(
-                    isinstance(value, (int, float))
-                    and math.isfinite(float(value))
+                    isinstance(value, (int, float)) and math.isfinite(float(value))
                     for value in positions.values()
                 )
             ):
@@ -4900,9 +4962,7 @@ class RosMoveItRobotSession:
                 limit_reader = getattr(self, "unified_joint_limits", None)
                 if callable(limit_reader):
                     limits = limit_reader(request.timeout_s)
-            arm_limits = {
-                joint: limits[joint] for joint in arm if joint in limits
-            }
+            arm_limits = {joint: limits[joint] for joint in arm if joint in limits}
             extra = (
                 ik_seed_candidates(
                     seeds[robot_id],
@@ -4955,6 +5015,14 @@ class RosMoveItRobotSession:
         Returns:
             The complete shared document, never independently queried robot snapshots.
         """
+        if (
+            isinstance(timeout_s, bool)
+            or not isinstance(timeout_s, (int, float))
+            or not math.isfinite(timeout_s)
+            or timeout_s <= 0
+        ):
+            raise ValueError("shared observation timeout must be finite and positive")
+        deadline = self._clock_fn() + timeout_s
         try:
             shared = self.runtimes[self.robot_ids[0]].query_scene_state(timeout_s)
             robots = shared.get("robots")
@@ -4991,11 +5059,48 @@ class RosMoveItRobotSession:
             sequence = shared.get("sequence")
             if type(sequence) is not int or sequence < 0:
                 raise RuntimeError("shared snapshot sequence is invalid")
+            snapshot_time = shared.get("sim_time_s")
+            if (
+                isinstance(snapshot_time, bool)
+                or not isinstance(snapshot_time, (int, float))
+                or not math.isfinite(snapshot_time)
+                or snapshot_time < 0
+            ):
+                raise RuntimeError("shared snapshot simulation time is invalid")
+            self._wait_for_snapshot_clock(float(snapshot_time), deadline)
             return shared
         except Exception as error:
             for robot in self.runtimes.values():
                 robot._last_scene_error = f"{type(error).__name__}: {error}"
             raise
+
+    def _wait_for_snapshot_clock(self, snapshot_time: float, deadline: float) -> None:
+        """Pump real clock callbacks within the original observation timeout.
+
+        A service response can arrive before the matching /clock topic sample.
+        Never replace the received clock with the scene timestamp or relax the
+        caller's scene-age gate. A backwards clock fails closed.
+        """
+        previous = None
+        while True:
+            observed = self.latest_shared_sim_time_s()
+            if not math.isfinite(observed) or observed < 0:
+                raise RuntimeError("shared /clock sample is invalid")
+            if previous is not None and observed < previous:
+                raise RuntimeError(
+                    "shared /clock moved backwards during snapshot alignment"
+                )
+            if observed >= snapshot_time:
+                return
+            previous = observed
+            remaining = deadline - self._clock_fn()
+            if remaining <= 0:
+                raise TimeoutError(
+                    "shared /clock did not reach snapshot time before observation "
+                    f"deadline: clock={observed:.9f}, snapshot={snapshot_time:.9f}"
+                )
+            self._spin_fn()
+            self._sleep_fn(min(self._poll_interval_s, 0.005, remaining))
 
     def unified_readiness(
         self, request, *, probe_scene: bool = True
@@ -5073,9 +5178,7 @@ class RosMoveItRobotSession:
                 stamps.append(stamp)
             clocks = robot.clock_values()
             clock_s = clocks[-1] * 1e-9 if clocks else None
-            scene_delta = (
-                float(clock_s - sim_time) if clock_s is not None else None
-            )
+            scene_delta = float(clock_s - sim_time) if clock_s is not None else None
             joint_delta = (
                 float(clock_s - stamp)
                 if clock_s is not None and isinstance(stamp, (int, float))
@@ -5088,14 +5191,11 @@ class RosMoveItRobotSession:
                 "clock_minus_scene_s": scene_delta,
                 "clock_minus_joint_stamp_s": joint_delta,
                 "fresh_age_ok": all(
-                    isinstance(timing[name], (int, float))
-                    and 0 <= timing[name] <= 0.5
+                    isinstance(timing[name], (int, float)) and 0 <= timing[name] <= 0.5
                     for name in ("isaac_age_s", "joint_age_s")
                 ),
-                "scene_clock_ok": scene_delta is not None
-                and abs(scene_delta) <= 0.5,
-                "joint_clock_ok": joint_delta is not None
-                and abs(joint_delta) <= 0.5,
+                "scene_clock_ok": scene_delta is not None and abs(scene_delta) <= 0.5,
+                "joint_clock_ok": joint_delta is not None and abs(joint_delta) <= 0.5,
             }
             fresh = fresh and timing_by_robot[robot_id]["fresh_age_ok"] is True
             fresh = fresh and bool(clocks)
@@ -5225,7 +5325,7 @@ class RosMoveItRobotSession:
             try:
                 shared = self.observe_all()
                 scene_query_ready = True
-            except (RuntimeError, ValueError) as error:
+            except (RuntimeError, ValueError, TimeoutError) as error:
                 scene_query_ready = False
                 for robot in self.runtimes.values():
                     robot._last_scene_error = f"{type(error).__name__}: {error}"

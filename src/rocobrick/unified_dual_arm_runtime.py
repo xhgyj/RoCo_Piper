@@ -112,13 +112,21 @@ class SharedSceneSnapshot:
 
     @property
     def scene_digest(self) -> str:
-        """Return the digest of the complete bound shared observation."""
+        """Return the digest of the complete bound shared observation.
+
+        Returns:
+            The identified, bound result; physical proof remains separately checked.
+        """
         canonical = json.dumps(self.document, sort_keys=True, separators=(",", ":"))
         return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
     @property
     def scene_version(self) -> int:
-        """Return the admitted planning-scene version."""
+        """Return the admitted planning-scene version.
+
+        Returns:
+            The identified, bound result; physical proof remains separately checked.
+        """
         return self.document["scene_version"]  # type: ignore[return-value]
 
 
@@ -215,36 +223,60 @@ class SuccessorPrePhaseRequest:
 
     @property
     def predecessor_operation_ids(self) -> tuple[str, ...]:
-        """Return every physical predecessor identity."""
+        """Return every physical predecessor identity.
+
+        Returns:
+            The identified, bound result; physical proof remains separately checked.
+        """
         return tuple(
             operation.operation_id for operation in self.predecessor_operations
         )
 
     @property
     def successor_operation_ids(self) -> tuple[str, ...]:
-        """Return the actual successor, or none for authorized terminal cleanup."""
+        """Return the actual successor, or none for authorized terminal cleanup.
+
+        Returns:
+            The identified, bound result; physical proof remains separately checked.
+        """
         return (
             () if self.next_operation is None else (self.next_operation.operation_id,)
         )
 
     @property
     def successor_operations(self) -> tuple[RobotOperation, ...]:
-        """Return the immutable external successor operation."""
+        """Return the immutable external successor operation.
+
+        Returns:
+            The identified, bound result; physical proof remains separately checked.
+        """
         return () if self.next_operation is None else (self.next_operation,)
 
     @property
     def scene_digest(self) -> str:
-        """Return the shared snapshot digest."""
+        """Return the shared snapshot digest.
+
+        Returns:
+            The identified, bound result; physical proof remains separately checked.
+        """
         return self.scene_snapshot.scene_digest
 
     @property
     def scene_version(self) -> int:
-        """Return the shared snapshot version."""
+        """Return the shared snapshot version.
+
+        Returns:
+            The identified, bound result; physical proof remains separately checked.
+        """
         return self.scene_snapshot.scene_version
 
     @property
     def terminal_cleanup(self) -> bool:
-        """Return whether this is an explicitly authorized terminal departure."""
+        """Return whether this is an explicitly authorized terminal departure.
+
+        Returns:
+            The identified, bound result; physical proof remains separately checked.
+        """
         return self.terminal_policy is not None
 
 
@@ -271,6 +303,7 @@ class SuccessorPrePhaseEvidence:
     evidence: Mapping[str, JSONValue]
     terminal_cleanup: bool = False
     reason: str | None = None
+    transition_mode: str = "motion"
 
     def __post_init__(self) -> None:
         """Validate lifecycle booleans, identity coverage and JSON evidence."""
@@ -309,10 +342,38 @@ class SuccessorPrePhaseEvidence:
             raise ValueError("pre-phase evidence must be JSON-safe")
         if self.reason is not None and not isinstance(self.reason, str):
             raise ValueError("reason must be str or None")
+        if self.transition_mode not in {"motion", "stationary_handover"}:
+            raise ValueError("unknown physical lease transition mode")
+        if self.transition_mode == "stationary_handover" and any(
+            (
+                self.planned,
+                self.prepared,
+                self.started,
+                self.arrival_confirmed,
+                self.terminal_cleanup,
+            )
+        ):
+            raise ValueError(
+                "stationary HANDOVER adoption cannot claim motion or arrival"
+            )
 
     @property
     def passed(self) -> bool:
-        """Return true only after arrival and terminal-safe adoption readiness."""
+        """Return true only after arrival and terminal-safe adoption readiness.
+
+        Returns:
+            The identified, bound result; physical proof remains separately checked.
+        """
+        if self.transition_mode == "stationary_handover":
+            return (
+                self.terminal
+                and self.safe
+                and self.adoption_ready
+                and (
+                    self.evidence.get("stationary_custody_confirmed") is True
+                    and self.evidence.get("motion_sent") is False
+                )
+            )
         return all(
             (
                 self.planned,
@@ -331,6 +392,27 @@ class SuccessorPrePhaseEvidence:
         Returns:
             Whether this evidence answers the exact admitted request.
         """
+        if self.transition_mode == "stationary_handover":
+            operation = request.next_operation
+            target = operation.target.values if operation and operation.target else {}
+            donor, receiver = (
+                target.get("donor_robot_id"),
+                target.get("receiver_robot_id"),
+            )
+            physical = target.get("physical_instance_id")
+            if (
+                operation is None
+                or operation.skill != "HANDOVER"
+                or request.terminal_cleanup
+                or (
+                    donor == receiver
+                    or {donor, receiver} != set(request.participants)
+                    or self.evidence.get("physical_instance_id") != physical
+                    or self.evidence.get("donor_robot_id") != donor
+                    or self.evidence.get("receiver_robot_id") != receiver
+                )
+            ):
+                return False
         return all(
             (
                 self.transition_id == request.transition_id,

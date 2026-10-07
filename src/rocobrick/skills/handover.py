@@ -334,7 +334,8 @@ class HandoverHandler:
         ):
             return self._failed(request, "HANDOVER donor holding is not confirmed")
         evidence: dict[str, JSONValue] = {}
-        donor_released = False
+        release_attempted = False
+        transfer_attempted = False
         try:
             free = await self._execute_free_space(request)
             evidence["receiver_free_space"] = dict(free.evidence)
@@ -357,8 +358,12 @@ class HandoverHandler:
             co_hold = self._observations.verify_co_hold(request, samples)
             self._require_proof(co_hold, "co-hold")
             evidence["co_hold_confirmed"] = dict(co_hold)
+            transfer_attempted = True
+            evidence["scene_transfer_attempted"] = True
             scene_transfer = await self._dispatch_transfer(request, samples[-1])
             evidence["scene_transfer_committed"] = scene_transfer
+            release_attempted = True
+            evidence["donor_release_attempted"] = True
             donor_release = await self._dispatch_gripper(
                 request.donor_robot_id,
                 request.donor_release_gripper,
@@ -366,7 +371,6 @@ class HandoverHandler:
                 "donor_release",
             )
             evidence["donor_release_feedback"] = donor_release
-            donor_released = True
             follow_samples = await self._samples(request)
             receiver_follow = self._observations.verify_receiver_holding(
                 request, follow_samples
@@ -390,7 +394,7 @@ class HandoverHandler:
                 evidence=evidence,
             )
         except Exception as error:  # noqa: BLE001 - fail closed after any phase
-            if donor_released:
+            if release_attempted or transfer_attempted:
                 self._ledger.mark_handover_uncertain(
                     request,
                     f"HANDOVER partial transfer: {error}",
@@ -424,7 +428,7 @@ class HandoverHandler:
         self, request: HandoverRequest
     ) -> tuple[Mapping[str, object], ...]:
         samples = [await self._observations.observe(request)]
-        for _ in range(2):
+        for _ in range(request.follow_samples - 1):
             await asyncio.sleep(self._poll_interval_s)
             samples.append(await self._observations.observe(request))
         if any(

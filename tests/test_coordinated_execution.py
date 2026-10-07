@@ -105,8 +105,10 @@ def test_start_failure_fanouts_cancel_and_records_terminal_safe():
     result = CoordinatedExecutionCoordinator(
         {"piper_0": first, "piper_1": second}
     ).execute(operation())
-    assert first.calls == ["prepare", "start", "cancel"]
-    assert second.calls == ["prepare", "start", "cancel"]
+    assert first.calls[:2] == ["prepare", "start"]
+    assert second.calls[:2] == ["prepare", "start"]
+    assert first.calls[2:] and set(first.calls[2:]) == {"cancel"}
+    assert second.calls[2:] and set(second.calls[2:]) == {"cancel"}
     assert result.started is False
     assert result.terminal is True
     assert result.safe_to_release is True

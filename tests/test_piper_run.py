@@ -76,12 +76,14 @@ ALLOWED_ROCOBRICK = {
     # TCP authorization have passed, and only for explicit dispatch.
     "rocobrick.multi_robot_runtime",
     "rocobrick.adapters.moveit.transit",
+    "rocobrick.adapters.moveit.handover_live",
     "rocobrick.execution.operation_state_ledger",
     "rocobrick.isaac_snapshot_host_adapter",
     "rocobrick.isaac_backend",
     "rocobrick.moveit_contract",
     "rocobrick.skills.contracts",
     "rocobrick.skills.handover",
+    "rocobrick.skills.handover_profile",
     "rocobrick.skills.observation",
     "rocobrick.skills.targets",
     "rocobrick.skills.pick",
@@ -975,13 +977,18 @@ def test_operation_phase_imports_its_owned_dependencies():
         "SessionTcpMotionAdapter": "rocobrick.adapters.moveit.transit",
         "load_transit_contexts": "rocobrick.adapters.moveit.transit",
         "SkillOperationExecutor": "rocobrick.robot_operation_executor",
-        "HandoverRequest": "rocobrick.skills.contracts",
-        "HandoverHandler": "rocobrick.skills.handover",
-        "HandoverOperationBackend": "rocobrick.skills.handover",
-        "gripper_target_from_payload": "rocobrick.isaac_backend",
+        "PickHandler": "rocobrick.skills.pick",
     }
     for name, module in expected.items():
         assert sources[name] == module
+    assert not {
+        "HandoverRequest", "HandoverHandler", "HandoverOperationBackend",
+        "receiver_precontact_target", "pick_targets", "gripper_target_from_payload",
+    } & sources.keys()
+    assert not any(
+        isinstance(node, ast.ClassDef) and node.name == "_LiveHandoverObservations"
+        for node in ast.walk(phase)
+    )
 
     env = dict(os.environ)
     env["PYTHONPATH"] = os.pathsep.join([
@@ -996,10 +1003,12 @@ def test_operation_phase_imports_its_owned_dependencies():
             "from rocobrick.execution.operation_state_ledger import "
             "OperationStateLedger; "
             "from rocobrick.robot_operation_executor import SkillOperationExecutor; "
-            "from rocobrick.skills.contracts import HandoverRequest; "
-            "from rocobrick.skills.handover import "
-            "HandoverHandler, HandoverOperationBackend; "
-            "from rocobrick.isaac_backend import gripper_target_from_payload",
+            "from rocobrick.skills.coordinated_handover import "
+            "CoordinatedHandoverBackend; "
+            "from rocobrick.adapters.moveit.handover_program import "
+            "NativeCoordinatedHandoverFactory; "
+            "from rocobrick.skills.handover_continuation import "
+            "StationaryHandoverContinuation",
         ],
         capture_output=True,
         text=True,

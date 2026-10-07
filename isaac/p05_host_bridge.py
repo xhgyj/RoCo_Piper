@@ -1191,12 +1191,79 @@ def collect_counter_evidence(
     return {"commands": commands, "publish_totals": publish_totals}
 
 
+def capture_owned_window(output: Path, *, run_command=None, owner_pid=None) -> dict:
+    """Capture only an Isaac window owned by this host process.
+
+    Returns:
+        Window provenance and image path, or a best-effort diagnostic error.
+    """
+    import subprocess
+
+    run = subprocess.run if run_command is None else run_command
+    pid = os.getpid() if owner_pid is None else owner_pid
+    try:
+        tree = run(
+            ["xwininfo", "-root", "-tree"],
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=2,
+        ).stdout
+        candidates = re.findall(
+            r'^\s*(0x[0-9a-fA-F]+)\s+"([^"\n]*Isaac[^"\n]*)"',
+            tree,
+            re.MULTILINE | re.IGNORECASE,
+        )
+        for window, title in candidates[:8]:
+            prop = run(
+                ["xprop", "-id", window, "_NET_WM_PID"],
+                capture_output=True,
+                text=True,
+                check=True,
+                timeout=1,
+            ).stdout
+            match = re.search(r"=\s*(\d+)\s*$", prop.strip())
+            if match is None or int(match.group(1)) != pid:
+                continue
+            run(
+                ["import", "-window", window, str(output)],
+                capture_output=True,
+                text=True,
+                check=True,
+                timeout=4,
+            )
+            return {
+                "image": str(output),
+                "window_id": window,
+                "title": title,
+                "owner_pid": pid,
+            }
+        return {"error": "no Isaac window owned by this host process"}
+    except Exception as exc:
+        return {"error": f"{type(exc).__name__}: {exc}"}
+
+
+def sync_viewport_physics(world: object, fabric: object) -> None:
+    """Copy the latest PhysX transforms to rendering without stepping Kit.
+
+    Mirrors SimulationContext.render's Fabric refresh, deliberately excluding
+    app.update: this host is already running inside the Kit async engine.
+    """
+    fabric.force_update(float(world.get_physics_dt()), float(world.current_time))
+
+
 class BridgeState:
     """Holds live Kit/rclpy objects so ``shutdown`` can clean up in order."""
 
     def __init__(self) -> None:
         """Start empty; live handles are assigned while the bridge runs."""
         self.app = None
+        self.defer_app_shutdown = False
+        self.viewport_fabric = None
+        self.viewport_sync_count = 0
+        self.exit_diagnostics_enabled = (
+            os.environ.get("ROCOBRICK_EXIT_DIAGNOSTICS") == "1"
+        )
         self.world = None
         self.ros_node = None
         self.evidence = None
@@ -1239,6 +1306,117 @@ class BridgeState:
         except OSError:
             pass
 
+    def refresh_viewport(self, world: object) -> None:
+        """Refresh render-side transforms after manual physics-only steps."""
+        if self.viewport_fabric is None:
+            from omni.kit.app import get_app
+
+            if not get_app().get_extension_manager().is_extension_enabled(
+                "omni.physx.fabric"
+            ):
+                return
+            from omni.physxfabric import get_physx_fabric_interface
+
+            self.viewport_fabric = get_physx_fabric_interface()
+        sync_viewport_physics(world, self.viewport_fabric)
+        self.viewport_sync_count += 1
+
+    def capture_exit_diagnostics(self, phase: str) -> None:
+        """Record opt-in exit images and body poses without commanding motion."""
+        if not self.exit_diagnostics_enabled:
+            return
+        if self.evidence is None or self.evidence_path is None:
+            return
+        report = {
+            "phase": phase,
+            "host_pid": os.getpid(),
+            "robots": {},
+            "viewport_fabric_updates": self.viewport_sync_count,
+        }
+        reports = self.evidence.setdefault("exit_diagnostics", {})
+        try:
+            directory = self.evidence_path.parent / "exit-diagnostics"
+            directory.mkdir(parents=True, exist_ok=True)
+            report["window"] = capture_owned_window(directory / f"{phase}.png")
+            import carb
+            import omni.physx
+            import omni.usd
+            from pxr import Usd, UsdGeom, UsdPhysics
+
+            stage = omni.usd.get_context().get_stage()
+            report["fabric_scene_delegate"] = carb.settings.get_settings().get(
+                "/app/useFabricSceneDelegate"
+            )
+            physics = omni.physx.get_physx_interface()
+            cache = UsdGeom.BBoxCache(Usd.TimeCode.Default(), [UsdGeom.Tokens.default_])
+            for channel in () if self.bridge is None else self.bridge.channels:
+                robot = {"bodies": {}, "authored_joints": []}
+                report["robots"][channel.robot_id] = robot
+                for name in (
+                    "link6",
+                    "gripper_base",
+                    "gripper_link1",
+                    "gripper_link2",
+                    "camera_stand_link",
+                    "camera_link",
+                ):
+                    path = channel.prim_path + "/" + name
+                    body = {"prim_path": path}
+                    robot["bodies"][name] = body
+                    try:
+                        body["physx_pose"] = self.bridge._physx_pose(path, physics)
+                    except Exception as exc:
+                        body["physx_error"] = str(exc)
+                    prim = stage.GetPrimAtPath(path)
+                    if not prim.IsValid():
+                        body["usd_error"] = "missing body prim"
+                        continue
+                    transform = UsdGeom.Xformable(prim).ComputeLocalToWorldTransform(
+                        Usd.TimeCode.Default()
+                    )
+                    body["usd_position_xyz"] = list(transform.ExtractTranslation())
+                    visuals = stage.GetPrimAtPath(path + "/visuals")
+                    if visuals.IsValid():
+                        visual_bound = cache.ComputeWorldBound(
+                            visuals
+                        ).ComputeAlignedRange()
+                        if not visual_bound.IsEmpty():
+                            body["visual_aabb_min"] = list(visual_bound.GetMin())
+                            body["visual_aabb_max"] = list(visual_bound.GetMax())
+                    bounds = cache.ComputeWorldBound(prim).ComputeAlignedRange()
+                    if not bounds.IsEmpty():
+                        body["usd_aabb_min"] = list(bounds.GetMin())
+                        body["usd_aabb_max"] = list(bounds.GetMax())
+                root = stage.GetPrimAtPath(channel.prim_path)
+                for prim in Usd.PrimRange(root):
+                    if not prim.IsA(UsdPhysics.Joint):
+                        continue
+                    joint = UsdPhysics.Joint(prim)
+                    bodies = [str(p) for p in joint.GetBody0Rel().GetTargets()] + [
+                        str(p) for p in joint.GetBody1Rel().GetTargets()
+                    ]
+                    if any("gripper" in p for p in bodies):
+                        robot["authored_joints"].append(
+                            {
+                                "prim_path": str(prim.GetPath()),
+                                "bodies": bodies,
+                                "enabled": joint.GetJointEnabledAttr().Get(),
+                            }
+                        )
+        except Exception as exc:
+            report["error"] = f"{type(exc).__name__}: {exc}"
+        reports[phase] = report
+        try:
+            (
+                self.evidence_path.parent / "exit-diagnostics" / f"{phase}.json"
+            ).write_text(
+                json.dumps(report, indent=2, sort_keys=True, allow_nan=False) + "\n",
+                encoding="utf-8",
+            )
+            write_evidence(self.evidence_path, self.evidence)
+        except (OSError, ValueError, TypeError):
+            pass
+
     def shutdown(self) -> dict:
         """Shut down in order: rclpy node, world, timeline, Kit app.
 
@@ -1277,7 +1455,7 @@ class BridgeState:
         except Exception as exc:
             status["timeline_stopped"] = f"error: {exc}"
         self._flush(status)
-        if self.app is not None:
+        if self.app is not None and not self.defer_app_shutdown:
             # Kit's supported application shutdown path is get_app().shutdown().
             # Evidence is flushed before requesting it because Kit may terminate
             # the process inside the call.
@@ -1548,6 +1726,30 @@ class InProcessBridge:
         self._state = state
         self._channels = tuple(channels)
         self._scene_sequence = 0
+        self._pad_contact_reader = None
+        self._pad_contact_frame = None
+        self._pad_contact_error = None
+        self._finger_contact_history = []
+        if not robot_only:
+            try:
+                import omni.usd
+
+                from rocobrick.adapters.isaac.pad_contacts import PhysxPadContactReader
+
+                self._pad_contact_reader = PhysxPadContactReader.from_stage(
+                    omni.usd.get_context().get_stage(),
+                    robot_paths={c.robot_id: c.prim_path for c in self._channels},
+                    object_paths=state.runtime_host.physical_instance_paths,
+                    include_finger_contacts=os.environ.get(
+                        "ROCOBRICK_HANDOVER_SIMULATION"
+                    )
+                    == "1",
+                )
+            except Exception as error:
+                # Missing contact sensing must not invent holding evidence or
+                # break unrelated PICK-only sessions. HANDOVER admission reads
+                # its explicit capability/error before dispatch.
+                self._pad_contact_error = f"{type(error).__name__}: {error}"
         for channel in self._channels:
             channel.joint_state_type = JointState
         self.clock_publisher = self.node.create_publisher(Clock, TOPIC_CLOCK, QOS_DEPTH)
@@ -1640,6 +1842,28 @@ class InProcessBridge:
             and getattr(self._state, "scene_manifest_ids", None)
         )
 
+    def capture_pad_contacts(self, world: object) -> None:
+        """Capture after each physics step, never reusing the preceding buffer."""
+        self._pad_contact_frame = None
+        if self._pad_contact_reader is None:
+            return
+        try:
+            self._pad_contact_frame = self._pad_contact_reader.capture(
+                sim_time_s=float(world.current_time),
+                dt_s=float(world.get_physics_dt()),
+            )
+            self._pad_contact_error = None
+            self._finger_contact_history.append(self._pad_contact_frame)
+            # Bound memory by simulation time and count; the handler rejects
+            # a query gap that has fallen outside this complete step history.
+            now = float(world.current_time)
+            self._finger_contact_history = [
+                f for f in self._finger_contact_history if now - f.sim_time_s <= 0.5
+            ][-512:]
+        except Exception as error:
+            self._finger_contact_history.clear()
+            self._pad_contact_error = f"{type(error).__name__}: {error}"
+
     def _brick_aabbs(self) -> dict[str, tuple[tuple[float, ...], tuple[float, ...]]]:
         """Compute world AABBs for every manifest brick via a BBoxCache.
 
@@ -1672,6 +1896,51 @@ class InProcessBridge:
                 tuple(float(value) for value in aligned.GetMax()),
             )
         return aabbs
+
+    def _handover_contact_geometry(self) -> dict[str, object]:
+        """Export authored body collider bounds in the object's LOCAL frame.
+
+        Never invert a moving world AABB or infer dimensions from a grasp.
+        This additive capability is separate from PICK scene observations.
+        """
+        import hashlib
+        import omni.usd
+        from pxr import Gf, Usd, UsdGeom, UsdPhysics
+
+        stage = omni.usd.get_context().get_stage()
+        if UsdGeom.GetStageMetersPerUnit(stage) != 1.0:
+            raise ValueError("HANDOVER contact geometry requires SI stage units")
+        result = {}
+        for physical, path in self._state.runtime_host.physical_instance_paths.items():
+            prim = stage.GetPrimAtPath(path)
+            body = prim.GetChild("BodyCollider")
+            if not body.IsValid() or not body.HasAPI(UsdPhysics.CollisionAPI):
+                raise ValueError(f"identified body collider unavailable: {physical}")
+            if not body.IsA(UsdGeom.Cube):
+                raise ValueError("HANDOVER requires an authored Cube body collider")
+            # Never invert a moving world transform: it changes the geometry
+            # fingerprint through floating-point roundoff on every scene tick.
+            half = float(UsdGeom.Cube(body).GetSizeAttr().Get()) / 2.0
+            local = UsdGeom.Xformable(body).GetLocalTransformation()
+            if UsdGeom.Xformable(body).GetResetXformStack():
+                raise ValueError("body collider must inherit its object frame")
+            bounds = Gf.BBox3d(
+                Gf.Range3d(Gf.Vec3d(-half), Gf.Vec3d(half)), local
+            ).ComputeAlignedRange()
+            descriptor = {
+                "physical_instance_id": physical,
+                "prim_path": str(body.GetPath()),
+                "source": "usd_object_local_body_collider",
+                "manifest_sha256": self._state.scene_manifest_sha256,
+                "minimum_m": [float(v) for v in bounds.GetMin()],
+                "maximum_m": [float(v) for v in bounds.GetMax()],
+                "collider_type": str(body.GetTypeName()),
+            }
+            descriptor["source_sha256"] = hashlib.sha256(
+                _canonical_json(descriptor).encode()
+            ).hexdigest()
+            result[physical] = descriptor
+        return result
 
     def _environment_colliders(self) -> dict[str, object]:
         """Measure leaf collision geometry, never aggregate room bounds.
@@ -2014,6 +2283,44 @@ class InProcessBridge:
             try:
                 document["tcp_provenance"] = dict(self._state.tcp_provenance)
                 document["environment_colliders"] = self._environment_colliders()
+                if os.environ.get("ROCOBRICK_HANDOVER_SIMULATION") == "1":
+                    try:
+                        document["handover_contact_geometry"] = (
+                            self._handover_contact_geometry()
+                        )
+                    except Exception as geometry_error:
+                        document["handover_contact_geometry_error"] = str(
+                            geometry_error
+                        )
+                document["handover_capabilities"] = {"named_pad_contacts": False}
+                frame = getattr(self, "_pad_contact_frame", None)
+                if frame is not None and frame.sim_time_s == sim_time_s:
+                    document["pad_object_contacts"] = dict(
+                        frame.document(
+                            sim_time_s=sim_time_s,
+                            sequence=self._scene_sequence,
+                            session_id=self._state.scene_session_id,
+                            manifest_sha256=self._state.scene_manifest_sha256,
+                        )
+                    )
+                    document["handover_capabilities"]["named_pad_contacts"] = True
+                    if os.environ.get("ROCOBRICK_HANDOVER_SIMULATION") == "1":
+                        from rocobrick.adapters.isaac.pad_contacts import (
+                            finger_history_document,
+                        )
+
+                        document["finger_contact_history"] = dict(
+                            finger_history_document(
+                                self._finger_contact_history,
+                                sim_time_s=sim_time_s,
+                                sequence=self._scene_sequence,
+                                session_id=self._state.scene_session_id,
+                                manifest_sha256=self._state.scene_manifest_sha256,
+                            )
+                        )
+                error = getattr(self, "_pad_contact_error", None)
+                if error is not None:
+                    document["handover_capabilities"]["pad_contacts_error"] = error
             except Exception as error:
                 response.success = False
                 response.message = _canonical_json(
@@ -2436,11 +2743,13 @@ async def run_bridge(
             raise TimeoutError("readiness not reached before the bounded deadline")
         state.check_stop()
         world.step(render=False)
+        bridge.capture_pad_contacts(world)
         if render_enabled and steps % render_stride == 0:
             # The bridge itself runs as a Kit async-engine coroutine.  Calling
             # World.render_async() here re-enters the simulation context; one
-            # Kit update is sufficient to refresh the headed viewport without
-            # taking control of Kit's render scheduler.
+            # Refresh Fabric explicitly: next_update_async alone does not
+            # perform SimulationContext.render's physics-to-render writeback.
+            state.refresh_viewport(world)
             await omni.kit.app.get_app().next_update_async()
         steps += 1
         now = time.monotonic()
@@ -2497,11 +2806,13 @@ async def run_bridge(
             raise TimeoutError("hold exceeded the bounded time limit")
         state.check_stop()
         world.step(render=False)
+        bridge.capture_pad_contacts(world)
         if render_enabled and steps % render_stride == 0:
             # The bridge itself runs as a Kit async-engine coroutine.  Calling
             # World.render_async() here re-enters the simulation context; one
-            # Kit update is sufficient to refresh the headed viewport without
-            # taking control of Kit's render scheduler.
+            # Refresh Fabric explicitly: next_update_async alone does not
+            # perform SimulationContext.render's physics-to-render writeback.
+            state.refresh_viewport(world)
             await omni.kit.app.get_app().next_update_async()
         steps += 1
         hold_steps += 1
@@ -2648,7 +2959,28 @@ def main(argv: list[str] | None = None) -> int:
                 write_evidence(args.evidence_out, evidence)
             except OSError as exc:
                 evidence["evidence_write_error"] = str(exc)
+            if state.exit_diagnostics_enabled and state.world is not None:
+                try:
+                    state.refresh_viewport(state.world)
+                    from omni.kit.app import get_app
+
+                    await asyncio.wait_for(get_app().next_update_async(), timeout=2)
+                except Exception as exc:
+                    evidence["exit_pre_render_error"] = f"{type(exc).__name__}: {exc}"
+            state.capture_exit_diagnostics("before-stop")
+            # Defer app close until the stopped world has rendered its final
+            # diagnostic frame. ROS/world/timeline teardown order is unchanged.
+            state.defer_app_shutdown = state.exit_diagnostics_enabled
             evidence["cleanup"] = state.shutdown()
+            if state.exit_diagnostics_enabled:
+                try:
+                    from omni.kit.app import get_app
+
+                    for _ in range(2):
+                        await asyncio.wait_for(get_app().next_update_async(), timeout=2)
+                except Exception as exc:
+                    evidence["exit_render_error"] = f"{type(exc).__name__}: {exc}"
+                state.capture_exit_diagnostics("after-stop")
             # The Kit application itself is shut down right after this write;
             # there is no SimulationApp handle to close in the child regime.
             evidence["cleanup"]["app_close_initiated"] = True

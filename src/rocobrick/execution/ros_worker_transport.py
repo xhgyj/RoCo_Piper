@@ -10,9 +10,14 @@ from collections.abc import Callable, Mapping
 from pathlib import Path
 from uuid import uuid4
 
+from rocobrick.adapters.moveit.readonly_combined_plan import READONLY_PLAN_SCHEMA
 from rocobrick.coordinated_session import (
     CoordinatedSessionRequest,
     CoordinatedSessionResult,
+)
+from rocobrick.execution.prepared_motion import (
+    PREPARED_MOTION_SCHEMA,
+    PreparedMotionRequest,
 )
 from rocobrick.execution.ros_session_worker import SCHEMA, read_message, write_atomic
 from rocobrick.ros_session_entry import RosSessionRequest, RosSessionResult
@@ -37,7 +42,9 @@ class RosWorkerTransport:
         self.sleep = sleep
         self.lock = threading.Lock()
         self.active: dict[str, tuple[str, RosSessionRequest, Path]] = {}
-        self.active_coordinated: dict[str, tuple[str, CoordinatedSessionRequest, Path]] = {}
+        self.active_coordinated: dict[
+            str, tuple[str, CoordinatedSessionRequest | PreparedMotionRequest, Path]
+        ] = {}
         self.stopping = False
         self.failed = False
 
@@ -133,6 +140,65 @@ class RosWorkerTransport:
             raise ValueError("shared observation returned no scene snapshot")
         return snapshot
 
+    def observe_monitor(
+        self,
+        robots: tuple[str, ...],
+        timeout_s: float,
+    ) -> Mapping[str, object]:
+        """Read fresh physics during owned actions; never admit planning/leases.
+
+        Returns:
+            A scene sample only, with no synthetic planning-scene version.
+        """
+        key = uuid4().hex
+        path = self.directory / "results" / f"{key}.json"
+        with self.lock:
+            if self.stopping or self.handle.poll() is not None:
+                raise RuntimeError("physical monitor requires a live worker")
+            write_atomic(
+                self.directory / "requests" / f"{key}.json",
+                {
+                    "schema": SCHEMA,
+                    "token": self.token,
+                    "request": {
+                        "schema": "rocobrick-scene-monitor/v1",
+                        "request_id": key,
+                        "robots": list(robots),
+                    },
+                },
+            )
+        # Do not hold the transport lock while physical cancellation may need it.
+        self._wait(path, timeout_s)
+        result = read_message(path, self.token).get("result")
+        if (
+            not isinstance(result, Mapping)
+            or result.get("passed") is not True
+            or (
+                result.get("request_id") != key
+                or result.get("read_only") is not True
+                or result.get("physical_admission") is not False
+            )
+        ):
+            raise ValueError("physical monitor identity/read-only proof mismatch")
+        snapshot = result.get("scene_snapshot")
+        observed = result.get("observed_sim_time_s")
+        if (
+            not isinstance(snapshot, Mapping)
+            or not isinstance(snapshot.get("robots"), Mapping)
+            or (set(snapshot["robots"]) != set(robots))
+        ):
+            raise ValueError("physical monitor participant mismatch")
+        sample_time = snapshot.get("sim_time_s")
+        if any(
+            isinstance(v, bool)
+            or not isinstance(v, (int, float))
+            or not math.isfinite(v)
+            or v < 0
+            for v in (observed, sample_time)
+        ) or (not 0 <= observed - sample_time <= 0.5):
+            raise ValueError("physical monitor scene is stale or from a future clock")
+        return dict(snapshot)
+
     def observe_shared(
         self, robots: tuple[str, ...], timeout_s: float
     ) -> Mapping[str, object]:
@@ -209,7 +275,12 @@ class RosWorkerTransport:
             }
 
     def call_plan_only(
-        self, request: CoordinatedSessionRequest, result_path: Path, timeout_s: float
+        self,
+        request: CoordinatedSessionRequest,
+        result_path: Path,
+        timeout_s: float,
+        *,
+        read_only: bool = False,
     ) -> CoordinatedSessionResult:
         """Submit a no-motion combined plan to the existing worker.
 
@@ -225,6 +296,7 @@ class RosWorkerTransport:
                 self.stopping
                 or self.failed
                 or self.active
+                or self.active_coordinated
                 or self.handle.poll() is not None
             ):
                 raise RuntimeError("combined planning requires an idle live worker")
@@ -235,7 +307,11 @@ class RosWorkerTransport:
                 {
                     "schema": SCHEMA,
                     "token": self.token,
-                    "request": request.serialize(),
+                    "request": (
+                        {"schema": READONLY_PLAN_SCHEMA, "request": request.serialize()}
+                        if read_only
+                        else request.serialize()
+                    ),
                 },
             )
             try:
@@ -249,6 +325,7 @@ class RosWorkerTransport:
             if (
                 result.coordination_id != request.coordination_id
                 or result.robots != request.robots
+                or result.participants != request.participants
             ):
                 raise ValueError("combined worker result identity mismatch")
             if (
@@ -256,12 +333,18 @@ class RosWorkerTransport:
                 or result.lifecycle.get("safe_to_release") is not False
             ):
                 raise ValueError("plan-only worker result claims physical execution")
+            if (
+                read_only
+                and result.passed
+                and result.lifecycle.get("read_only") is not True
+            ):
+                raise ValueError("read-only planning result is not attested")
             write_atomic(result_path, result.serialize())
             return result
 
     def execute_coordinated(
         self,
-        request: CoordinatedSessionRequest,
+        request: CoordinatedSessionRequest | PreparedMotionRequest,
         result_path: Path,
         timeout_s: float,
     ) -> CoordinatedSessionResult:
@@ -289,7 +372,11 @@ class RosWorkerTransport:
                     "schema": SCHEMA,
                     "token": self.token,
                     "request": {
-                        "schema": "rocobrick-coordinated-execute/v1",
+                        "schema": (
+                            PREPARED_MOTION_SCHEMA
+                            if isinstance(request, PreparedMotionRequest)
+                            else "rocobrick-coordinated-execute/v1"
+                        ),
                         "request_id": key,
                         "request": request.serialize(),
                     },
@@ -310,7 +397,10 @@ class RosWorkerTransport:
             ):
                 raise ValueError("coordinated execution result identity mismatched")
             parsed = CoordinatedSessionResult.parse(result.get("result"))
-            if parsed.robots != request.robots or parsed.participants != request.participants:
+            if (
+                parsed.robots != request.robots
+                or parsed.participants != request.participants
+            ):
                 raise ValueError("coordinated execution robot identity mismatched")
             if parsed.passed and (
                 parsed.lifecycle.get("physical_execution") is not True
@@ -319,8 +409,29 @@ class RosWorkerTransport:
                 raise ValueError(
                     "coordinated execution result lacks physical terminal proof"
                 )
+            if (
+                isinstance(request, PreparedMotionRequest)
+                and parsed.passed
+                and (
+                    parsed.lifecycle.get("prepared_binding_sha256")
+                    != request.binding_sha256
+                    or parsed.lifecycle.get("replanned") is not False
+                    or any(
+                        item.get("synchronization_feedback_confirmed") is not True
+                        for item in parsed.lifecycle.get("participants", {}).values()
+                    )
+                    or set(parsed.lifecycle.get("participants", {}))
+                    != set(request.participants)
+                )
+            ):
+                raise ValueError(
+                    "prepared result lacks exact path/synchronization proof"
+                )
             write_atomic(result_path, parsed.serialize())
             return parsed
+        except (OSError, RuntimeError, TypeError, ValueError, TimeoutError):
+            self.failed = True
+            raise
         finally:
             with self.lock:
                 self.active_coordinated.pop(request.coordination_id, None)
@@ -328,7 +439,11 @@ class RosWorkerTransport:
     def cancel_free_space(
         self, motion_id: str, timeout_s: float = 10.0
     ) -> Mapping[str, object]:
-        """Cancel one combined request and await its terminal-safe result."""
+        """Cancel one combined request and await its terminal-safe result.
+
+        Returns:
+            Evidence bound to the exact owned combined motion identity.
+        """
         with self.lock:
             entry = self.active_coordinated.get(motion_id)
         if entry is None:
@@ -351,7 +466,9 @@ class RosWorkerTransport:
         try:
             self._wait(path, timeout_s)
             message = read_message(path, self.token)
-            parsed = CoordinatedSessionResult.parse(message.get("result", {}).get("result"))
+            parsed = CoordinatedSessionResult.parse(
+                message.get("result", {}).get("result")
+            )
             lifecycle = parsed.lifecycle
             safe = bool(
                 parsed.participants == request.participants

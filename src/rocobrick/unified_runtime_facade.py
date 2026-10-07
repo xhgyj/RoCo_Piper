@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Mapping
 from dataclasses import asdict
+from typing import Protocol
 
 from rocobrick.coordinated_session import (
     CoordinatedSessionRequest,
@@ -23,6 +24,25 @@ from rocobrick.unified_dual_arm_runtime import (
 SHARED_SNAPSHOT_MAX_AGE_S = 0.5
 
 
+class HandoverContinuationBoundary(Protocol):
+    """Physical stationary admission and revalidation, with no motion API."""
+
+    async def admit_stationary(
+        self,
+        request: SuccessorPrePhaseRequest,
+    ) -> SuccessorPrePhaseEvidence:
+        """Prove retained giver custody for stationary lease adoption."""
+        ...
+
+    async def validate_stationary(
+        self,
+        request: SuccessorPrePhaseRequest,
+        evidence: SuccessorPrePhaseEvidence,
+    ) -> bool:
+        """Recheck exact issued evidence against current physical custody."""
+        ...
+
+
 class UnifiedDualArmRuntimeFacade:
     """Dispatch combined planning without claiming physical execution."""
 
@@ -36,6 +56,21 @@ class UnifiedDualArmRuntimeFacade:
         self._session = session
         self._contexts = dict(contexts or {})
         self._state_ledger = state_ledger
+        self._handover_continuation: HandoverContinuationBoundary | None = None
+
+    def bind_handover_continuation(
+        self,
+        continuation: HandoverContinuationBoundary,
+    ) -> None:
+        """Bind explicit stationary custody admission without substituting TRANSIT."""
+        if self._handover_continuation is not None:
+            raise ValueError("HANDOVER continuation already bound")
+        for name in ("admit_stationary", "validate_stationary"):
+            if not callable(getattr(continuation, name, None)):
+                raise ValueError(
+                    "HANDOVER continuation lacks physical custody admission"
+                )
+        self._handover_continuation = continuation
 
     @property
     def robot_ids(self) -> tuple[str, ...]:
@@ -93,7 +128,11 @@ class UnifiedDualArmRuntimeFacade:
     async def free_space_context(
         self, participants: tuple[str, ...]
     ) -> tuple[Mapping[str, object], int, Mapping[str, float]]:
-        """Read shared scene/version and the complete combined start state."""
+        """Read shared scene/version and the complete combined start state.
+
+        Returns:
+            The current identified snapshot, scene version and measured joints.
+        """
         shared = await asyncio.to_thread(self._session.observe_shared_scene)
         if not isinstance(shared, Mapping):
             raise RuntimeError("free-space shared observation is invalid")
@@ -108,14 +147,20 @@ class UnifiedDualArmRuntimeFacade:
         start_state = shared.get("start_state")
         if not isinstance(start_state, Mapping):
             raise RuntimeError("free-space start state is unavailable")
-        return snapshot, version, {
-            str(name): float(value) for name, value in start_state.items()
-        }
+        return (
+            snapshot,
+            version,
+            {str(name): float(value) for name, value in start_state.items()},
+        )
 
     async def execute_free_space(
         self, request: FreeSpaceMotionRequest
     ) -> FreeSpaceMotionEvidence:
-        """Execute one skill-neutral physical free-space request."""
+        """Execute one skill-neutral physical free-space request.
+
+        Returns:
+            Strict bound physical completion, or explicit failed admission.
+        """
         if not isinstance(request, FreeSpaceMotionRequest):
             raise TypeError("execute_free_space requires FreeSpaceMotionRequest")
         try:
@@ -228,7 +273,11 @@ class UnifiedDualArmRuntimeFacade:
             )
 
     async def cancel_free_space(self, motion_id: str) -> Mapping[str, object]:
-        """Cancel one free-space request only through an explicit session seam."""
+        """Cancel one free-space request only through an explicit session seam.
+
+        Returns:
+            Independent physical cancellation proof or an unsafe refusal.
+        """
         cancel = getattr(self._session, "cancel_free_space", None)
         if not callable(cancel):
             return {
@@ -249,6 +298,15 @@ class UnifiedDualArmRuntimeFacade:
             Evidence that authorizes lease adoption only after every
             participant proved prepared/started/terminal-safe arrival.
         """
+        if (
+            request.next_operation is not None
+            and request.next_operation.skill == "HANDOVER"
+        ):
+            if self._handover_continuation is None:
+                return failed_pre_phase(
+                    request, "stationary HANDOVER custody admission unavailable"
+                )
+            return await self._handover_continuation.admit_stationary(request)
         if request.terminal_cleanup:
             return failed_pre_phase(
                 request, "terminal cleanup execution is not implemented"
@@ -261,10 +319,14 @@ class UnifiedDualArmRuntimeFacade:
             snapshot = await asyncio.to_thread(self._session.observe_all)
             document = request.scene_snapshot.document
             robots = document.get("robots")
-            facts = {
-                robot: dict(block.get("facts") or {})
-                for robot, block in (robots or {}).items()
-            } if isinstance(robots, Mapping) else {}
+            facts = (
+                {
+                    robot: dict(block.get("facts") or {})
+                    for robot, block in (robots or {}).items()
+                }
+                if isinstance(robots, Mapping)
+                else {}
+            )
             operation = request.successor_operations[0]
             coordinated = CoordinatedSessionRequest(
                 coordination_id=request.transition_id,
@@ -276,9 +338,7 @@ class UnifiedDualArmRuntimeFacade:
                 timeout_s=60.0,
                 targets={},
                 scene_snapshot=snapshot,
-                physical_facts=facts or {
-                    robot: {} for robot in request.participants
-                },
+                physical_facts=facts or {robot: {} for robot in request.participants},
                 operation=asdict(operation),
                 target_contexts={
                     robot: asdict(context)
@@ -286,9 +346,7 @@ class UnifiedDualArmRuntimeFacade:
                     if robot in request.participants
                 },
             )
-            execute = getattr(
-                self._session, "execute_coordinated_pre_phase", None
-            )
+            execute = getattr(self._session, "execute_coordinated_pre_phase", None)
             if not callable(execute):
                 return failed_pre_phase(
                     request,
@@ -360,6 +418,12 @@ class UnifiedDualArmRuntimeFacade:
         """
         if not evidence.matches(request) or not evidence.passed:
             return False
+        if evidence.transition_mode == "stationary_handover":
+            if self._handover_continuation is None:
+                return False
+            return await self._handover_continuation.validate_stationary(
+                request, evidence
+            )
         try:
             snapshot, version, observed = await asyncio.to_thread(self._read_shared)
             self._admit(snapshot, version, observed, request.participants)
@@ -418,7 +482,11 @@ class UnifiedDualArmRuntimeFacade:
         observed: float,
         participants: tuple[str, ...],
     ) -> SharedSceneSnapshot:
-        """Bind one raw shared observation to authorized admitted robot state."""
+        """Bind one raw shared observation to authorized admitted robot state.
+
+        Returns:
+            The admitted observation with exact current physical facts.
+        """
         if self._state_ledger is None:
             raise RuntimeError("shared snapshot admission requires the state ledger")
         robots = snapshot.get("robots")

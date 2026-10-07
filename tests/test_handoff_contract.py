@@ -1,6 +1,6 @@
-import asyncio
 """Tests for strict physical transition identity and admission."""
 
+import asyncio
 from dataclasses import replace
 
 import pytest
@@ -159,6 +159,13 @@ def test_handover_contract_requires_distinct_robots_and_real_booleans():
         replace(_handover_evidence(), co_hold_confirmed=1)
     assert _handover_evidence().ready_to_commit
     assert not _handover_evidence().passed
+
+
+@pytest.mark.parametrize("count", [True, 2, 3.0, 0, -1])
+def test_handover_follow_sample_count_is_strict(count):
+    """An explicit integer of at least three samples is required."""
+    with pytest.raises(ValueError, match="follow_samples"):
+        replace(_handover_request(), follow_samples=count)
 
 
 def test_handover_commit_atomically_moves_holding_owner():

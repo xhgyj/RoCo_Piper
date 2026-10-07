@@ -416,11 +416,12 @@ def test_maintained_participant_uses_explicit_joint_hold_goal():
         "joint_positions": {"piper_1_joint1": -0.05},
     }
     goal = runtime()._build_goal(
-        request(
-            {
+        replace(
+            request({
                 "piper_0": {"joint_positions": {"piper_0_joint1": 0.1}},
                 "piper_1": support,
-            }
+            }),
+            start_state={"piper_0_joint1": 0.0, "piper_1_joint1": -0.05},
         ),
         Factory(),
     )
@@ -428,6 +429,8 @@ def test_maintained_participant_uses_explicit_joint_hold_goal():
         item.joint_name for item in goal.request.goal_constraints[0].joint_constraints
     ] == ["piper_0_joint1", "piper_1_joint1"]
     assert not goal.request.path_constraints.position_constraints
+    held = goal.request.path_constraints.joint_constraints
+    assert len(held) == 1 and held[0].position == -0.05
 
 
 def test_joint_goal_with_maintained_pose_uses_joint_hold():
@@ -439,7 +442,11 @@ def test_joint_goal_with_maintained_pose_uses_joint_hold():
         "joint_positions": {"piper_1_joint1": -0.05},
     }
     goal = runtime()._build_goal(
-        request({"piper_0": moving, "piper_1": holding}), Factory()
+        replace(
+            request({"piper_0": moving, "piper_1": holding}),
+            start_state={"piper_0_joint1": 0.0, "piper_1_joint1": -0.05},
+        ),
+        Factory(),
     )
     joint_names = [
         constraint.joint_name

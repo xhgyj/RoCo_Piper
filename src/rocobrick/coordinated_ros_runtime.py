@@ -126,6 +126,7 @@ class CoordinatedMoveItPlanRuntime:
                 "combined MoveGroup plan failed: "
                 f"status={status} error_code={error_code}"
             )
+        self._validate_held_joints(request, joint_names, points)
         return {"joint_names": joint_names, "points": points, "status": status}
 
     def cancel(self) -> Mapping[str, object]:
@@ -216,13 +217,49 @@ class CoordinatedMoveItPlanRuntime:
                 isinstance(raw_positions, Mapping)
                 and set(raw_positions) == set(expected)
             )
-            if target.get("maintain_pose") is True and isinstance(raw_pose, Mapping):
-                # The measured participant is held by its explicit joint target
-                # and combined start_state. A full TCP path constraint is too
-                # restrictive for this free-space OMPL transition; contact and
-                # support phases remain outside this planner.
-                pass
+            if "maintain_pose" in target and type(target["maintain_pose"]) is not bool:
+                raise ValueError("maintain_pose must be a real bool")
+            if target.get("maintain_pose") is True:
+                tolerance = self._hold_tolerance(target)
+                for joint_name in expected:
+                    initial = start_state.get(joint_name)
+                    if (
+                        isinstance(initial, bool)
+                        or not isinstance(initial, (int, float))
+                        or not math.isfinite(initial)
+                    ):
+                        raise ValueError(
+                            "whole-path hold requires measured start joints"
+                        )
+                    if joint_space and (
+                        isinstance(raw_positions[joint_name], bool)
+                        or not isinstance(raw_positions[joint_name], (int, float))
+                        or not math.isfinite(raw_positions[joint_name])
+                        or abs(raw_positions[joint_name] - initial) > tolerance
+                    ):
+                        raise ValueError(
+                            "maintain_pose cannot request a different joint goal"
+                        )
+                    for container in (constraints, path_constraints):
+                        item = factories.joint_constraint_factory()
+                        item.joint_name = joint_name
+                        item.position = float(initial)
+                        item.tolerance_above = tolerance
+                        item.tolerance_below = tolerance
+                        item.weight = 1.0
+                        container.joint_constraints.append(item)
+                continue
             if joint_space:
+                tolerance = target.get("joint_goal_tolerance_rad", 0.01)
+                if (
+                    isinstance(tolerance, bool)
+                    or not isinstance(tolerance, (int, float))
+                    or not math.isfinite(tolerance)
+                    or not 0 < tolerance <= 0.01
+                ):
+                    raise ValueError(
+                        "joint goal tolerance must be finite and in (0, 0.01]"
+                    )
                 for joint_name in expected:
                     value = raw_positions[joint_name]
                     if (
@@ -234,8 +271,8 @@ class CoordinatedMoveItPlanRuntime:
                     item = factories.joint_constraint_factory()
                     item.joint_name = joint_name
                     item.position = float(value)
-                    item.tolerance_above = 0.01
-                    item.tolerance_below = 0.01
+                    item.tolerance_above = float(tolerance)
+                    item.tolerance_below = float(tolerance)
                     item.weight = 1.0
                     constraints.joint_constraints.append(item)
                 continue
@@ -253,6 +290,45 @@ class CoordinatedMoveItPlanRuntime:
         goal.planning_options.plan_only = True
         goal.planning_options.replan = False
         return goal
+
+    @staticmethod
+    def _hold_tolerance(target: Mapping[str, object]) -> float:
+        value = target.get("joint_hold_tolerance_rad", 0.002)
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or (
+            not math.isfinite(value) or not 0 < value <= 0.01
+        ):
+            raise ValueError("joint hold tolerance must be finite and in (0, 0.01]")
+        return float(value)
+
+    def _validate_held_joints(
+        self, request: CoordinatedSessionRequest, names: Sequence[str],
+        points: Sequence[Mapping[str, object]],
+    ) -> None:
+        """Reject returned plans that moved a held joint at any waypoint."""
+        if len(set(names)) != len(names):
+            raise ValueError("returned joint names are duplicated")
+        for robot, target in request.targets.items():
+            if target.get("maintain_pose") is not True:
+                continue
+            tolerance = self._hold_tolerance(target)
+            expected = self.joint_binding[robot]
+            if not set(expected) <= set(names) or len(points) < 2:
+                raise ValueError("returned plan omits held arm joints or waypoints")
+            for point in points:
+                positions = point.get("positions")
+                if not isinstance(positions, Sequence) or len(positions) != len(names):
+                    raise ValueError("returned held-joint waypoint is incomplete")
+                for name in expected:
+                    value = positions[names.index(name)]
+                    if (
+                        isinstance(value, bool)
+                        or not isinstance(value, (int, float))
+                        or not math.isfinite(value)
+                        or abs(value - request.start_state[name]) > tolerance
+                    ):
+                        raise ValueError(
+                            "returned trajectory violates whole-path joint hold"
+                        )
 
     def _append_pose_constraints(
         self,

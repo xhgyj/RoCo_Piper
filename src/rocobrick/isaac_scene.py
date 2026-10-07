@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -88,7 +89,7 @@ def _apply_collision_filters(
 
 
 def _set_initial_viewport_camera(stage: object) -> None:
-    """Set a deterministic headed viewport covering both robots and parts."""
+    """Frame the pick and handover workspace in the headed observer viewport."""
     import os
 
     if os.environ.get("ROCOBRICK_HEADED") != "1":
@@ -99,8 +100,13 @@ def _set_initial_viewport_camera(stage: object) -> None:
 
     camera_path = "/World/RoCoBrickInitialCamera"
     camera = UsdGeom.Camera.Define(stage, camera_path)
-    camera.CreateFocalLengthAttr(50.0)
-    camera.CreateFocusDistanceAttr(1.2)
+    # This is an observer camera, not a calibrated robot sensor. Frame the
+    # table and raised handover area more tightly than the wide overview.
+    position = (0.0, 0.60, 0.42)
+    target = (0.0, -0.10, 0.16)
+    focal_length_mm = 28.0
+    camera.CreateFocalLengthAttr(focal_length_mm)
+    camera.CreateFocusDistanceAttr(0.75)
     # A newly defined USD camera has no Kit center-of-interest value.  The
     # Isaac viewport camera-state helper assumes this attribute exists when it
     # rotates/moves the camera; seed it before using that helper.
@@ -113,11 +119,12 @@ def _set_initial_viewport_camera(stage: object) -> None:
         raise RuntimeError("headed Isaac run has no active viewport")
     viewport.camera_path = camera_path
     camera_state = ViewportCameraState(camera_path=camera_path, viewport=viewport)
-    camera_state.set_position_world(Gf.Vec3d(0.0, 0.70, 0.32), True)
-    camera_state.set_target_world(Gf.Vec3d(0.0, -0.18, 0.075), True)
+    camera_state.set_position_world(Gf.Vec3d(*position), True)
+    camera_state.set_target_world(Gf.Vec3d(*target), True)
     print(
         "[rocobrick] initial viewport camera configured "
-        f"path={camera_path} position=(0.0,0.70,0.32) target=(0.0,-0.18,0.075)",
+        f"path={camera_path} position={position} target={target} "
+        f"focal_length_mm={focal_length_mm}",
         flush=True,
     )
 
@@ -218,6 +225,15 @@ async def load_verified_scene(
             position=np.asarray(spec.base_pose.position),
             orientation=np.asarray((xyzw[3], xyzw[0], xyzw[1], xyzw[2])),
         )
+        if os.environ.get("ROCOBRICK_HEADED") == "1":
+            from rocobrick.adapters.isaac.visual_instances import (
+                materialize_robot_visuals,
+            )
+
+            repaired = materialize_robot_visuals(stage, spec.prim_path)
+            print(
+                f"[rocobrick] materialized robot visual instances: {repaired}", flush=True
+            )
         articulation = SingleArticulation(prim_path=spec.prim_path, name=robot_id)
         world.scene.add(articulation)
         articulations[robot_id] = articulation

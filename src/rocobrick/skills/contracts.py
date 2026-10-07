@@ -38,6 +38,29 @@ def _positive_finite(value: object, label: str) -> float:
 
 
 @dataclass(frozen=True)
+class HandoverTransferIdentity:
+    """Minimal physical identity shared by coordinated custody and the ledger."""
+
+    operation_id: str
+    donor_robot_id: str
+    receiver_robot_id: str
+    physical_instance_id: str
+
+    def __post_init__(self) -> None:
+        """Reject missing or ambiguous participants before any custody action."""
+        for value in (
+            self.operation_id,
+            self.donor_robot_id,
+            self.receiver_robot_id,
+            self.physical_instance_id,
+        ):
+            if not isinstance(value, str) or not value:
+                raise ValueError("HANDOVER physical identity is incomplete")
+        if self.donor_robot_id == self.receiver_robot_id:
+            raise ValueError("HANDOVER requires different physical holders")
+
+
+@dataclass(frozen=True)
 class HandoverRequest:
     """One admitted donor-to-receiver physical transfer."""
 
@@ -55,6 +78,7 @@ class HandoverRequest:
     receiver_attach: Mapping[str, JSONValue]
     donor_detach: Mapping[str, JSONValue]
     timeout_s: float
+    follow_samples: int = 3
 
     def __post_init__(self) -> None:
         """Require complete identity, scene provenance and receiver geometry."""
@@ -123,6 +147,8 @@ class HandoverRequest:
             ):
                 raise ValueError(f"handover receiver {digest_name} is invalid")
         timeout = _positive_finite(self.timeout_s, "handover timeout_s")
+        if type(self.follow_samples) is not int or self.follow_samples < 3:
+            raise ValueError("handover follow_samples must be an integer >= 3")
         object.__setattr__(self, "session_robots", session)
         object.__setattr__(self, "scene_snapshot", to_json_value(self.scene_snapshot))
         object.__setattr__(self, "start_state", to_json_value(self.start_state))
@@ -139,7 +165,11 @@ class HandoverRequest:
 
     @property
     def participants(self) -> tuple[str, str]:
-        """Return the donor and receiver that participate in the transfer."""
+        """Return the donor and receiver that participate in the transfer.
+
+        Returns:
+            The identified, bound result; physical proof remains separately checked.
+        """
         return self.donor_robot_id, self.receiver_robot_id
 
 
@@ -196,38 +226,57 @@ class HandoverEvidence:
 
     @property
     def ready_to_commit(self) -> bool:
-        """Return whether physical evidence is sufficient for ledger adoption."""
-        return all(
-            (
-                self.receiver_free_space,
-                self.receiver_grasp_feedback,
-                self.co_hold_confirmed,
-                self.scene_transfer_committed,
-                self.donor_release_feedback,
-                self.receiver_holding_follow,
-                self.terminal,
-                self.safe_to_release,
+        """Return whether physical evidence is sufficient for ledger adoption.
+
+        Returns:
+            The identified, bound result; physical proof remains separately checked.
+        """
+        return (
+            all(
+                (
+                    self.receiver_free_space,
+                    self.receiver_grasp_feedback,
+                    self.co_hold_confirmed,
+                    self.scene_transfer_committed,
+                    self.donor_release_feedback,
+                    self.receiver_holding_follow,
+                    self.terminal,
+                    self.safe_to_release,
+                )
             )
-        ) and not self.owner_transfer_committed
+            and not self.owner_transfer_committed
+        )
 
     @property
     def passed(self) -> bool:
-        """Return true only after physical evidence and atomic adoption."""
-        return self.ready_to_commit is False and self.owner_transfer_committed and all(
-            (
-                self.receiver_free_space,
-                self.receiver_grasp_feedback,
-                self.co_hold_confirmed,
-                self.scene_transfer_committed,
-                self.donor_release_feedback,
-                self.receiver_holding_follow,
-                self.terminal,
-                self.safe_to_release,
+        """Return true only after physical evidence and atomic adoption.
+
+        Returns:
+            The identified, bound result; physical proof remains separately checked.
+        """
+        return (
+            self.ready_to_commit is False
+            and self.owner_transfer_committed
+            and all(
+                (
+                    self.receiver_free_space,
+                    self.receiver_grasp_feedback,
+                    self.co_hold_confirmed,
+                    self.scene_transfer_committed,
+                    self.donor_release_feedback,
+                    self.receiver_holding_follow,
+                    self.terminal,
+                    self.safe_to_release,
+                )
             )
         )
 
-    def matches(self, request: HandoverRequest) -> bool:
-        """Return whether evidence answers the exact admitted transfer."""
+    def matches(self, request: HandoverRequest | HandoverTransferIdentity) -> bool:
+        """Return whether evidence answers the exact admitted transfer.
+
+        Returns:
+            The identified, bound result; physical proof remains separately checked.
+        """
         return (
             self.operation_id == request.operation_id
             and self.donor_robot_id == request.donor_robot_id
@@ -246,4 +295,4 @@ class HandoverEvidence:
         return replace(self, owner_transfer_committed=True)
 
 
-__all__ = ["HandoverEvidence", "HandoverRequest"]
+__all__ = ["HandoverEvidence", "HandoverRequest", "HandoverTransferIdentity"]

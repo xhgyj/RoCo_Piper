@@ -11,9 +11,14 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from rocobrick.adapters.moveit.readonly_combined_plan import READONLY_PLAN_SCHEMA
 from rocobrick.coordinated_session import (
     CoordinatedSessionResult,
     parse_coordinated_request,
+)
+from rocobrick.execution.prepared_motion import (
+    PREPARED_MOTION_SCHEMA,
+    PreparedMotionRequest,
 )
 from rocobrick.ros_session_entry import (
     FK_TIMEOUT_S,
@@ -132,6 +137,7 @@ class SessionWorker:
         self.owners: dict[str, str] = {}
         self.seen: set[str] = set()
         self.seen_operations: set[str] = set()
+        self.seen_plans: set[str] = set()
         self.admission_lock = threading.Lock()
         self.stopping = threading.Event()
         self.unsafe = False
@@ -208,6 +214,7 @@ class SessionWorker:
             return
 
         def cancel_goals() -> None:
+            """Verify cancel goals."""
             while not entry.done.is_set():
                 for item in entry.request.operations:
                     self.session.runtime_for(item.robot_id).cancel_active()
@@ -216,15 +223,25 @@ class SessionWorker:
         entry.cancel_thread = threading.Thread(target=cancel_goals, daemon=True)
         entry.cancel_thread.start()
 
-    def _execute_coordinated(
-        self, key: str, entry: ActiveCoordinatedRequest
-    ) -> None:
+    def _execute_coordinated(self, key: str, entry: ActiveCoordinatedRequest) -> None:
         """Run combined execution off the mailbox tick thread."""
         try:
-            execute_fn = getattr(self.session, "execute_coordinated_pre_phase", None)
+            prepared = isinstance(entry.request, PreparedMotionRequest)
+            execute_fn = getattr(
+                self.session,
+                "execute_prepared_motion"
+                if prepared
+                else "execute_coordinated_pre_phase",
+                None,
+            )
             if not callable(execute_fn):
                 raise RuntimeError("session has no coordinated execution boundary")
-            entry.result = execute_fn(entry.request)
+            if prepared:
+                entry.result = execute_fn(
+                    entry.request, cancel_requested=entry.cancel.is_set
+                )
+            else:
+                entry.result = execute_fn(entry.request)
         except Exception as error:
             entry.result = CoordinatedSessionResult(
                 entry.request.coordination_id,
@@ -262,6 +279,7 @@ class SessionWorker:
             return
 
         def cancel_goals() -> None:
+            """Verify cancel goals."""
             participants = tuple(entry.request.participants)
             while not entry.done.is_set():
                 for robot_id in participants:
@@ -272,7 +290,9 @@ class SessionWorker:
         entry.cancel_thread = threading.Thread(target=cancel_goals, daemon=True)
         entry.cancel_thread.start()
 
-    def _coordinated(self, key: str, document: object) -> None:
+    def _coordinated(
+        self, key: str, document: object, *, read_only: bool = False
+    ) -> None:
         """Admit one combined plan under the same persistent session ownership."""
         request = parse_coordinated_request(document)
         error = None
@@ -286,13 +306,21 @@ class SessionWorker:
             or self.stopping.is_set()
         ):
             error = "combined planning requires an idle safe participant group"
-        elif request.coordination_id in self.seen_operations:
+        elif request.coordination_id in (
+            self.seen_plans if read_only else self.seen_operations
+        ):
             error = "combined request replay refused"
-        self.seen_operations.add(request.coordination_id)
+        (self.seen_plans if read_only else self.seen_operations).add(
+            request.coordination_id
+        )
         try:
             if error:
                 raise ValueError(error)
-            result = self.session.unified_plan_only(request)
+            result = (
+                self.session.plan_readonly_combined(request)
+                if read_only
+                else self.session.unified_plan_only(request)
+            )
         except Exception as failure:
             result = CoordinatedSessionResult(
                 request.coordination_id,
@@ -383,6 +411,32 @@ class SessionWorker:
                 raise ValueError("invalid mailbox request identity")
             message = read_message(path, self.token)
             raw_request = message.get("request")
+            if isinstance(raw_request, Mapping) and raw_request.get("schema") == (
+                "rocobrick-scene-monitor/v1"
+            ):
+                try:
+                    if raw_request.get("robots") != list(self.robots) or (
+                        raw_request.get("request_id") != key or self.stopping.is_set()
+                    ):
+                        raise ValueError("physical monitor session identity mismatch")
+                    # No ownership gate and NO GetPlanningScene/planning lock.
+                    # Actions retain their leases; this lane can only read physics.
+                    shared = self.session.observe_all()
+                    observed = self.session.latest_shared_sim_time_s()
+                    self._answer_document(
+                        key,
+                        {
+                            "passed": True,
+                            "request_id": key,
+                            "read_only": True,
+                            "physical_admission": False,
+                            "scene_snapshot": dict(shared),
+                            "observed_sim_time_s": observed,
+                        },
+                    )
+                except Exception as error:
+                    self._answer_document(key, {"passed": False, "error": str(error)})
+                continue
             if (
                 isinstance(raw_request, Mapping)
                 and raw_request.get("schema") == "rocobrick-unified-observe/v1"
@@ -462,10 +516,9 @@ class SessionWorker:
                             key, {"passed": False, "error": str(error)}
                         )
                 continue
-            if (
-                isinstance(raw_request, Mapping)
-                and raw_request.get("schema")
-                == "rocobrick-coordinated-execute/v1"
+            if isinstance(raw_request, Mapping) and raw_request.get("schema") in (
+                "rocobrick-coordinated-execute/v1",
+                PREPARED_MOTION_SCHEMA,
             ):
                 if (
                     self.active
@@ -486,7 +539,11 @@ class SessionWorker:
                     )
                     continue
                 try:
-                    parsed = parse_coordinated_request(raw_request.get("request"))
+                    parsed = (
+                        PreparedMotionRequest.parse(raw_request.get("request"))
+                        if raw_request["schema"] == PREPARED_MOTION_SCHEMA
+                        else parse_coordinated_request(raw_request.get("request"))
+                    )
                     if parsed.robots != self.robots:
                         raise ValueError(
                             "coordinated execution session robots mismatch"
@@ -507,9 +564,7 @@ class SessionWorker:
                     entry.thread.join(timeout=0.01)
                 except Exception as error:
                     self.failed = True
-                    self._answer_document(
-                        key, {"passed": False, "error": str(error)}
-                    )
+                    self._answer_document(key, {"passed": False, "error": str(error)})
                 continue
             if (
                 isinstance(raw_request, Mapping)
@@ -517,6 +572,12 @@ class SessionWorker:
                 == "rocobrick-coordinated-moveit-request/v1"
             ):
                 self._coordinated(key, raw_request)
+                continue
+            if (
+                isinstance(raw_request, Mapping)
+                and raw_request.get("schema") == READONLY_PLAN_SCHEMA
+            ):
+                self._coordinated(key, raw_request.get("request"), read_only=True)
                 continue
             request = RosSessionRequest.parse(raw_request)
             if request.robots != self.robots:
@@ -634,7 +695,9 @@ def serve(directory: Path, token: str, robots: tuple[str, ...], node_name: str) 
                         *worker.active,
                         *worker.coordinated_active,
                     ]
-                ) if worker is not None else [],
+                )
+                if worker is not None
+                else [],
             },
         )
     return 0 if orderly else 1
