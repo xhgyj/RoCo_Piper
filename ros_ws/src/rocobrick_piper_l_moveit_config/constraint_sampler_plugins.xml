@@ -1,0 +1,8 @@
+<?xml version="1.0"?>
+<library path="rocobrick_clean_reference_sampler">
+  <class name="rocobrick/CleanReferenceSamplerAllocator"
+         type="rocobrick::CleanReferenceSamplerAllocator"
+         base_class_type="constraint_samplers::ConstraintSamplerAllocator">
+    <description>Preserve clean, non-aliased reference transforms for Humble dual-TCP union sampling.</description>
+  </class>
+</library>

@@ -1370,7 +1370,8 @@ DUAL_LAUNCH_RELPATH = Path(
 DUAL_CONTAINER_LAUNCH_SCRIPT = """set -euo pipefail
 set +u
 source /opt/ros/humble/setup.bash
-if [ ! -f /workspace/ros_ws/install/setup.bash ]; then
+if [ ! -f /workspace/ros_ws/install/setup.bash ] || \\
+   [ ! -f /workspace/ros_ws/install/%(package)s/lib/librocobrick_clean_reference_sampler.so ]; then
   cd /workspace/ros_ws
   timeout 300 colcon build \\
     --packages-select agx_arm_description %(package)s \\

@@ -8,13 +8,14 @@ This compiler does not qualify the installed draft execution profile.
 from __future__ import annotations
 
 import asyncio
+from collections import Counter
 from collections.abc import Callable
 
 from rocobrick.adapters.moveit.handover_scene_planner import NativeHandoverScenePlanner
 from rocobrick.robot_operation_plan import RobotOperation
 from rocobrick.skills.coordinated_handover import CoordinatedHandoverProgram
 from rocobrick.skills.handover_joint_backend import HandoverJointPlanningBackend
-from rocobrick.skills.handover_planning import HandoverPlanningRequest, plan_handover
+from rocobrick.skills.handover_planning import HandoverPlanningRequest
 from rocobrick.skills.handover_profile import finite, require_handover_capabilities
 from rocobrick.skills.handover_simulation import SimulationHandoverAuthorization
 
@@ -72,18 +73,40 @@ class NativeCoordinatedHandoverFactory:
             raise ValueError(
                 "HANDOVER requires the native full-model planning provider"
             )
-        selected = plan_handover(
-            request,
-            HandoverJointPlanningBackend(provider),
+        backend = HandoverJointPlanningBackend(
+            provider, use_moveit_pose_goals=True, clock=provider.clock
         )
-        if request.binding_sha256 != binding or not selected.passed:
-            raise ValueError(
-                f"{selected.reason}; evaluated={selected.evaluated}; "
-                f"rejections={dict(selected.rejection_reasons)}; "
-                f"phase_rejections={provider.phase_rejections}; "
-                f"last_path_failure={provider.last_path_failure}"
+        deadline = provider.clock() + request.profile.planning_timeout_s
+        rejections = Counter()
+        candidate = evaluation = None
+        evaluated = 0
+        while (
+            evaluated < request.profile.max_evaluations and provider.clock() < deadline
+        ):
+            evaluated += 1
+            prepared = provider.plan_region(request, deadline_s=deadline)
+            if prepared is None:
+                rejections["MOVEIT_REGION_PLAN_OR_ENDPOINT_FAILED"] += 1
+                continue
+            candidate, path = prepared
+            evaluation = backend.evaluate_candidate(
+                request, candidate, deadline_s=deadline, preplanned=path
             )
-        candidate, evaluation = selected.candidate, selected.evaluation
+            if evaluation.passed:
+                break
+            rejections[evaluation.reason] += 1
+        if (
+            request.binding_sha256 != binding
+            or evaluation is None
+            or not evaluation.passed
+        ):
+            raise ValueError(
+                f"NO_FEASIBLE_HANDOVER_IN_PREPARATION_REGION; evaluated={evaluated}; "
+                f"rejections={dict(rejections)}; "
+                f"phase_rejections={provider.phase_rejections}; "
+                f"last_path_failure={provider.last_path_failure}; "
+                f"last_moveit_failure={provider.planner.last_planning_failure}"
+            )
         if candidate is None or evaluation is None or evaluation.joint_plan is None:
             raise ValueError("selected HANDOVER lacks its admitted combined trajectory")
         windows = self.opening_windows(operation)

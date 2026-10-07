@@ -210,3 +210,116 @@ def test_candidate_deadline_is_checked_between_provider_stages():
     )
     assert not result.passed and len(provider.calls) == 1
     assert result.reason == "HANDOVER_PLANNING_BUDGET_EXHAUSTED"
+
+
+class PoseProvider(Provider):
+    """Prove ordering/endpoint plumbing only, not actual MoveIt pose sampling."""
+
+    def solve_ik(self, *args, **kwargs):
+        """Native rendezvous IK must be unreachable in pose-first mode."""
+        pytest.fail("native rendezvous IK was called before MoveIt")
+
+    def plan_combined(self, *args, **kwargs):
+        """No implicit fallback to the old native joint-goal search is allowed."""
+        pytest.fail("pose-first search fell back to joint-goal planning")
+
+    def plan_combined_poses(self, request, candidate, *, deadline_s):
+        """Return a synthetic endpoint different from the old native IK goal.
+
+        Returns:
+            A stub combined trajectory for protocol admission tests only.
+        """
+        self.calls.append("pose_plan")
+        plan = joint_plan(request, candidate)
+        plan = replace(
+            plan,
+            trajectories=tuple(
+                replace(
+                    t,
+                    points=(
+                        *t.points[:-1],
+                        replace(t.points[-1], positions=(0.17,) * 6),
+                    ),
+                )
+                for t in plan.trajectories
+            ),
+        )
+        return self.plan_mutator(plan)
+
+    def _validate(self, gate, joints):
+        assert set(joints.values()) == {0.17}
+        return super()._validate(gate, joints)
+
+
+def evaluate_pose(provider):
+    """Run the production ordering with a no-motion synthetic provider.
+
+    Returns:
+        The candidate verdict, retaining the returned endpoint unchanged.
+    """
+    captured = planning_request()
+    return HandoverJointPlanningBackend(
+        provider, clock=lambda: 0.0, use_moveit_pose_goals=True
+    ).evaluate_candidate(captured, generate_candidates(captured)[0], deadline_s=10.0)
+
+
+def test_pose_first_backend_keeps_moveit_endpoint_and_all_native_proofs():
+    """Query both arms first, then require all existing safety proofs."""
+    provider = PoseProvider()
+    result = evaluate_pose(provider)
+    assert result.passed
+    assert provider.calls == [
+        "pose_plan",
+        "pair",
+        "sweeps",
+        "approach",
+        "separation",
+        "continuous",
+        "scene",
+    ]
+    assert all(
+        t.points[-1].positions == (0.17,) * 6 for t in result.joint_plan.trajectories
+    )
+
+
+@pytest.mark.parametrize(
+    "stage", ["pair", "sweeps", "approach", "separation", "continuous", "scene"]
+)
+def test_pose_first_does_not_bypass_native_geometry_or_scene(stage):
+    """A successful MoveGroup path is not physical handover permission."""
+    provider = PoseProvider()
+    provider.reject = stage
+    result = evaluate_pose(provider)
+    assert not result.passed
+    assert provider.calls[0] == "pose_plan"
+
+
+def test_pose_first_query_failure_does_not_fall_back_to_native_ik():
+    """Unreachable poses reject the candidate without old IK or phase work."""
+    provider = PoseProvider()
+    provider.plan_mutator = lambda _: None
+    result = evaluate_pose(provider)
+    assert result.reason == "MOVEIT_POSE_PLAN_FAILED"
+    assert provider.calls == ["pose_plan"]
+
+
+@pytest.mark.parametrize("fault", ["not-plan", "start", "identity"])
+def test_pose_first_rejects_unbound_plan_before_native_gates(fault):
+    """Pose mode retains full trajectory identity and captured-start checks."""
+    provider = PoseProvider()
+
+    def corrupt(plan):
+        if fault == "not-plan":
+            return {}
+        if fault == "identity":
+            return replace(plan, coordination_id="f" * 64)
+        t = plan.trajectories[0]
+        t = replace(
+            t, points=(replace(t.points[0], positions=(0.02,) * 6), *t.points[1:])
+        )
+        return replace(plan, trajectories=(t, plan.trajectories[1]))
+
+    provider.plan_mutator = corrupt
+    with pytest.raises(ValueError):
+        evaluate_pose(provider)
+    assert provider.calls == ["pose_plan"]

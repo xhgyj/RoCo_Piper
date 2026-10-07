@@ -5,7 +5,10 @@ from types import SimpleNamespace
 
 import pytest
 
-from rocobrick.coordinated_ros_runtime import CoordinatedMoveItPlanRuntime
+from rocobrick.coordinated_ros_runtime import (
+    CombinedMoveItPlanningError,
+    CoordinatedMoveItPlanRuntime,
+)
 from rocobrick.coordinated_session import CoordinatedSessionRequest
 
 
@@ -120,6 +123,57 @@ def test_build_goal_uses_prefixed_tcp_constraints_for_both_arms():
         "piper_1_base_link",
     ]
     assert goal.planning_options.plan_only is True
+
+
+def test_combined_pose_query_budget_and_single_and_goal_are_preserved():
+    """Both TCP targets form one dual-arm goal within the remaining budget."""
+    query = replace(
+        request({"piper_0": pose("piper_0", 0.1), "piper_1": pose("piper_1", -0.1)}),
+        timeout_s=3.0,
+    )
+    goal = runtime()._build_goal(query, Factory())
+    assert goal.request.allowed_planning_time == 3.0
+    assert len(goal.request.goal_constraints) == 1
+    constraints = goal.request.goal_constraints[0]
+    assert constraints.joint_constraints == []
+    assert len(constraints.position_constraints) == 2
+    assert len(constraints.orientation_constraints) == 2
+
+
+def test_combined_runtime_preserves_internal_moveit_error_code(monkeypatch):
+    """An actual action failure remains typed across the worker transport."""
+    current = runtime()
+    wrapper = SimpleNamespace(
+        status=6,
+        result=SimpleNamespace(
+            error_code=SimpleNamespace(val=99999),
+            planned_trajectory=SimpleNamespace(
+                joint_trajectory=SimpleNamespace(joint_names=[], points=[])
+            ),
+        ),
+    )
+    handle = SimpleNamespace(
+        accepted=True, get_result_async=lambda: SimpleNamespace(result=lambda: wrapper)
+    )
+    current._client = SimpleNamespace(
+        send_goal_async=lambda _: SimpleNamespace(result=lambda: handle)
+    )
+    monkeypatch.setattr(current, "register", lambda: None)
+    monkeypatch.setattr(current, "ready", lambda: True)
+    monkeypatch.setattr(current, "_wait", lambda *_: True)
+    factories = SimpleNamespace(
+        goal_status_type=lambda: SimpleNamespace(
+            STATUS_SUCCEEDED=4, STATUS_CANCELED=5, STATUS_ABORTED=6
+        )
+    )
+    monkeypatch.setattr(current, "_resolve_factories", lambda: factories)
+    monkeypatch.setattr(current, "_build_goal", lambda *_: None)
+    with pytest.raises(CombinedMoveItPlanningError) as failure:
+        current.plan(
+            request({"piper_0": pose("piper_0", 0.0), "piper_1": pose("piper_1", 0.0)})
+        )
+    assert failure.value.moveit_error_code == 99999
+    assert current._goal_handle is None and current._result_future is None
 
 
 def test_build_goal_rejects_missing_geometry_target():

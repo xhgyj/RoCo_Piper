@@ -8,10 +8,14 @@ from test_persistent_ros_worker import TOKEN, FakeHandle, pump
 from test_prepared_handover_execution import prepared_request
 from test_prepared_worker_transport import worker_session
 
-from rocobrick.adapters.moveit.handover_scene_planner import SessionCombinedPlanRuntime
+from rocobrick.adapters.moveit.handover_scene_planner import (
+    ReadOnlyPlanRejectedError,
+    SessionCombinedPlanRuntime,
+)
 from rocobrick.adapters.moveit.readonly_combined_plan import (
     perform_readonly_combined_plan,
 )
+from rocobrick.coordinated_ros_runtime import CombinedMoveItPlanningError
 from rocobrick.coordinated_session import CoordinatedSessionRequest
 from rocobrick.execution.ros_session_worker import SessionWorker
 from rocobrick.execution.ros_worker_transport import RosWorkerTransport
@@ -132,6 +136,161 @@ def test_readonly_uses_one_combined_plan_without_scene_writes():
     assert session.queries == [request]
     assert result.lifecycle["physical_execution"] is False
     assert result.lifecycle["safe_to_release"] is False
+
+
+def readonly_pose_request():
+    """Bind two calibrated TCP poses to the captured read-only query.
+
+    Returns:
+        A complete pose-only envelope, without a joint endpoint proposal.
+    """
+    joint = readonly_request()
+    provenance = {"runtime_model_sha256": "a" * 64, "source_sha256": "b" * 64}
+    return replace(
+        joint,
+        scene_snapshot={**joint.scene_snapshot, "tcp_provenance": provenance},
+        targets={
+            r: {
+                "tcp_pose": {
+                    "position": [0.0, 0.0, 0.25],
+                    "orientation_xyzw": [0.0, 0.0, 0.0, 1.0],
+                    "tip_link": f"{r}_rocobrick_tcp",
+                    "frame_id": f"{r}_base_link",
+                    **provenance,
+                    "position_tolerance_m": 0.001,
+                    "orientation_tolerance_rad": 0.015,
+                }
+            }
+            for r in joint.participants
+        },
+    )
+
+
+def test_readonly_pose_query_admits_joint_endpoint_for_separate_native_fk():
+    """Transport structure is admitted; endpoint FK still needs native proof."""
+    session, query = planning_session(wrong_goal=True), readonly_pose_request()
+    result = perform_readonly_combined_plan(session, query)
+    assert result.passed and session.queries == [query]
+    assert result.trajectory["points"][-1]["positions"] == [0.1] * 12
+    assert result.lifecycle["goal_mode"] == "tcp_pose"
+    assert result.lifecycle["native_fk_validation_required"] is True
+    assert result.lifecycle["safe_to_release"] is False
+    assert result.lifecycle["physical_execution"] is False
+
+
+@pytest.mark.parametrize(
+    "fault",
+    [
+        "frame",
+        "tip",
+        "hash",
+        "bool",
+        "quaternion",
+        "wide-position",
+        "wide-orientation",
+        "mixed",
+    ],
+)
+def test_readonly_pose_query_rejects_bad_calibration_or_relaxed_constraints(fault):
+    """Both complete, calibrated, bounded pose goals are mandatory."""
+    session, query = planning_session(), readonly_pose_request()
+    target = query.targets["piper_0"]["tcp_pose"]
+    if fault == "mixed":
+        query.targets["piper_0"] = readonly_request().targets["piper_0"]
+    elif fault == "frame":
+        target["frame_id"] = "world"
+    elif fault == "tip":
+        target["tip_link"] = "piper_1_rocobrick_tcp"
+    elif fault == "hash":
+        target["source_sha256"] = "c" * 64
+    elif fault == "bool":
+        target["position"][0] = True
+    elif fault == "quaternion":
+        target["orientation_xyzw"][-1] = 0.5
+    elif fault == "wide-position":
+        target["position_tolerance_m"] = 0.01
+    else:
+        target["orientation_tolerance_rad"] = 0.1
+    result = perform_readonly_combined_plan(session, query)
+    assert not result.passed
+    assert session.queries == []
+
+
+def test_readonly_pose_query_preserves_bad_start_for_diagnostics():
+    """Switching goal mode must not weaken captured-start admission."""
+    session = planning_session(wrong_start=True)
+    result = perform_readonly_combined_plan(session, readonly_pose_request())
+    assert not result.passed
+    assert "start_deviations" in result.error
+    assert len(result.trajectory["joint_names"]) == 12
+    assert result.trajectory["points"][0]["positions"] == [0.1] * 12
+
+
+@pytest.mark.parametrize("code", [99999, -1, -27, -31])
+def test_moveit_failure_code_survives_readonly_lane_without_false_internal_error(code):
+    """Generic FAILURE, invalid goals and failed IK remain candidate rejections."""
+    query, session = readonly_pose_request(), planning_session()
+
+    def fail(query, *, timeout_s):
+        raise CombinedMoveItPlanningError("ABORTED", code)
+
+    session.coordinated_plan_runtime = lambda: SimpleNamespace(plan=fail)
+    result = perform_readonly_combined_plan(session, query)
+    assert not result.passed
+    assert result.lifecycle["moveit_error_code"] == code
+    assert result.lifecycle["physical_execution"] is False
+    facade = SimpleNamespace(plan_readonly_combined=lambda _: result)
+    with pytest.raises(ReadOnlyPlanRejectedError):
+        SessionCombinedPlanRuntime(facade).plan(query, timeout_s=query.timeout_s)
+
+
+def test_generated_ros_assertion_retains_readonly_identity_and_original_error():
+    """ROS scalar type assertions must not become identity/capability failures."""
+    query = readonly_request()
+    session = planning_session()
+
+    def fail(request, *, timeout_s):
+        raise AssertionError("The 'x' field must be of type 'float'")
+
+    session.coordinated_plan_runtime = lambda: SimpleNamespace(plan=fail)
+    result = perform_readonly_combined_plan(session, query)
+    assert not result.passed
+    assert result.error == "The 'x' field must be of type 'float'"
+    assert result.coordination_id == query.coordination_id
+    assert result.participants == query.participants
+    assert result.lifecycle["read_only"] is True
+    assert result.lifecycle["physical_execution"] is False
+    assert result.lifecycle["terminal"] is True
+    assert result.lifecycle["safe_to_release"] is False
+
+    transport = SessionCombinedPlanRuntime(
+        SimpleNamespace(plan_readonly_combined=lambda _: result)
+    )
+    with pytest.raises(ReadOnlyPlanRejectedError, match="'x'.*float"):
+        transport.plan(query, timeout_s=query.timeout_s)
+
+
+@pytest.mark.parametrize("remove_tag", [False, True])
+def test_pose_session_transport_requires_explicit_native_fk_boundary(remove_tag):
+    """An old/unqualified worker reply cannot silently admit TCP pose goals."""
+    query, session = readonly_pose_request(), planning_session()
+    result = perform_readonly_combined_plan(session, query)
+    if remove_tag:
+        result = replace(
+            result,
+            lifecycle={
+                k: v
+                for k, v in result.lifecycle.items()
+                if k != "native_fk_validation_required"
+            },
+        )
+    facade = SimpleNamespace(plan_readonly_combined=lambda _: result)
+    runtime = SessionCombinedPlanRuntime(facade)
+    if remove_tag:
+        with pytest.raises(ValueError, match="native FK admission boundary"):
+            runtime.plan(query, timeout_s=query.timeout_s)
+    else:
+        assert runtime.plan(query, timeout_s=query.timeout_s)["status"] == "SUCCEEDED"
 
 
 def test_readonly_accepts_actual_production_version_property():

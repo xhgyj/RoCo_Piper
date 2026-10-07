@@ -110,6 +110,7 @@ def _launch_setup(context):
             moveit_config.to_dict(),
             {
                 "use_sim_time": use_sim_time,
+                "constraint_samplers": "rocobrick/CleanReferenceSamplerAllocator",
                 "allow_trajectory_execution": _boolean(
                     LaunchConfiguration("allow_trajectory_execution").perform(context)
                 ),

@@ -71,7 +71,7 @@ from rocobrick.skills.handover_simulation import (
     SimulationHandoverAuthorization,
     simulation_profile,
 )
-from rocobrick.skills.observation import _pose, parse_pick_observation
+from rocobrick.skills.observation import Pose, _pose, parse_pick_observation
 from rocobrick.skills.pick import PickHandler, _tcp_relative_aabb
 from rocobrick.skills.placement_geometry import pose_error
 from rocobrick.skills.post_lift_handover import capture_post_lift_handover
@@ -324,7 +324,14 @@ class LiveSimulationHandover:
         def fingers(candidate: HandoverCandidate):
             receiver, donor = request.receiver.robot_id, request.donor.robot_id
             opening = pad_separation_to_logical_opening(
-                candidate.receiver_span_m + 0.02
+                max(
+                    b - a
+                    for a, b in zip(
+                        request.object_geometry.minimum_m[:2],
+                        request.object_geometry.maximum_m[:2],
+                    )
+                )
+                + 0.02
             )
             closing = pad_separation_to_logical_opening(
                 max(0.0, candidate.receiver_span_m - 0.002)
@@ -584,7 +591,47 @@ class LiveSimulationHandover:
     async def _motion(self, p, phase, shared, provider, attachment):
         geometry = provider.geometry
         current = dict(shared["start_state"])
-        if phase == "rendezvous":
+        if phase == "approach":
+            from rocobrick.skills.handover_region import candidate_from_endpoint
+
+            # Rebase only the short handler insertion on the measured arrival.
+            # No MoveGroup query, nominal endpoint replacement, or giver motion.
+            actual = candidate_from_endpoint(
+                p.request,
+                geometry.tcp_pose(p.identity.donor_robot_id, current),
+                geometry.tcp_pose(p.identity.receiver_robot_id, current),
+            )
+            observed_object = shared["scene_snapshot"]["bricks"][
+                p.identity.physical_instance_id
+            ]["pose"]
+            observed_pose = Pose(
+                tuple(observed_object["position_xyz"]),
+                tuple(observed_object["orientation_xyzw"]),
+            )
+            error = pose_error(actual.object_goal, observed_pose)
+            if (
+                error[0] > p.request.profile.relative_position_tolerance_m
+                or error[1] > p.request.profile.relative_orientation_tolerance_rad
+            ):
+                raise ValueError("approach: measured carried-object transform drift")
+            states = provider._cartesian(
+                p.request,
+                p.identity.receiver_robot_id,
+                current,
+                actual.receiver_precontact,
+                actual.receiver_contact,
+                deadline_s=time.monotonic() + 20,
+                holder=p.identity.donor_robot_id,
+                receiver_touch=True,
+                finger_contact=True,
+            )
+            if states is None:
+                raise ValueError(
+                    "approach: measured Cartesian insertion failed: "
+                    f"{provider._cartesian_failure}"
+                )
+            states = list(states)
+        elif phase == "rendezvous":
             states = []
             for index in range(len(p.rendezvous.trajectories[0].points)):
                 state = dict(current)
@@ -727,6 +774,7 @@ class LiveSimulationHandover:
                     "replanned": False,
                     "tracking_error_rad": TRACKING_ERROR_RAD,
                     "measured_geometry_recertified": True,
+                    "handler_cartesian_rebased": phase == "approach",
                     "prepared_binding_sha256": request.binding_sha256,
                     "runtime": to_json_value(lifecycle),
                     "simulation_only": True,

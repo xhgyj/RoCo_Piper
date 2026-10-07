@@ -199,23 +199,45 @@ def combine_srdfs(configs: tuple[RobotConfigLike, ...]) -> str:
 
 
 def combine_kinematics(configs: tuple[RobotConfigLike, ...]) -> dict[str, object]:
-    """Combine per-robot kinematics and add explicit joint-group metadata."""
+    """Select only calibrated TCP IK chains for the combined planning model.
+
+    Returns:
+        One TCP solver entry per robot; single-robot input files stay unchanged.
+
+    Raises:
+        ValueError: If an explicitly configured TCP solver is missing or invalid.
+    """
+    if not configs:
+        raise ValueError("dual kinematics requires at least one robot config")
     result: dict[str, object] = {}
     for config in configs:
         data = yaml.safe_load(config.kinematics.read_text(encoding="utf-8")) or {}
+        if not isinstance(data, Mapping):
+            raise ValueError(f"{config.robot_id}: kinematics must be a mapping")
+        tcp_group = f"{config.robot_id}_arm_tcp"
         for group, value in data.items():
-            if str(group).endswith("gripper"):
-                continue
             prefixed_group = str(group)
             if not prefixed_group.startswith(f"{config.robot_id}_"):
                 prefixed_group = f"{config.robot_id}_{prefixed_group}"
+            if prefixed_group != tcp_group:
+                continue
+            if prefixed_group in result:
+                raise ValueError(f"duplicate combined TCP solver {prefixed_group}")
+            if (
+                not isinstance(value, Mapping)
+                or not isinstance(value.get("kinematics_solver"), str)
+                or not value["kinematics_solver"].strip()
+            ):
+                raise ValueError(f"{config.robot_id}: invalid calibrated TCP solver")
             result[prefixed_group] = copy.deepcopy(value)
-    # The joint-space subgroup does not need a multi-tip IK solver; it is used
-    # for collision-checked joint trajectory planning. Pose goals remain per
-    # arm and are composed by the coordinator.
-    # ``dual_arm`` is a joint-space subgroup, so it intentionally has no
-    # single-chain IK solver entry. Pose goals are solved per arm by the
-    # coordinator before the joint-space joint-goal is planned.
+        if tcp_group not in result:
+            raise ValueError(f"{config.robot_id}: missing calibrated TCP solver")
+    # Humble greedily assigns disjoint subgroups by allocator name. Registering
+    # both *_arm and *_arm_tcp makes *_arm win their shared six joints; those
+    # groups exclude the calibrated TCP link, so dual TCP goals get no sampler.
+    # Keep ordinary arm SRDF groups for joint goals, but allocate IK only to the
+    # TCP chains. MoveIt then builds its own dual-arm union constraint sampler.
+    # Do not attach single-chain KDL directly to the branched dual_arm group.
     return result
 
 

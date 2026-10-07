@@ -12,6 +12,18 @@ from rocobrick.ros_moveit_runtime import (
     RosMoveItFactories,
     _terminal_status_name,
 )
+from rocobrick.skills.handover_region import REGION_SCHEMA, validate_region
+
+
+class CombinedMoveItPlanningError(RuntimeError):
+    """Preserve MoveIt's terminal status/code across the read-only worker lane."""
+
+    def __init__(self, status: str, error_code: int) -> None:
+        """Capture the actual planning failure, not a controller result."""
+        self.moveit_error_code = error_code
+        super().__init__(
+            f"combined MoveGroup plan failed: status={status} error_code={error_code}"
+        )
 
 
 class CoordinatedMoveItPlanRuntime:
@@ -122,10 +134,7 @@ class CoordinatedMoveItPlanRuntime:
             for point in trajectory.points
         )
         if status != "SUCCEEDED" or error_code != 1:
-            raise RuntimeError(
-                "combined MoveGroup plan failed: "
-                f"status={status} error_code={error_code}"
-            )
+            raise CombinedMoveItPlanningError(status, error_code)
         self._validate_held_joints(request, joint_names, points)
         return {"joint_names": joint_names, "points": points, "status": status}
 
@@ -189,7 +198,7 @@ class CoordinatedMoveItPlanRuntime:
         goal = factories.move_group_goal_factory()
         motion = factories.motion_plan_request_factory()
         motion.group_name = request.planning_group
-        motion.allowed_planning_time = ALLOWED_PLANNING_TIME_S
+        motion.allowed_planning_time = min(ALLOWED_PLANNING_TIME_S, request.timeout_s)
         motion.num_planning_attempts = NUM_PLANNING_ATTEMPTS
         start_state = getattr(request, "start_state", {})
         if isinstance(start_state, Mapping) and start_state:
@@ -200,6 +209,20 @@ class CoordinatedMoveItPlanRuntime:
         constraints = factories.constraints_factory()
         path_constraints = factories.constraints_factory()
         source = request.scene_snapshot.get("tcp_provenance")
+        if all(set(t) == {"tcp_region"} for t in request.targets.values()):
+            regions = [t["tcp_region"] for t in request.targets.values()]
+            if (
+                not all(isinstance(r, Mapping) for r in regions)
+                or regions[0] != regions[1]
+            ):
+                raise ValueError("both arms must bind the same coupled region")
+            self._append_region_constraints(constraints, regions[0], request, factories)
+            motion.goal_constraints.append(constraints)
+            motion.path_constraints = path_constraints
+            goal.request = motion
+            goal.planning_options.plan_only = True
+            goal.planning_options.replan = False
+            return goal
         for robot_id in request.participants:
             target = request.targets[robot_id]
             raw_pose = target.get("tcp_pose")
@@ -213,10 +236,9 @@ class CoordinatedMoveItPlanRuntime:
                     )
             raw_positions = target.get("joint_positions")
             expected = self.joint_binding[robot_id]
-            joint_space = (
-                isinstance(raw_positions, Mapping)
-                and set(raw_positions) == set(expected)
-            )
+            joint_space = isinstance(raw_positions, Mapping) and set(
+                raw_positions
+            ) == set(expected)
             if "maintain_pose" in target and type(target["maintain_pose"]) is not bool:
                 raise ValueError("maintain_pose must be a real bool")
             if target.get("maintain_pose") is True:
@@ -292,16 +314,94 @@ class CoordinatedMoveItPlanRuntime:
         return goal
 
     @staticmethod
+    def _append_region_constraints(constraints, region, request, factories) -> None:
+        """A coupled MoveIt sampler owns the continuous object-relative family."""
+        validate_region(region, request.scene_snapshot)
+        object_pose = region["object_in_giver"]
+        numbers = [
+            *object_pose["position_xyz"],
+            *object_pose["orientation_xyzw"],
+            *region["center"],
+            *region["extents"],
+            region["precontact_distance_m"],
+            region["contact_clearance_m"],
+            region["lateral_bound_m"],
+            region["depth_bound_m"],
+        ]
+        constraints.name = ";".join(
+            [
+                REGION_SCHEMA,
+                region["donor"],
+                region["binding_sha256"],
+                *(format(v, ".17g") for v in numbers),
+            ]
+        )
+        for robot in (region["donor"], region["receiver"]):
+            pc = factories.position_constraint_factory()
+            pc.link_name = f"{robot}_rocobrick_tcp"
+            pc.header.frame_id = (
+                "dual_world"
+                if robot == region["donor"]
+                else f"{region['donor']}_rocobrick_tcp"
+            )
+            primitive = factories.solid_primitive_factory()
+            primitive.type = getattr(type(primitive), "SPHERE", 2)
+            primitive.dimensions = [
+                float(region["translation_radius_m"])
+                if robot == region["donor"]
+                else 0.15
+            ]
+            pose = factories.pose_factory()
+            xyz = (
+                region["giver_pose"]["position_xyz"]
+                if robot == region["donor"]
+                else object_pose["position_xyz"]
+            )
+            pose.position.x, pose.position.y, pose.position.z = (
+                float(value) for value in xyz
+            )
+            pose.orientation.w = 1.0
+            pc.constraint_region.primitives.append(primitive)
+            pc.constraint_region.primitive_poses.append(pose)
+            pc.weight = 1.0
+            constraints.position_constraints.append(pc)
+            oc = factories.orientation_constraint_factory()
+            oc.header.frame_id = pc.header.frame_id
+            oc.link_name = pc.link_name
+            quaternion = (
+                region["giver_pose"]["orientation_xyzw"]
+                if robot == region["donor"]
+                else (0.0, 0.0, 0.0, 1.0)
+            )
+            oc.orientation.x, oc.orientation.y, oc.orientation.z, oc.orientation.w = (
+                float(value) for value in quaternion
+            )
+            tolerance = float(
+                region["rotation_tolerance_rad"]
+                if robot == region["donor"]
+                else math.pi
+            )
+            oc.absolute_x_axis_tolerance = tolerance
+            oc.absolute_y_axis_tolerance = tolerance
+            oc.absolute_z_axis_tolerance = tolerance
+            oc.weight = 1.0
+            constraints.orientation_constraints.append(oc)
+
+    @staticmethod
     def _hold_tolerance(target: Mapping[str, object]) -> float:
         value = target.get("joint_hold_tolerance_rad", 0.002)
-        if isinstance(value, bool) or not isinstance(value, (int, float)) or (
-            not math.isfinite(value) or not 0 < value <= 0.01
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or (not math.isfinite(value) or not 0 < value <= 0.01)
         ):
             raise ValueError("joint hold tolerance must be finite and in (0, 0.01]")
         return float(value)
 
     def _validate_held_joints(
-        self, request: CoordinatedSessionRequest, names: Sequence[str],
+        self,
+        request: CoordinatedSessionRequest,
+        names: Sequence[str],
         points: Sequence[Mapping[str, object]],
     ) -> None:
         """Reject returned plans that moved a held joint at any waypoint."""

@@ -205,7 +205,7 @@ class HandoverCandidate:
     receiver_span_m: float
 
     def __post_init__(self) -> None:
-        """Require valid, bound rigid targets and a bottom approach direction."""
+        """Require valid, bound rigid targets and the actual tool approach axis."""
         digest(self.candidate_id, "candidate_id")
         digest(self.binding_sha256, "candidate binding")
         for name in (
@@ -219,8 +219,6 @@ class HandoverCandidate:
         direction = _vector(self.approach_direction_world, 3, "approach direction")
         if abs(math.sqrt(sum(v * v for v in direction)) - 1) > 1e-6:
             raise ValueError("approach direction must be normalized")
-        if direction[2] <= 1e-6:
-            raise ValueError("receiver approach must point upward")
         finite(self.receiver_span_m, "receiver span", positive=True)
         if (
             max(

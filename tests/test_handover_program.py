@@ -43,6 +43,7 @@ def test_native_compiler_preserves_the_exact_full_model_phase_chain(tmp_path):
         captured, profile=replace(captured.profile, execution_qualified=True)
     )
     geometry = IsolatedHandoverGeometry(previous.geometry.files, request)
+    runtime.geometry, runtime.captured = geometry, request
 
     def fingers(candidate):
         """Return complete synthetic finger calibration for this exact candidate."""
@@ -74,6 +75,9 @@ def test_native_compiler_preserves_the_exact_full_model_phase_chain(tmp_path):
     assert result.rendezvous.coordination_id == result.candidate.candidate_id
     assert result.current_binding() == result.binding_sha256
     assert runtime.requests
+    assert all(
+        set(t) == {"tcp_region"} for q in runtime.requests for t in q.targets.values()
+    )
 
 
 @pytest.mark.parametrize(

@@ -29,6 +29,16 @@ class HandoverScenePlanner(Protocol):
 
     capabilities: frozenset[str]
 
+    def plan_combined_poses(
+        self,
+        request: HandoverPlanningRequest,
+        candidate: HandoverCandidate,
+        *,
+        deadline_s: float,
+    ) -> CoordinatedOperation | None:
+        """Ask MoveGroup to select both joint endpoints; verify calibrated FK."""
+        ...
+
     def solve_ik(
         self,
         request: HandoverPlanningRequest,
@@ -178,10 +188,14 @@ class HandoverJointPlanningBackend:
         provider: HandoverScenePlanner,
         *,
         clock: Callable[[], float] = time.monotonic,
+        use_moveit_pose_goals: bool = False,
     ) -> None:
-        """Bind an explicitly capable isolated-scene planner and budget clock."""
+        """Bind the provider; production selects pose-first, not legacy joint mode."""
+        if type(use_moveit_pose_goals) is not bool:
+            raise ValueError("MoveIt pose-goal selection must be a real bool")
         self._provider = provider
         self._clock = clock
+        self._use_moveit_pose_goals = use_moveit_pose_goals
         self.capabilities = provider.capabilities
 
     def evaluate_candidate(
@@ -190,8 +204,9 @@ class HandoverJointPlanningBackend:
         candidate: HandoverCandidate,
         *,
         deadline_s: float,
+        preplanned: CoordinatedOperation | None = None,
     ) -> CandidateEvaluation:
-        """Plan paired goals only after sweep and contact-path validation.
+        """Plan and certify both arms without dispatch or custody changes.
 
         Returns:
             Bound no-motion feasibility gates and the admitted combined plan.
@@ -236,22 +251,54 @@ class HandoverJointPlanningBackend:
             (request.donor, candidate.donor_goal, "giver_ik"),
             (request.receiver, candidate.receiver_precontact, "receiver_ik"),
         )
-        for context, pose, gate in targets:
+        if self._use_moveit_pose_goals:
             if expired():
                 return finish("HANDOVER_PLANNING_BUDGET_EXHAUSTED")
-            solution = _solution(
-                self._provider.solve_ik(
-                    request,
-                    context,
-                    calibrated_target(pose, context, request.profile),
-                    deadline_s=deadline_s,
-                ),
-                context,
+            plan = (
+                preplanned
+                if preplanned is not None
+                else self._provider.plan_combined_poses(
+                    request, candidate, deadline_s=deadline_s
+                )
             )
-            if solution is None:
-                return finish(f"{gate.upper()}_FAILED")
-            gates[gate] = True
-            goals.update(solution)
+            if expired():
+                return finish("HANDOVER_PLANNING_BUDGET_EXHAUSTED")
+            if plan is None:
+                return finish("MOVEIT_POSE_PLAN_FAILED")
+            if not isinstance(plan, CoordinatedOperation):
+                raise ValueError("MoveIt pose query omitted a coordinated trajectory")
+            goals.update(
+                (name, value)
+                for t in plan.trajectories
+                for name, value in zip(t.joint_names, t.points[-1].positions)
+            )
+            _validate_plan(request, candidate, plan, goals)
+            # The provider verifies both returned TCP poses by calibrated FK.
+            # Retain the established gate names, not a fabricated native IK call.
+            gates["giver_ik"] = gates["receiver_ik"] = True
+        else:
+            if preplanned is not None:
+                raise ValueError(
+                    "preplanned region path requires MoveIt-first admission"
+                )
+            # Explicit compatibility mode for offline joint-goal diagnostics;
+            # the production factory never falls back here after pose failure.
+            for context, pose, gate in targets:
+                if expired():
+                    return finish("HANDOVER_PLANNING_BUDGET_EXHAUSTED")
+                solution = _solution(
+                    self._provider.solve_ik(
+                        request,
+                        context,
+                        calibrated_target(pose, context, request.profile),
+                        deadline_s=deadline_s,
+                    ),
+                    context,
+                )
+                if solution is None:
+                    return finish(f"{gate.upper()}_FAILED")
+                gates[gate] = True
+                goals.update(solution)
         checks = (
             ("combined_state_valid", self._provider.validate_pair),
             ("gripper_sweeps_valid", self._provider.validate_gripper_sweeps),
@@ -269,12 +316,13 @@ class HandoverJointPlanningBackend:
                 return finish(f"{gate.upper()}_FAILED")
         if expired():
             return finish("HANDOVER_PLANNING_BUDGET_EXHAUSTED")
-        plan = self._provider.plan_combined(
-            request, candidate, goals, deadline_s=deadline_s
-        )
-        if plan is None:
-            return finish("COMBINED_PLAN_FAILED")
-        _validate_plan(request, candidate, plan, goals)
+        if not self._use_moveit_pose_goals:
+            plan = self._provider.plan_combined(
+                request, candidate, goals, deadline_s=deadline_s
+            )
+            if plan is None:
+                return finish("COMBINED_PLAN_FAILED")
+            _validate_plan(request, candidate, plan, goals)
         if expired():
             return finish("HANDOVER_PLANNING_BUDGET_EXHAUSTED")
         gates["joint_path_valid"] = self._provider.validate_continuous_path(

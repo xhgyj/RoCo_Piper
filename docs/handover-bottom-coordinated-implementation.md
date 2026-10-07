@@ -774,3 +774,329 @@ No simulation, MoveGroup query or hardware motion was launched. The next
 authorized trial must re-verify the same PICK/lift -> HANDOVER entry end
 to end: candidates now either solve within the effective limits or the
 bounded search reports the IK rejection honestly.
+
+## 24. MoveIt-first dual TCP rendezvous (2026-10-07)
+
+The user's run `runs/pick-handover-limits-fix-20261007T083748Z` confirmed
+the effective limit fix: PICK/lift succeeded, but all 1024 native candidate
+evaluations failed before any MoveGroup request (839 giver IK failures,
+185 receiver IK failures). This proves the former native prefilter exhausted
+its budget; it does NOT prove that MoveIt cannot find a joint solution, that
+all physically valid handovers are impossible, or that collisions caused
+this particular failure. The user subsequently approved changing the
+planning order, not another native seed/grid increase.
+
+### Implemented production path
+
+- `NativeCoordinatedHandoverFactory` explicitly selects pose-first mode.
+  For each existing object/grasp candidate, the host sends both calibrated
+  giver TCP and receiver precontact TCP goals to one `dual_arm` MoveGroup
+  query BEFORE native rendezvous IK/contact phase gates. Both arms may move
+  during rendezvous; no fixed-giver path constraint is added. This remains
+  a common twelve-joint trajectory, not two independent plans.
+- The persistent read-only lane now accepts either both exact joint goals
+  (offline compatibility) or both complete calibrated TCP goals. Mixed
+  goals, wrong frame/tip/provenance, invalid quaternion/vectors and widened
+  handover tolerances fail closed. Pose replies explicitly state that
+  native FK validation is still required; plan-only success never permits
+  release or asserts physical execution/custody.
+- Each pose query gets at most 10 seconds, bounded by the remaining shared
+  profile budget; the MoveGroup message also respects the request timeout.
+  A recorded unsuccessful query rejects the candidate with
+  `MOVEIT_POSE_PLAN_FAILED` and retains its reason as `last_moveit_failure`,
+  so bounded search can continue. Malformed or foreign successful replies
+  remain errors. There is no production fallback to native joint-goal
+  planning after a pose query fails.
+- The native provider checks the returned start and calibrated endpoint
+  FK, then admits the actual returned joint endpoints into the existing
+  full-pair/phase/swept-geometry checks under the effective URDF/YAML limits.
+  A certified measured-start bridge is retained; there is no end bridge
+  back to a native IK proposal and no endpoint clipping/rounding.
+- The short insertion starts at actual receiver FK with its actual tool
+  direction and constant orientation. Its endpoint is checked relative to
+  the object derived from actual giver FK; individually tolerated TCPs do
+  not imply a correctly aligned simultaneous grasp. The exact rendezvous
+  endpoint joins the phase chain without resetting arm joints.
+
+### Preserved boundaries and verification
+
+The original formal PICK/internal lift -> HANDOVER launch/session/input
+remain unchanged. This change does NOT expand the object/grasp candidate
+grid, add object roll, remove the bottom-receive constraint, or implement
+joint two-arm contact insertion. The last short bottom approach still holds
+the giver fixed. Native IK is still used for that guarded contact handler,
+separation and follow, not as the pre-MoveIt rendezvous filter.
+
+Effective joint limits, full geometry/environment collision checks and the
+existing phase-bound finger-contact policy are unchanged. Opening/closing,
+cohold, release, separation, receiver retention/follow and final custody
+proofs remain mandatory. No model/config/plan inputs were changed.
+
+Locked CPU command `uv run --no-sync python -m pytest -q tests` passed:
+**2259 passed / 2 skipped**, including 32 new regressions. They cover
+pose-first ordering/no fallback, actual endpoint and phase continuity,
+calibration/tolerance/start admission, relative contact alignment,
+cohold/interior collisions, scene/deadline guards and dual-TCP message
+construction. The nine touched Python files without historical lint
+issues pass Ruff. `tests/test_coordinated_ros_runtime.py` retains exactly
+its 13 baseline docstring diagnostics with no additions. The initial
+unscoped pytest collection failed on unrelated ROS/vendor dependencies and
+historical `runs` backup test-name collisions; the formal `tests/` suite is
+the reported passing scope.
+
+These CPU tests use an explicitly synthetic MoveGroup transport and do NOT
+validate the installed ROS dual-TCP constraint sampler, real planning
+success, PhysX contacts or complete handover. No Isaac/ROS motion trial,
+hardware motion, Git commit or push was performed in this change. The next
+step is a user-operated trial through the same headed PICK/lift -> HANDOVER
+entry: inspect both TCP targets in the read-only requests, actual MoveGroup
+outcome, native endpoint/path/phase rejections and (only when all planning
+proofs pass) the existing physical phase evidence. Hardware remains
+unqualified; complete simulated handover remains unproven.
+
+## 25. Real Humble dual-TCP sampler allocation fixed (2026-10-07)
+
+The user-operated run `runs/pick-handover-moveit-first-20261007T093401Z`
+confirmed PICK/lift but sent no HANDOVER motion (receiver piper_1 received
+zero commands). Of 248 recorded read-only requests, 247 returned
+`ABORTED / error_code=99999` and one failed freshness admission. The
+retained MoveGroup log reports `Unable to construct goal representation`.
+The final report's 249 evaluations / exhausted budget was therefore NOT
+evidence that all targets or collision-free paths were unreachable.
+
+### Confirmed cause and scoped fix
+
+The combined kinematics YAML registered both `piper_*_arm` and
+`piper_*_arm_tcp` KDL solvers. Humble's compound IK allocator greedily
+consumes disjoint joint sets in allocator-name order. The ordinary arm
+groups won their shared six joints before the TCP groups; their link sets
+exclude `piper_*_rocobrick_tcp`. Consequently the dual-arm constraint sampler
+could not associate either TCP pose constraint with its allocated subgroups.
+
+`combine_kinematics` now emits only each robot's explicitly configured
+`*_arm_tcp` solver for the COMBINED model. It fails closed on missing,
+malformed or duplicated TCP solver entries. Per-robot input YAMLs and all
+SRDF groups are retained; ordinary arm groups remain available for joint
+goals. Single-chain KDL is not assigned to the branched dual_arm group.
+The original PICK pose path already uses arm_tcp. The installed combined
+launch helper is a symlink to the edited source, so the original launch
+command loads the fix without rebuilding the image.
+
+The read-only worker also preserves the actual MoveIt error code in failure
+lifecycle evidence. Internal code 99999 now propagates immediately as
+`MOVEIT_INTERNAL_FAILURE`, rather than repeatedly rejecting geometric
+candidates until the budget expires. Normal failed planning/IK codes remain
+candidate rejections. Reaching the deadline before another query no longer
+clears the preceding `last_moveit_failure` diagnostic.
+
+### Installed-library A/B verification, not motion
+
+An isolated `--network none` / private-IPC / no-controller container used
+the installed MoveIt 2.5.10/KDL libraries, the captured URDF/SRDF, the
+original mesh package (22 collision-bearing links loaded), and FK-derived
+known-reachable goals expressed in each robot's base_link with the same
+1 mm / 0.015 rad tolerances as production.
+
+- Original four-solver YAML: dual_arm allocated the two ordinary arm
+  subgroups; neither contained a TCP link. `SAMPLER=0`, `SAMPLED=0`.
+- YAML produced by the FIXED PRODUCTION GENERATOR from the same per-robot
+  captured inputs: dual_arm allocated both arm_tcp groups.
+  `SAMPLER=1`, `SAMPLED=1`.
+
+The captured URDF/SRDF and meshes were not rewritten. The probe only created
+and sampled an in-memory planning state; it did not invoke MoveGroup actions,
+controllers, Isaac or hardware. Initial probe attempts had missing mesh
+resource indexing, and one incorrect ROS environment expansion; these were
+diagnostic harness issues, corrected before the reported full-model A/B
+verification. Probe source/build/reports are isolated under
+`/tmp/piper-tcp-sampler-rTzGKA`, not committed or added to production.
+
+Final locked CPU suite: **2272 passed / 2 skipped**, including 13 new tests
+for TCP-only selection/input preservation/fail-closed admission, typed ROS
+error propagation/internal failure classification and retained deadline
+diagnostics. Six touched Python files without historical lint issues pass
+Ruff. Generator diagnostics decreased from 6 to 5; the existing ROS message
+test retains its 13 baseline docstring diagnostics. No new Ruff diagnostic
+remains in the touched files.
+
+This closes the reproduced sampler-construction failure, NOT actual
+handover reachability or a complete physical simulation trial. Candidate
+positions/orientations, effective limits, collision/contact policy and the
+formal PICK/lift -> HANDOVER session remain unchanged. The next user-run
+headed trial should now reach genuine pose sampling/path search, or report
+its actual next rejection. Full simulated transfer and hardware qualification
+remain unproven. No Git commit or push was performed.
+
+## 26. Clean-reference sampler and ordinary MoveIt failure classification
+
+The subsequent user trial `runs/pick-handover-moveit-first-20261007T100556Z`
+reproduced a different Humble UnionConstraintSampler issue: OMPL aliases the
+sample output and reference; output randomization made the first IK sampler's
+reference link transforms dirty. A scoped plugin copies/updates the reference,
+then delegates to the original subgroup samplers. Known-reachable full Piper
+model goals passed the real plugin/OMPL pipeline (16 waypoints). This was an
+incremental build of our configuration package, NOT a MoveIt/OMPL reinstall.
+
+Section 25's numeric-99999 classification is superseded: MoveIt FAILURE=99999
+also represents ordinary multi-attempt planning exhaustion. It no longer
+automatically aborts all search as an internal integration defect. The actual
+status/code remain in read-only evidence. A replay of the actual first fixed
+TCP targets still failed IK after fixing dirty references; known-reachable
+SDK fixtures are not proof of actual handover feasibility.
+
+## 27. Coupled continuous preparation region (2026-10-07)
+
+User scope: preserve original PICK/internal lift -> HANDOVER command, replace
+fixed preparation points with a region, permit receiver angles independent of
+world-up while retaining an exposed brick-local stud face, then run ONE headed
+simulation and stop for instructions. No hardware motion or Git commit.
+
+Production compilation now queries a separate `tcp_region` read-only contract.
+The giver's measured post-lift TCP anchors a 0.12 m translation neighborhood
+and 1.0 rad axis-wise orientation neighborhood; there is no mandatory extra
+vertical lift or fixed-height grid. The measured giver/object transform and
+authored object-local contact box are immutable. A MoveIt goal-sampler plugin
+samples the giver region, derives the carried brick from that solution, then
+samples receiver side-pinch orientation/continuous oblique angle and bounded
+4 mm lateral/depth offsets relative to that same brick. MoveIt's own KDL IK
+and OMPL combined path search own preparation; host point enumeration/native
+rendezvous IK are no longer called by the production factory.
+
+The stud-exposure preparation policy uses brick-local +Z, side-face closing
+axes, and the receiver-palm-back hemisphere. This is a bounded geometric grasp
+family, NOT proof that every arbitrary angle or grasp is physically feasible.
+There is no positive-world-Z approach predicate. Native FK verifies the actual
+returned endpoint lies in the coupled family; it is never rounded/replaced.
+Each repeated region query has its own consumed-once mailbox identity. Exact
+pose/joint read-only contracts retain their prior tolerance restrictions.
+
+Contact/sweep/continuous-path/limit/scene gates remain mandatory before dispatch.
+The receiver opens for the larger of the two eligible side spans, so a sampler
+choosing the other side does not invalidate the prepared finger state. At
+actual arrival the handler reconstructs and recertifies only the short insertion
+from measured FK and measured object-pose agreement; it does not replan the
+free-space route or move the giver during insertion. Fresh co-hold, release,
+attachment, separation and receiver-follow proofs remain required; planning
+success does not transfer custody.
+
+Pre-trial verification: focused Python regression 112 passed; clean-reference
+and region-rejection C++ cases 8 passed; full CPU regression 2288 passed / 2
+skipped before the final world-direction/unique-query tests. Real installed
+Humble/KDL/OMPL with the previous measured Piper start and 22 collision-bearing
+links selected `RoCoCoupledHandoverRegionSampler` and returned a combined
+region-goal path (error_code=1, 19 waypoints). That read-only SDK scene does not
+include physical contact or all live world/attachment constraints, and is not
+handover execution evidence. The SDK's separate raw sampling call failed from
+the unadjusted epsilon-out-of-bounds reference; the planning adapter handled
+that start before the successful pipeline query. No bounds were enlarged.
+
+The one authorized headed trial and final regression results are recorded below
+after completion; no automatic parameter tuning or second trial is authorized.
+
+### One authorized headed trial: failed before region MoveGroup dispatch
+
+Final Python regression: **2290 passed / 2 skipped**; touched Python files pass
+Ruff. C++ gtest cases: **8 passed**. Unit message factories are permissive and
+did not enforce generated ROS message field types; the direct C++ SDK probe
+also bypasses the production Python ROS-message construction seam.
+
+Run: `runs/pick-handover-region-20261007T115837Z`.
+Runtime: `20261007T115858.744194Z_42bab913-99bd-4cd1-acbe-e82f21de2ea5`.
+Terminal: **EXECUTION_FAILED**, process exit 10. PICK/lift is again physically
+confirmed (`PICK_CONFIRMED`, motion_sent=true, measured lift 0.10592 m).
+HANDOVER motion_sent=false; receiver piper_1 received/applied **0 commands**.
+
+The sole read-only result records **The 'x' field must be of type 'float'**.
+The new region message builder uses receiver identity quaternion integer
+components `(0, 0, 0, 1)`, while generated ROS geometry_msgs requires Python
+float fields. Construction fails before send_goal_async; the live region
+MoveGroup action is therefore NOT queried. This is an implementation/type
+integration defect, not evidence of impossible IK, excessive collision
+constraints or a failed physical contact transfer.
+
+The exception is AssertionError rather than one of the read-only boundary's
+caught exception types. The outer worker then returns a generic lifecycle
+without read_only=true; the host displays **read-only combined result
+identity/capability mismatch**, which masks the retained lower-level type
+error. Both the scalar conversion defect and this diagnostic masking remain
+unfixed pending the user's next instruction. No code was retuned and no second
+trial was started after this failure.
+
+Session cleanup passed: own container removed, ROS worker terminal/orderly,
+host exit 0 with sigint_orderly_stop, no session-owned residual processes or
+containers. External operation-plan SHA remains
+`3d0db58db2dc8114c0599d7336c6929f93bec89af939c773742c8ad819cfebca`.
+Before-stop/after-stop headed screenshots and raw results are retained under
+this run's exit-diagnostics directory and copied to the collaborating local
+workspace's evidence directory. Full simulated handover remains unproven.
+
+## 28. ROS region scalar types and diagnostic boundary fixed (2026-10-07)
+
+Scope: repair the generated ROS double-field failure from section 27, then
+run ONE headed PICK/lift -> HANDOVER trial and report without retuning.
+
+`_append_region_constraints` now explicitly converts position components,
+quaternion components, region radius and orientation tolerances to Python
+float. The receiver identity quaternion also uses floating literals. Valid
+integer-valued input metadata remains legal, unchanged input; the conversion
+happens at the generated ROS-message boundary only. No TCP calibration,
+external plan, region bounds, effective joint limits, collision allowances,
+sampler or controller parameters were changed.
+
+The read-only boundary now retains generated-message AssertionError as a
+terminal no-motion failure carrying read_only=true, physical_execution=false
+and the original error. It does not invent trajectory success, permit release
+or hide the failure behind the worker's generic identity/capability wrapper.
+
+Regression: float-only message setter doubles reproduce the precise original
+integer assignment failure; both captured geometry and valid integer vectors
+pass the fixed builder without mutating input. The read-only assertion test
+checks the host still sees the original failure under its strict identity
+envelope. Focused tests: **59 passed**. Full locked CPU suite: **2294 passed /
+2 skipped**; four touched Python files pass Ruff.
+
+A separate --network none, read-only-mount container used the existing ROS
+Humble image and real production `_build_goal` plus real generated MoveGroup
+and geometry_msgs factories. Quaternion(x=0) reproduced the prior failure;
+the original captured failing region request and legal integer-input variant
+then constructed, CDR serialized and deserialized successfully (2180 / 2044
+bytes). No rclpy node, action client, MoveGroup query, controller or simulator
+was created by that check; no ROS/MoveIt dependencies were reinstalled.
+
+The authorized headed trial uses
+`runs/pick-handover-region-float-fix-20261007T124823Z`, the unchanged prepared-v1
+external plan, and the original ROCOBRICK_HEADED/HANDOVER_SIMULATION piper_run
+entry. Final execution and cleanup evidence follow below when it terminates.
+
+### Authorized single headed trial result
+
+Runtime: `20261007T124834.144733Z_1279f0d8-189b-4692-9628-90b52ae2396a`.
+Terminal: **EXECUTION_FAILED**, process exit 10. PICK/lift again reports
+PICK_CONFIRMED, motion_sent=true. HANDOVER reports motion_sent=false; receiver
+piper_1 received/applied 0 commands. No region read-only request/result was
+created in this trial.
+
+New blocker: **candidate precontact does not follow its tool approach axis**.
+The preparation seed constructs contact/precontact from measured post-lift
+geometry and then the HandoverCandidate constructor rejects its direction /
+collinearity / identical-orientation invariant before dispatching the region
+query. This is a pre-query geometry-consistency failure, not a MoveIt IK or
+collision search result. The constructor emits a shared diagnostic for several
+numeric conditions, and the failing seed's component residuals were not
+persisted; the specific numerical cause is not yet established. In particular,
+raw-quaternion angle comparison in pose_error is a follow-up diagnostic target,
+not an asserted proven cause for this run.
+
+The requested ROS scalar bug is verified fixed with real message construction
+and CDR replay; this live trial stopped even earlier and did not exercise that
+region message dispatch. It does not prove complete handover readiness. No
+additional code fix, parameter change or second headed trial was performed
+after the new failure. The next decision remains with the user.
+
+Session cleanup passed: own container removed, host orderly exit 0, ROS worker
+cleanup passed, no session-owned process/container leftovers. Original external
+plan SHA remains
+`3d0db58db2dc8114c0599d7336c6929f93bec89af939c773742c8ad819cfebca`.
+Terminal results, command counters and before-/after-stop screenshots are
+retained under this run and in the local workspace's evidence directory.
+No Git commit/push or hardware motion was performed.
