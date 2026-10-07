@@ -46,7 +46,7 @@ def readonly_request():
     )
 
 
-def planning_session(*, changed=False, wrong_start=False):
+def planning_session(*, changed=False, wrong_start=False, wrong_goal=False):
     """Provide only read/version/plan methods; scene writers are forbidden.
 
     Returns:
@@ -72,7 +72,10 @@ def planning_session(*, changed=False, wrong_start=False):
                     "time_from_start_s": 0.0,
                     "positions": [0.1 if wrong_start else 0.0] * 12,
                 },
-                {"time_from_start_s": 1.0, "positions": [0.05] * 12},
+                {
+                    "time_from_start_s": 1.0,
+                    "positions": [0.1 if wrong_goal else 0.05] * 12,
+                },
             ],
         }
 
@@ -183,6 +186,20 @@ def test_readonly_changed_or_incomplete_inputs_fail(change):
     assert result.lifecycle["physical_execution"] is False
     if change not in ("scene", "start"):
         assert session.queries == []
+
+
+def test_readonly_goal_mismatch_reports_per_joint_deviations_and_raw_plan():
+    """A clamped endpoint rejection names joints and keeps the raw trajectory."""
+    session = planning_session(wrong_goal=True)
+    result = perform_readonly_combined_plan(session, readonly_request())
+    assert result.passed is False
+    error = result.error or ""
+    assert "read-only path does not match captured start/paired goal" in error
+    assert "goal_deviations" in error
+    assert "piper_0_joint1" in error
+    assert result.trajectory["joint_names"][0] == "piper_0_joint1"
+    assert result.trajectory["points"][-1]["positions"] == pytest.approx([0.1] * 12)
+    assert result.trajectory["points"][0]["time_from_start_s"] == 0.0
 
 
 def test_readonly_planning_identity_does_not_consume_execution_identity(tmp_path):

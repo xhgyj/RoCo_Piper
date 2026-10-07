@@ -482,3 +482,119 @@ def test_collision_mesh_capture_requires_exact_asset_provenance(tmp_path):
             package_dirs=(tmp_path,),
             runtime_model_sha256=request.profile.runtime_model_sha256,
         )
+
+
+def _limits_files(base, request, document: str, tmp_path):
+    """Capture the same fixture model plus one hash-bound joint-limits file.
+
+    Returns:
+        The captured files bundle and the limits file path.
+    """
+    path = tmp_path / "joint_limits.yaml"
+    path.write_text(document, encoding="utf-8")
+    files = HandoverModelFiles(
+        base.files.urdf_path,
+        base.files.srdf_path,
+        base.files.package_dirs,
+        base.files.urdf_sha256,
+        base.files.srdf_sha256,
+        base.files.runtime_model_sha256,
+        base.files.mesh_assets,
+        path,
+        hashlib.sha256(path.read_bytes()).hexdigest(),
+    )
+    return files, path
+
+
+def test_moveit_yaml_limits_narrow_native_admission(tmp_path):
+    """Effective bounds are the URDF/MoveIt intersection everywhere native."""
+    base, request = native_scene(tmp_path)
+    files, path = _limits_files(
+        base,
+        request,
+        "joint_limits:\n"
+        "  piper_0_joint1:\n"
+        "    has_position_limits: true\n"
+        "    min_position: -0.5\n"
+        "    max_position: 0.5\n",
+        tmp_path,
+    )
+    scene = IsolatedHandoverGeometry(files, request)
+    index = scene._variables["piper_0_joint1"][0]
+    assert scene._lower_limits[index] == -0.5
+    assert scene._upper_limits[index] == 0.5
+    beyond = {**request.start_state, "piper_0_joint1": 0.8}
+    assert base.check(beyond, holder=request.donor.robot_id).valid
+    verdict = scene.check(beyond, holder=request.donor.robot_id)
+    assert not verdict.valid
+    assert verdict.reason == "MODEL_JOINT_LIMIT_VIOLATION"
+    path.write_text("joint_limits: {}", encoding="utf-8")
+    with pytest.raises(ValueError, match="joint limits changed"):
+        files.validate()
+
+
+def test_moveit_yaml_limits_without_flag_or_outside_model_fail_closed(tmp_path):
+    """Absent flags never narrow; inverted/foreign entries never load."""
+    base, request = native_scene(tmp_path)
+    inert, _ = _limits_files(
+        base,
+        request,
+        "joint_limits:\n"
+        "  piper_0_joint1:\n"
+        "    min_position: -0.5\n"
+        "    max_position: 0.5\n",
+        tmp_path,
+    )
+    scene = IsolatedHandoverGeometry(inert, request)
+    beyond = {**request.start_state, "piper_0_joint1": 0.8}
+    assert scene.check(beyond, holder=request.donor.robot_id).valid
+    inverted, _ = _limits_files(
+        base,
+        request,
+        "joint_limits:\n"
+        "  piper_0_joint1:\n"
+        "    has_position_limits: true\n"
+        "    min_position: 1.2\n"
+        "    max_position: 1.5\n",
+        tmp_path,
+    )
+    with pytest.raises(ValueError, match="exclude the URDF range"):
+        IsolatedHandoverGeometry(inverted, request)
+    foreign, _ = _limits_files(
+        base,
+        request,
+        "joint_limits:\n"
+        "  not_a_model_joint:\n"
+        "    has_position_limits: true\n"
+        "    min_position: -0.5\n"
+        "    max_position: 0.5\n",
+        tmp_path,
+    )
+    with pytest.raises(ValueError, match="foreign joint"):
+        IsolatedHandoverGeometry(foreign, request)
+
+
+def test_capture_records_moveit_joint_limits_provenance(tmp_path):
+    """The live factory's capture path binds the effective-limits file."""
+    scene, request = native_scene(tmp_path)
+    path = tmp_path / "joint_limits.yaml"
+    path.write_text(
+        "joint_limits:\n"
+        "  piper_0_joint1:\n"
+        "    has_position_limits: true\n"
+        "    min_position: -0.5\n"
+        "    max_position: 0.5\n",
+        encoding="utf-8",
+    )
+    files = HandoverModelFiles.capture(
+        scene.files.urdf_path,
+        scene.files.srdf_path,
+        package_dirs=(),
+        runtime_model_sha256=request.profile.runtime_model_sha256,
+        joint_limits_path=path,
+    )
+    assert files.joint_limits_path == path
+    assert files.joint_limits_sha256 == hashlib.sha256(
+        path.read_bytes()
+    ).hexdigest()
+    files.validate()

@@ -47,6 +47,7 @@ def perform_readonly_combined_plan(
     Returns:
         A no-motion trajectory result with unchanged world/attachment version.
     """
+    rejected_trajectory: dict[str, object] = {}
     try:
         admitted = json.dumps(request.serialize(), sort_keys=True, allow_nan=False)
         if (
@@ -94,21 +95,43 @@ def perform_readonly_combined_plan(
         )
         if not isinstance(raw, Mapping) or raw.get("status") != "SUCCEEDED":
             raise ValueError("combined plan-only query did not succeed")
+        # Preserve the exact returned trajectory in any later rejection, so a
+        # start/goal mismatch is diagnosable per joint instead of summarized.
+        rejected_trajectory.update(
+            {
+                "joint_names": [str(name) for name in raw.get("joint_names", ())],
+                "points": [
+                    {
+                        "time_from_start_s": float(point["time_from_start_s"]),
+                        "positions": [float(value) for value in point["positions"]],
+                    }
+                    for point in raw.get("points", ())
+                ],
+            }
+        )
         operation = coordinator.admit_plan(
             request, joint_names=raw["joint_names"], points=raw["points"]
         )
+        start_deviations: dict[str, float] = {}
+        goal_deviations: dict[str, float] = {}
         for path in operation.trajectories:
             target = request.targets[path.robot_id]
             for name, initial, final in zip(
                 path.joint_names, path.points[0].positions, path.points[-1].positions
             ):
-                if abs(initial - request.start_state[name]) > 0.002 or (
-                    abs(final - target["joint_positions"][name])
-                    > target["joint_goal_tolerance_rad"]
-                ):
-                    raise ValueError(
-                        "read-only path does not match captured start/paired goal"
-                    )
+                start = abs(initial - request.start_state[name])
+                goal = abs(final - target["joint_positions"][name])
+                if start > 0.002:
+                    start_deviations[name] = start
+                if goal > target["joint_goal_tolerance_rad"]:
+                    goal_deviations[name] = goal
+        if start_deviations or goal_deviations:
+            raise ValueError(
+                "read-only path does not match captured start/paired goal: "
+                f"start_deviations={start_deviations} "
+                f"goal_deviations={goal_deviations} "
+                "(start_tolerance=0.002)"
+            )
         if json.dumps(request.serialize(), sort_keys=True, allow_nan=False) != admitted:
             raise ValueError("read-only request mutated during planning")
         final_version = session.unified_planning_scene_version
@@ -141,7 +164,7 @@ def perform_readonly_combined_plan(
             request.coordination_id,
             request.robots,
             {},
-            {},
+            dict(rejected_trajectory),
             {
                 "plan_only": True,
                 "read_only": True,

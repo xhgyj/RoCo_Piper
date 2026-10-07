@@ -40,6 +40,8 @@ class HandoverModelFiles:
     srdf_sha256: str
     runtime_model_sha256: str
     mesh_assets: tuple[tuple[Path, str], ...] = ()
+    joint_limits_path: Path | None = None
+    joint_limits_sha256: str | None = None
 
     @classmethod
     def capture(
@@ -49,8 +51,9 @@ class HandoverModelFiles:
         *,
         package_dirs: tuple[Path, ...],
         runtime_model_sha256: str,
+        joint_limits_path: Path | None = None,
     ) -> HandoverModelFiles:
-        """Capture actual exported model files and every collision mesh.
+        """Capture model files, meshes and the effective MoveIt joint limits.
 
         Returns:
             An exact hash-bound model bundle. Ambiguous/missing package assets
@@ -77,6 +80,11 @@ class HandoverModelFiles:
             if len(matches) != 1:
                 raise ValueError("collision mesh asset is missing or ambiguous")
             meshes.update(matches)
+        joint_limits_sha256 = None
+        if joint_limits_path is not None:
+            joint_limits_sha256 = hashlib.sha256(
+                joint_limits_path.read_bytes()
+            ).hexdigest()
         value = cls(
             urdf_path,
             srdf_path,
@@ -87,6 +95,8 @@ class HandoverModelFiles:
             tuple(
                 (p, hashlib.sha256(p.read_bytes()).hexdigest()) for p in sorted(meshes)
             ),
+            joint_limits_path,
+            joint_limits_sha256,
         )
         value.validate()
         return value
@@ -101,6 +111,14 @@ class HandoverModelFiles:
             if hashlib.sha256(path.read_bytes()).hexdigest() != expected:
                 raise ValueError("captured HANDOVER model changed on disk")
         digest(self.runtime_model_sha256, "runtime model")
+        if (self.joint_limits_path is None) != (self.joint_limits_sha256 is None):
+            raise ValueError("captured MoveIt joint-limit provenance is incomplete")
+        if self.joint_limits_path is not None and self.joint_limits_sha256 is not None:
+            digest(self.joint_limits_sha256, "MoveIt joint limits")
+            if hashlib.sha256(self.joint_limits_path.read_bytes()).hexdigest() != (
+                self.joint_limits_sha256
+            ):
+                raise ValueError("captured MoveIt joint limits changed on disk")
         if not isinstance(self.mesh_assets, tuple) or len(
             {p for p, _ in self.mesh_assets}
         ) != len(self.mesh_assets):
@@ -113,6 +131,50 @@ class HandoverModelFiles:
             not isinstance(p, Path) or not p.is_dir() for p in self.package_dirs
         ):
             raise ValueError("collision mesh package directories are unavailable")
+
+
+def _moveit_position_limits(
+    path: Path, variables: Mapping[str, tuple[int, int]]
+) -> dict[str, tuple[float, float]]:
+    """Read the combined MoveIt joint_limits.yaml position overrides.
+
+    Follows MoveIt semantics: only entries with ``has_position_limits: true``
+    narrow planning bounds; an absent flag never narrows, mirroring the
+    planner that ignores min/max without the flag. Every malformed entry,
+    inverted range or foreign joint name fails closed.
+
+    Returns:
+        Per-joint ``(minimum, maximum)`` overrides for model joints only.
+    """
+    import yaml
+
+    document = yaml.safe_load(path.read_text(encoding="utf-8"))
+    if not isinstance(document, Mapping) or not isinstance(
+        document.get("joint_limits"), Mapping
+    ):
+        raise ValueError("MoveIt joint limits document is malformed")
+    result: dict[str, tuple[float, float]] = {}
+    for joint, raw in document["joint_limits"].items():
+        if not isinstance(raw, Mapping):
+            raise ValueError(f"MoveIt joint limits entry {joint!r} is malformed")
+        if raw.get("has_position_limits") is not True:
+            continue
+        bounds = []
+        for key in ("min_position", "max_position"):
+            value = raw.get(key)
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or not math.isfinite(float(value))
+            ):
+                raise ValueError(f"MoveIt joint limits {joint!r} lack finite {key}")
+            bounds.append(float(value))
+        if bounds[0] >= bounds[1]:
+            raise ValueError(f"MoveIt joint limits {joint!r} are inverted")
+        if joint not in variables:
+            raise ValueError(f"MoveIt joint limits name a foreign joint {joint!r}")
+        result[str(joint)] = (bounds[0], bounds[1])
+    return result
 
 
 @dataclass(frozen=True)
@@ -199,6 +261,23 @@ class IsolatedHandoverGeometry:
             if joint.nq != 1 or joint.nv != 1:
                 raise ValueError("HANDOVER supports only bounded one-DOF Piper joints")
             self._variables[self.model.names[index]] = (joint.idx_q, joint.idx_v)
+        # Native admission uses the EFFECTIVE bounds: the intersection of the
+        # exported URDF limits with the combined MoveIt joint_limits.yaml the
+        # production planner enforces. A candidate outside this intersection
+        # is rejected before any MoveGroup query, never clamped downstream.
+        self._lower_limits = self.np.array(self.model.lowerPositionLimit, dtype=float)
+        self._upper_limits = self.np.array(self.model.upperPositionLimit, dtype=float)
+        if files.joint_limits_path is not None:
+            for name, (minimum, maximum) in _moveit_position_limits(
+                files.joint_limits_path, self._variables
+            ).items():
+                index = self._variables[name][0]
+                self._lower_limits[index] = max(self._lower_limits[index], minimum)
+                self._upper_limits[index] = min(self._upper_limits[index], maximum)
+                if self._lower_limits[index] > self._upper_limits[index]:
+                    raise ValueError(
+                        f"MoveIt joint limits for {name} exclude the URDF range"
+                    )
         for ctx in (request.donor, request.receiver):
             expected = {f"{ctx.robot_id}_joint{i}" for i in range(1, 7)}
             if not expected <= set(self._variables):
@@ -327,8 +406,8 @@ class IsolatedHandoverGeometry:
         target = self._se3(world_goal)
         generator = self.np.random.default_rng(int(self.binding[:16], 16))
         base = self.configuration(seed)
-        lo = self.model.lowerPositionLimit[q_indices]
-        hi = self.model.upperPositionLimit[q_indices]
+        lo = self._lower_limits[q_indices]
+        hi = self._upper_limits[q_indices]
         if not self.np.isfinite(lo).all() or not self.np.isfinite(hi).all():
             raise ValueError("IK requires finite captured arm joint limits")
         from scipy.optimize import least_squares
@@ -389,7 +468,7 @@ class IsolatedHandoverGeometry:
         # bounds. Real excursions remain outside and fail check(); raw action
         # feedback is not rewritten. Arm tracking uncertainty is much larger.
         clipped = self.np.clip(
-            q, self.model.lowerPositionLimit, self.model.upperPositionLimit
+            q, self._lower_limits, self._upper_limits
         )
         near = self.np.abs(clipped - q) <= 1e-8
         q[near] = clipped[near]
@@ -594,8 +673,8 @@ class IsolatedHandoverGeometry:
         for joint in self.model.joints[1:]:
             if joint.shortname().startswith("JointModelP"):
                 chain += max(
-                    abs(float(self.model.lowerPositionLimit[joint.idx_q])),
-                    abs(float(self.model.upperPositionLimit[joint.idx_q])),
+                    abs(float(self._lower_limits[joint.idx_q])),
+                    abs(float(self._upper_limits[joint.idx_q])),
                 )
         maximum = 0.0
         for obj, (center, half) in zip(
@@ -641,8 +720,8 @@ class IsolatedHandoverGeometry:
         self._exact_pair_distances.clear()
         self._bind_holder(holder, receiver_attachment)
         q = self.configuration(joints)
-        if self.np.any(q < self.model.lowerPositionLimit) or (
-            self.np.any(q > self.model.upperPositionLimit)
+        if self.np.any(q < self._lower_limits) or (
+            self.np.any(q > self._upper_limits)
         ):
             return CollisionVerdict(False, 0.0, (), "MODEL_JOINT_LIMIT_VIOLATION")
         allowed = {f"{holder}_gripper_link{i}" for i in (1, 2)}
@@ -919,8 +998,8 @@ class IsolatedHandoverGeometry:
                     variable = self.model.joints[joint]
                     if variable.shortname().startswith("JointModelP"):
                         radius += max(
-                            abs(float(self.model.lowerPositionLimit[variable.idx_q])),
-                            abs(float(self.model.upperPositionLimit[variable.idx_q])),
+                            abs(float(self._lower_limits[variable.idx_q])),
+                            abs(float(self._upper_limits[variable.idx_q])),
                         )
                     joint = int(self.model.parents[joint])
                 radii.append(chain)

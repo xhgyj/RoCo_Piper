@@ -735,3 +735,42 @@ deviation diagnostics and preserve rejected raw planning evidence, then verify
 through the same PICK/lift -> HANDOVER entry. Actual synchronized rendezvous,
 guarded contacts, release, separation and final receiver custody are still
 unproven in end-to-end simulation; hardware remains unqualified.
+
+## 23. Effective joint limits bound before MoveGroup queries (2026-10-07)
+
+Section 22's confirmed limits mismatch is now closed for planning admission.
+No limit was widened, no target is clipped, and no admission gate was
+loosened.
+
+- `HandoverModelFiles` optionally captures the combined MoveIt
+  `joint_limits.yaml` with its own SHA-256 provenance; the live trial
+  factory in `handover_live.py` now passes the session-generated dual-arm
+  file. A changed file on disk fails `validate()` like every other
+  captured input.
+- `IsolatedHandoverGeometry` computes the EFFECTIVE bounds as the
+  intersection of the exported URDF limits and the captured MoveIt
+  overrides. An entry without `has_position_limits: true` never narrows,
+  mirroring MoveIt semantics; an empty intersection, foreign joint name,
+  inverted range or malformed entry fails closed. IK solve bounds,
+  configuration snapping, `MODEL_JOINT_LIMIT_VIOLATION` and the prismatic
+  motion-radius bound all use the intersection. A joint5 goal beyond
+  +/-1.2217304 rad is now rejected inside native candidate search, before
+  any MoveGroup query can silently clamp it.
+- `perform_readonly_combined_plan` endpoint rejection now reports per-joint
+  start/goal deviation dictionaries and preserves the complete returned raw
+  trajectory in the failed result envelope, instead of one summarized
+  message with the evidence discarded.
+
+Locked CPU suite after the change: **2227 passed / 2 skipped** (2223
+baseline plus four new regressions: YAML narrowing admission,
+no-flag/inverted/foreign fail-closed behavior, capture provenance, and
+per-joint deviation diagnostics with the preserved raw plan). All touched
+source/test files pass Ruff. One pre-existing order-dependent flake in
+`test_production_imports_no_tools_or_smoke_modules` was observed once and
+reproduced neither in isolation nor in the full-suite rerun; it is
+unrelated to this change, which adds no top-level imports.
+
+No simulation, MoveGroup query or hardware motion was launched. The next
+authorized trial must re-verify the same PICK/lift -> HANDOVER entry end
+to end: candidates now either solve within the effective limits or the
+bounded search reports the IK rejection honestly.

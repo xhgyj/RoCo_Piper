@@ -294,6 +294,7 @@ class LiveSimulationHandover:
             directory / "model.srdf",
             package_dirs=self.package_dirs,
             runtime_model_sha256=self.profile.runtime_model_sha256,
+            joint_limits_path=directory / "joint_limits.yaml",
         )
         geometry = IsolatedHandoverGeometry(
             files,
