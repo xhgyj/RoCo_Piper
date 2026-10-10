@@ -235,9 +235,12 @@ class DirectHandoverBackend:
                     prep_request = request
                     evidence["preparation_selected_mode"] = "tcp_region"
                     break
-                if not _readiness_error(planned.error):
-                    break
-                await asyncio.sleep(0.05)
+                # MoveIt can reject one combined query transiently while the
+                # persistent scene/controller lane is settling. Reuse the
+                # existing bounded attempts for every recorded planning
+                # failure; the final error remains visible in evidence.
+                if retry < 2:
+                    await asyncio.sleep(0.05)
             if prep_selected is None or prep_motion is None:
                 raise ValueError("no paired preparation plan succeeded")
 
