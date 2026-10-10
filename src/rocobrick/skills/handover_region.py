@@ -117,6 +117,10 @@ def contact_from_preparation(
         Pose((0, 0, 0), (0, math.sin(pitch / 2), 0, math.cos(pitch / 2))),
     ).orientation_xyzw
     direction = _quat_rotate_vector(orientation, (0, 0, 1))
+    # The pitch changes the receiver's local X axis. Use the final orientation
+    # for the lateral placement too, otherwise candidate_from_endpoint sees a
+    # different local frame and rejects its own constructed target.
+    tangent = _quat_rotate_vector(orientation, (1, 0, 0))
     delta = tuple(p - c for p, c in zip(local.position_xyz, region["center"]))
     minimum = region["precontact_distance_m"] + region["contact_clearance_m"]
     depth = min(
