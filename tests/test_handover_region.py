@@ -21,6 +21,7 @@ from rocobrick.skills.handover_region import (
 )
 from rocobrick.skills.observation import Pose
 from rocobrick.skills.placement_geometry import compose
+from rocobrick.skills.targets import _quat_rotate_vector
 
 
 class FloatOnlyMessage(SimpleNamespace):
@@ -244,3 +245,70 @@ def test_region_policy_cannot_weaken_exact_pose_transport(change):
         altered["object_in_giver"]["orientation_xyzw"] = [0, 0, 0, 2]
     with pytest.raises(ValueError):
         validate_region(altered, snapshot)
+
+
+@pytest.mark.parametrize(
+    "quaternion",
+    [
+        (
+            -0.011421002447605133,
+            0.001834752270951867,
+            0.004789809696376324,
+            0.9999216198921204,
+        ),
+        (
+            -0.011421273462474346,
+            0.0018344814889132977,
+            0.004789730999618769,
+            0.9999216198921204,
+        ),
+        (
+            -0.011421500705182552,
+            0.0018346573924645782,
+            0.0047898320481181145,
+            0.9999216198921204,
+        ),
+    ],
+)
+def test_region_seed_accepts_recorded_lift_rotation_without_weakening_axis_gate(
+    quaternion,
+):
+    """Use the production seed formula with recorded raw rotation, no planner."""
+    request = planning_request()
+    snapshot = copy.deepcopy(request.scene_snapshot)
+    snapshot["bricks"][request.physical_instance_id]["pose"]["orientation_xyzw"] = list(
+        quaternion
+    )
+    request = replace(request, scene_snapshot=snapshot)
+    original = copy.deepcopy(snapshot)
+    binding = request.binding_sha256
+    observed = request.observation(request.donor.robot_id)
+    region = preparation_region(request)
+    direction = _quat_rotate_vector(observed.object_pose.orientation_xyzw, (0, 0, 1))
+    center = compose(observed.object_pose, Pose(tuple(region["center"]), (0, 0, 0, 1)))
+    receiver = Pose(
+        tuple(
+            c - d * (region["precontact_distance_m"] + region["contact_clearance_m"])
+            for c, d in zip(center.position_xyz, direction)
+        ),
+        observed.object_pose.orientation_xyzw,
+    )
+    candidate = candidate_from_endpoint(request, observed.tcp_pose, receiver)
+    assert candidate.receiver_precontact.orientation_xyzw == quaternion
+    assert candidate.receiver_contact.orientation_xyzw == quaternion
+    assert request.scene_snapshot == original
+    assert request.binding_sha256 == binding
+    tilted = compose(
+        receiver,
+        Pose(
+            (0, 0, 0),
+            (
+                0,
+                0,
+                math.sin(1e-5 / 2),
+                math.cos(1e-5 / 2),
+            ),
+        ),
+    )
+    with pytest.raises(ValueError, match="precontact does not follow"):
+        replace(candidate, receiver_precontact=tilted)

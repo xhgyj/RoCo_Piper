@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import math
 from collections.abc import Mapping
-from dataclasses import asdict
+from dataclasses import asdict, dataclass
 
 from rocobrick.skills.handover_planning import (
     HandoverCandidate,
@@ -17,11 +17,126 @@ from rocobrick.skills.handover_planning import (
     _hash,
 )
 from rocobrick.skills.handover_profile import digest, finite
-from rocobrick.skills.observation import Pose
+from rocobrick.skills.observation import Pose, _pose
 from rocobrick.skills.placement_geometry import compose, inverse, pose_error
 from rocobrick.skills.targets import _quat_rotate_vector
 
 REGION_SCHEMA = "rocobrick-handover-region/v1"
+LOCAL_ALIGNMENT_DISTANCE_M = 0.08
+LOCAL_ALIGNMENT_ANGLE_RAD = math.pi / 2
+PREPARATION_MIDPOINT_FORWARD_M = 0.08
+PREPARATION_HEIGHT_M = 0.34
+PREPARATION_PITCH_RAD = 0.35
+
+
+def _unit(vector: tuple[float, float, float]) -> tuple[float, float, float]:
+    """Normalize one nondegenerate workspace direction.
+
+    Returns:
+        A unit-length direction vector.
+    """
+    norm = math.sqrt(sum(value * value for value in vector))
+    if norm < 1e-8:
+        raise ValueError("handover bases do not define a horizontal direction")
+    return tuple(value / norm for value in vector)
+
+
+@dataclass(frozen=True)
+class HandoverPreparationEndpoint:
+    """Actual paired arrival, not a contact or custody certificate."""
+
+    binding_sha256: str
+    giver: Pose
+    receiver: Pose
+    object_pose: Pose
+
+    def __post_init__(self) -> None:
+        """Keep preparation identity and complete rigid poses strict."""
+        digest(self.binding_sha256, "preparation binding")
+        for name in ("giver", "receiver", "object_pose"):
+            _pose(asdict(getattr(self, name)), name)
+
+
+def preparation_from_endpoint(
+    request: HandoverPlanningRequest, giver: Pose, receiver: Pose
+) -> HandoverPreparationEndpoint:
+    """Admit the broad paired region without applying final grasp predicates.
+
+    Returns:
+        A bound endpoint that still requires full-path and local-handler proof.
+    """
+    region = preparation_region(request)
+    _pose(asdict(giver), "preparation giver")
+    _pose(asdict(receiver), "preparation receiver")
+    observed = request.observation(request.donor.robot_id)
+    displacement, angle = pose_error(observed.tcp_pose, giver)
+    if displacement > region["translation_radius_m"] + 0.001:
+        raise ValueError("PREPARATION_TRANSLATION_REGION_ESCAPE")
+    if angle > math.sqrt(3) * region["rotation_tolerance_rad"] + 0.015:
+        raise ValueError("PREPARATION_ROTATION_REGION_ESCAPE")
+    obj = compose(giver, compose(inverse(observed.tcp_pose), observed.object_pose))
+    if math.dist(receiver.position_xyz, obj.position_xyz) > 0.15 + 0.001:
+        raise ValueError("PREPARATION_RECEIVER_REGION_ESCAPE")
+    return HandoverPreparationEndpoint(request.binding_sha256, giver, receiver, obj)
+
+
+def contact_from_preparation(
+    request: HandoverPlanningRequest, preparation: HandoverPreparationEndpoint
+) -> HandoverCandidate:
+    """Choose a nearby continuous side pinch for the local receiver handler.
+
+    This constructs geometry only, not native global IK or a trajectory.
+    Local motion, both pads, collisions and physical custody must be certified.
+
+    Returns:
+        A bound final contact candidate within the local correction budget.
+    """
+    if preparation.binding_sha256 != request.binding_sha256:
+        raise ValueError("preparation belongs to a foreign request")
+    region = preparation_region(request)
+    local = compose(inverse(preparation.object_pose), preparation.receiver)
+    closing = _quat_rotate_vector(local.orientation_xyzw, (0, 1, 0))
+    planar = math.hypot(closing[0], closing[1])
+    if planar < 1e-6:
+        raise ValueError("LOCAL_ALIGNMENT_CLOSING_AXIS_DEGENERATE")
+    # Continuous side-plane closing direction, not four X/Y-only orientations.
+    yaw = math.atan2(-closing[0], closing[1])
+    tangent = (math.cos(yaw), math.sin(yaw), 0.0)
+    approach = _quat_rotate_vector(local.orientation_xyzw, (0, 0, 1))
+    horizontal = sum(a * b for a, b in zip(approach, tangent))
+    vertical = max(0.0, approach[2])
+    if math.hypot(horizontal, vertical) < 1e-6:
+        horizontal = 1.0
+    pitch = math.atan2(horizontal, vertical)
+    orientation = compose(
+        Pose((0, 0, 0), (0, 0, math.sin(yaw / 2), math.cos(yaw / 2))),
+        Pose((0, 0, 0), (0, math.sin(pitch / 2), 0, math.cos(pitch / 2))),
+    ).orientation_xyzw
+    direction = _quat_rotate_vector(orientation, (0, 0, 1))
+    delta = tuple(p - c for p, c in zip(local.position_xyz, region["center"]))
+    minimum = region["precontact_distance_m"] + region["contact_clearance_m"]
+    depth = min(
+        max(-sum(a * b for a, b in zip(delta, direction)), minimum),
+        minimum + region["depth_bound_m"],
+    )
+    lateral = min(
+        max(sum(a * b for a, b in zip(delta, tangent)), -region["lateral_bound_m"]),
+        region["lateral_bound_m"],
+    )
+    target = compose(
+        preparation.object_pose,
+        Pose(
+            tuple(
+                c + lateral * t - depth * d
+                for c, t, d in zip(region["center"], tangent, direction)
+            ),
+            orientation,
+        ),
+    )
+    displacement, angle = pose_error(preparation.receiver, target)
+    if displacement > LOCAL_ALIGNMENT_DISTANCE_M or angle > LOCAL_ALIGNMENT_ANGLE_RAD:
+        raise ValueError("LOCAL_ALIGNMENT_BUDGET_EXCEEDED")
+    return candidate_from_endpoint(request, preparation.giver, target)
 
 
 def validate_region(
@@ -77,7 +192,7 @@ def validate_region(
         for value in region[name]:
             finite(value, name, positive=name == "extents")
     for name, maximum in (
-        ("translation_radius_m", 0.12),
+        ("translation_radius_m", 0.24),
         ("rotation_tolerance_rad", 1.0),
         ("precontact_distance_m", 0.08),
         ("contact_clearance_m", 0.01),
@@ -97,16 +212,60 @@ def preparation_region(request: HandoverPlanningRequest) -> dict[str, object]:
     observation = request.observation(request.donor.robot_id)
     geometry = request.object_geometry
     object_in_giver = compose(inverse(observation.tcp_pose), observation.object_pose)
+    # Put the preparation endpoint near the horizontal midpoint of the two
+    # bases, with a small forward offset into the shared workspace.  The height
+    # is deliberately above the post-lift height rather than anchored to the
+    # giver's current TCP position.  The object-relative
+    # transform remains exact, so the brick follows the giver without a
+    # release.  The bounded region around this pose lets MoveIt choose a
+    # collision-free joint configuration and a receiver approach orientation.
+    donor_base = request.donor.base.position_xyz
+    receiver_base = request.receiver.base.position_xyz
+    along = _unit(
+        (
+            receiver_base[0] - donor_base[0],
+            receiver_base[1] - donor_base[1],
+            0.0,
+        )
+    )
+    forward = (-along[1], along[0], 0.0)
+    facing = tuple(
+        sum(
+            _quat_rotate_vector(ctx.base.orientation_xyzw, (1.0, 0.0, 0.0))[i]
+            for ctx in (request.donor, request.receiver)
+        )
+        for i in range(3)
+    )
+    if sum(a * b for a, b in zip(forward, facing)) < 0.0:
+        forward = tuple(-value for value in forward)
+    midpoint = tuple(
+        (donor_base[i] + receiver_base[i]) / 2.0 for i in range(3)
+    )
+    target_position = tuple(
+        midpoint[i] + PREPARATION_MIDPOINT_FORWARD_M * forward[i]
+        if i < 2
+        else PREPARATION_HEIGHT_M
+        for i in range(3)
+    )
+    half_pitch = PREPARATION_PITCH_RAD / 2.0
+    target_orientation = compose(
+        observation.tcp_pose,
+        Pose((0.0, 0.0, 0.0), (0.0, math.sin(half_pitch), 0.0, math.cos(half_pitch))),
+    )
+    giver_target = Pose(target_position, target_orientation.orientation_xyzw)
     return {
         "schema": REGION_SCHEMA,
         "binding_sha256": request.binding_sha256,
         "donor": request.donor.robot_id,
         "receiver": request.receiver.robot_id,
-        "giver_pose": asdict(observation.tcp_pose),
+        "giver_pose": asdict(giver_target),
         "object_in_giver": asdict(object_in_giver),
         "center": [(a + b) / 2 for a, b in zip(geometry.minimum_m, geometry.maximum_m)],
         "extents": [b - a for a, b in zip(geometry.minimum_m, geometry.maximum_m)],
-        "translation_radius_m": 0.12,
+        # Keep MoveIt sampling around the midpoint endpoint;
+        # the endpoint itself is not giver-local, while preparation can
+        # sample small collision-free variations.
+        "translation_radius_m": 0.14,
         "rotation_tolerance_rad": 1.0,
         "precontact_distance_m": request.profile.precontact_distance_m,
         "contact_clearance_m": request.profile.contact_clearance_m,
@@ -145,11 +304,7 @@ def candidate_from_endpoint(
     closing_local = _quat_rotate_vector(local.orientation_xyzw, (0, 1, 0))
     # No world-up gate: tool +Z may point in any world direction. Require
     # a side-face pinch and a receiver palm outside the exposed stud half-space.
-    if (
-        direction_local[2] < -0.015
-        or abs(closing_local[2]) > 0.015
-        or (max(abs(closing_local[0]), abs(closing_local[1])) < 0.999)
-    ):
+    if direction_local[2] < -0.015 or abs(closing_local[2]) > 0.015:
         raise ValueError("STUD_FACE_OR_SIDE_PINCH_CONSTRAINT")
     direction = _quat_rotate_vector(receiver.orientation_xyzw, (0, 0, 1))
     tangent_local = _quat_rotate_vector(local.orientation_xyzw, (1, 0, 0))
@@ -197,4 +352,11 @@ def candidate_from_endpoint(
     )
 
 
-__all__ = ["REGION_SCHEMA", "preparation_region", "candidate_from_endpoint"]
+__all__ = [
+    "REGION_SCHEMA",
+    "HandoverPreparationEndpoint",
+    "preparation_region",
+    "preparation_from_endpoint",
+    "contact_from_preparation",
+    "candidate_from_endpoint",
+]

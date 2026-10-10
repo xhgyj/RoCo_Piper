@@ -83,6 +83,7 @@ ALLOWED_ROCOBRICK = {
     "rocobrick.moveit_contract",
     "rocobrick.skills.contracts",
     "rocobrick.skills.handover",
+    "rocobrick.skills.direct_handover",
     "rocobrick.skills.handover_profile",
     "rocobrick.skills.observation",
     "rocobrick.skills.targets",

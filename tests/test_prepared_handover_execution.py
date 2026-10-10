@@ -390,6 +390,32 @@ def test_prepared_executes_exact_path_and_measures_shared_barrier(skew):
         assert all(runtime._cancel_calls >= 1 for runtime in runtimes.values())
 
 
+def test_prepared_accepts_scene_version_property():
+    """The production read-only scene-version property is callable-compatible."""
+    request = prepared_request()
+    runtimes = {
+        robot: strict_fake_runtime(robot)
+        for robot in request.robots
+    }
+    scene = live_scene(request)
+
+    class PropertyVersionSession(SimpleNamespace):
+        @property
+        def unified_planning_scene_version(self):
+            return 1
+
+    session = PropertyVersionSession(
+        robot_ids=request.robots,
+        observe_all=lambda: scene,
+        unified_start_state=lambda: request.start_state,
+        latest_shared_sim_time_s=lambda: 2.01,
+        runtime_for=runtimes.__getitem__,
+    )
+    result = perform_prepared_motion(session, request)
+    assert result.passed is True
+    assert all(runtime.sent_goals for runtime in runtimes.values())
+
+
 def test_prepared_cancel_before_admission_sends_no_goal():
     """Cancellation received before preflight never dispatches either arm."""
     request = prepared_request()
