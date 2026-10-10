@@ -22,7 +22,11 @@ from rocobrick.skills.placement_geometry import compose, inverse, pose_error
 from rocobrick.skills.targets import _quat_rotate_vector
 
 REGION_SCHEMA = "rocobrick-handover-region/v1"
-LOCAL_ALIGNMENT_DISTANCE_M = 0.08
+# Preparation admits the receiver in a 0.15 m neighborhood around the carried
+# object. The post-arrival contact correction must cover that same admitted
+# neighborhood; Cartesian clearance and IK still certify every intermediate
+# waypoint before any contact command is sent.
+LOCAL_ALIGNMENT_DISTANCE_M = 0.15
 LOCAL_ALIGNMENT_ANGLE_RAD = math.pi / 2
 PREPARATION_MIDPOINT_FORWARD_M = 0.08
 PREPARATION_HEIGHT_M = 0.34
