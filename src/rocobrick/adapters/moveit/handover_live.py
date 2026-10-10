@@ -687,7 +687,10 @@ class LiveSimulationHandover:
                 finger_contact=phase in CONTACT_PHASES,
             ):
                 raise ValueError(
-                    f"{phase}: measured geometry/tracking envelope not certified"
+                    f"{phase}: measured geometry/tracking envelope not certified; "
+                    f"certificate={geometry.last_certificate_failure}; "
+                    f"clearance={geometry.last_clearance_failure}; "
+                    f"contact_region={geometry.last_contact_region_failure}"
                 )
         times = [0.0]
         for a, b in zip(states, states[1:]):
