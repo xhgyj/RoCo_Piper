@@ -659,7 +659,12 @@ class IsolatedHandoverGeometry:
                 > self.request.profile.orientation_tolerance_rad
             ):
                 raise ValueError(
-                    "captured model FK does not match measured runtime TCP"
+                    "captured model FK does not match measured runtime TCP "
+                    f"for {context.robot_id}: position_error_m="
+                    f"{self.np.linalg.norm(delta[:3]):.6f}, "
+                    f"orientation_error_rad={self.np.linalg.norm(delta[3:]):.6f}, "
+                    f"tolerance_m={self.request.profile.position_tolerance_m:.6f}, "
+                    f"tolerance_rad={self.request.profile.orientation_tolerance_rad:.6f}"
                 )
 
     def _motion_radius_bound(self) -> float:
