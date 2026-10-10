@@ -1827,7 +1827,7 @@ def _robot_operation_plan_phase(
                                 for robot_id in operation_plan.robots
                             }
                     if handover_profiles:
-                        from rocobrick.skills.direct_handover import DirectSimulationHandover
+                        from rocobrick.adapters.moveit.handover_live import LiveSimulationHandover
                         config_path = args.config_path or REPO_ROOT / "config/user_config.json"
                         config_document = json.loads(config_path.read_text(encoding="utf-8"))
                         robot_rows = config_document["Robot_Config"]["Robots"]
@@ -1835,13 +1835,19 @@ def _robot_operation_plan_phase(
                             (config_path.parent / row["Robot_Package_Dir"]).resolve()
                             for row in robot_rows if row["Name"] in operation_plan.robots
                         }))
-                        live_handover = DirectSimulationHandover(
+                        live_handover = LiveSimulationHandover(
                             session, state_ledger, transit_contexts,
                             session_id=args.host_instance_id,
                             manifest_sha256=manifest.manifest_sha256,
                             package_dirs=package_dirs,
                             profile_id=handover_profiles[0].profile_id,
                         )
+                        # Formal HANDOVER continues from the measured paired
+                        # preparation endpoint through receiver contact,
+                        # co-hold proof, release, scene transfer and follow.
+                        # The preparation-only backend remains available to
+                        # isolated preparation tests but is not used by the
+                        # real task runner.
                         handover_backend = live_handover.backend
                         layer_timeout_overrides = {
                             index: 1200.0
@@ -1858,7 +1864,8 @@ def _robot_operation_plan_phase(
                             "contact_position_tolerance_m": live_handover.profile.contact_position_tolerance_m,
                             "finger_contact_policy": asdict(live_handover.finger_policy),
                             "finger_contact_policy_sha256": live_handover.finger_policy.sha256,
-                            "path": "original_pick_lift_then_direct_dual_arm_handover",
+                            "path": "original_pick_lift_then_staged_formal_dual_arm_handover",
+                            "completion_scope": "full_handover_with_cohold_and_owner_transfer",
                             "layer_timeout_s_by_index": {
                                 str(k): v for k, v in layer_timeout_overrides.items()
                             },
