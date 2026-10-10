@@ -13,9 +13,13 @@ from collections.abc import Mapping, Sequence
 from dataclasses import replace
 
 from rocobrick.adapters.moveit.handover_live import LiveSimulationHandover
+from rocobrick.coordinated_moveit_adapter import (
+    coordinated_operation_from_joint_trajectory,
+)
 from rocobrick.coordinated_session import FreeSpaceMotionRequest
 from rocobrick.multi_robot_scheduler import OperationExecution, OperationStatus
 from rocobrick.robot_operation_plan import RobotOperation
+from rocobrick.skills.coordinated_handover import CoordinatedHandoverPreparation
 from rocobrick.skills.handover_planning import HandoverPlanningRequest
 from rocobrick.skills.handover_region import preparation_region
 from rocobrick.skills.handover_zone import zone_from_request
@@ -153,7 +157,7 @@ class DirectHandoverBackend:
             self.owner.session.execute_coordinated_pre_phase,
             executable.to_coordinated_request(plan_only=False),
         )
-        return result, executable
+        return result, executable, live
 
     async def execute(self, operation: RobotOperation) -> OperationExecution:
         """Plan and execute the paired preparation without contact actions.
@@ -237,7 +241,7 @@ class DirectHandoverBackend:
             if prep_selected is None or prep_motion is None:
                 raise ValueError("no paired preparation plan succeeded")
 
-            prep_result, _ = await self._execute_validated(
+            prep_result, _, executed_request = await self._execute_validated(
                 operation,
                 prep_request,
                 prep_motion,
@@ -266,13 +270,18 @@ class DirectHandoverBackend:
                     f"paired preparation did not start/arrive: {prep_result.error}"
                 )
 
-            # This request deliberately ends at the paired preparation
-            # endpoint.  Contact, receiver closure, donor release, follow and
-            # ownership transfer belong to a later operation and must not be
-            # entered implicitly after the two-arm arrival.
-            evidence["handover_complete"] = False
-            evidence["preparation_only"] = True
-            return OperationExecution(
+            preparation = self._admit_executed_preparation(
+                operation, executed_request, prep_result
+            )
+            formal = getattr(self.owner, "formal_backend", None)
+            continue_after_preparation = getattr(
+                formal, "execute_after_preparation", None
+            )
+            if not callable(continue_after_preparation):
+                raise RuntimeError("formal HANDOVER continuation is unavailable")
+            evidence["preparation_only"] = False
+            evidence["continuation"] = "formal_from_measured_preparation_arrival"
+            preparation_execution = OperationExecution(
                 operation_id=operation.operation_id,
                 robot_id=operation.executor_robot_id,
                 status=OperationStatus.CONFIRMED,
@@ -281,6 +290,9 @@ class DirectHandoverBackend:
                 motion_sent=motion_sent,
                 evidence=evidence,
                 reason=None,
+            )
+            return await continue_after_preparation(
+                operation, preparation, preparation_execution
             )
 
         except Exception as error:  # noqa: BLE001 - preserve runtime evidence
@@ -296,6 +308,54 @@ class DirectHandoverBackend:
             )
         finally:
             self._motion_ids.pop(operation.operation_id, None)
+
+    def _admit_executed_preparation(
+        self,
+        operation: RobotOperation,
+        request: HandoverPlanningRequest,
+        planned: object,
+    ) -> CoordinatedHandoverPreparation:
+        """Bind the proven Direct MoveIt trajectory for formal continuation.
+
+        Returns:
+            A preparation contract whose trajectory has already been executed.
+        """
+        trajectory = getattr(planned, "trajectory", None)
+        if not isinstance(trajectory, Mapping):
+            raise ValueError("paired preparation has no combined trajectory")
+        joint_names = trajectory.get("joint_names")
+        points = trajectory.get("points")
+        if not isinstance(joint_names, Sequence) or isinstance(
+            joint_names, (str, bytes)
+        ):
+            raise ValueError("paired preparation trajectory has no joint binding")
+        if not isinstance(points, Sequence) or isinstance(points, (str, bytes)):
+            raise ValueError("paired preparation trajectory has no time grid")
+        participants = (request.donor.robot_id, request.receiver.robot_id)
+        joint_binding = {
+            robot: tuple(f"{robot}_joint{i}" for i in range(1, 7))
+            for robot in participants
+        }
+        rendezvous = coordinated_operation_from_joint_trajectory(
+            coordination_id=f"{operation.operation_id}:direct-preparation",
+            scene_digest=request.scene_snapshot["scene_digest"],
+            participants=participants,
+            joint_names=joint_names,
+            points=points,
+            joint_binding=joint_binding,
+            start_at_sim_time_s=0.0,
+            synchronization_tolerance_s=request.profile.max_sync_skew_s,
+        )
+        start = dict(request.start_state)
+        return CoordinatedHandoverPreparation(
+            request=request,
+            rendezvous=rendezvous,
+            receiver_open=(start, dict(start)),
+            capabilities=self.owner.factory.execution_capabilities,
+            donor_holding_window=self.owner.donor_window_for(operation),
+            phase_timeout_s=self.owner.factory.phase_timeout_s,
+            simulation_authorization=self.owner.authorization,
+        )
 
     async def cancel(self, operation_id: str) -> Mapping[str, object]:
         """Cancel the owned preparation motion and return terminal evidence.
@@ -327,4 +387,5 @@ class DirectSimulationHandover(LiveSimulationHandover):
     def __init__(self, *args: object, **kwargs: object) -> None:
         """Create the live owner and its paired preparation backend."""
         super().__init__(*args, **kwargs)
+        self.formal_backend = self.backend
         self.backend = DirectHandoverBackend(self)

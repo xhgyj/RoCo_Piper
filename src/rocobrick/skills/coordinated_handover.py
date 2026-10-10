@@ -1,6 +1,6 @@
 """Complete bottom-HANDOVER lifecycle, independent of legacy PICK targeting.
 
-All paths are admitted before dispatch. Transport receipts bind certified
+Each dispatched phase is admitted before dispatch. Transport receipts bind certified
 execution, but custody comes only from fresh measured pad/SE(3) observations.
 The production profile remains fail-closed until its hardware qualification.
 """
@@ -12,6 +12,7 @@ import hashlib
 import json
 from collections.abc import Callable, Mapping
 from dataclasses import asdict, dataclass, field
+from types import MappingProxyType
 from typing import Protocol
 
 from rocobrick.adapters.moveit.handover_scene_planner import HandoverPhasePaths
@@ -25,6 +26,7 @@ from rocobrick.multi_robot_scheduler import (
 )
 from rocobrick.robot_operation_plan import RobotOperation
 from rocobrick.skills.contracts import HandoverEvidence, HandoverTransferIdentity
+from rocobrick.skills.handover_contact import CONTACT_PHASES
 from rocobrick.skills.handover_observation import (
     HandoverObservation,
     parse_handover_observation,
@@ -61,12 +63,146 @@ PHASES = (
 
 
 @dataclass(frozen=True)
+class CoordinatedHandoverPreparation:
+    """Simulation-only paired preparation, not final-contact permission."""
+
+    request: HandoverPlanningRequest
+    rendezvous: CoordinatedOperation
+    receiver_open: tuple[Mapping[str, float], Mapping[str, float]]
+    capabilities: frozenset[str]
+    donor_holding_window: tuple[float, float]
+    phase_timeout_s: float
+    simulation_authorization: SimulationHandoverAuthorization
+    binding_sha256: str = field(init=False)
+
+    def __post_init__(self) -> None:
+        """Bind only safe opening and the paired carrying trajectory."""
+        if not isinstance(
+            self.simulation_authorization, SimulationHandoverAuthorization
+        ):
+            raise ValueError(
+                "staged preparation requires explicit simulation authorization"
+            )
+        self.simulation_authorization.validate(
+            self.request.profile, self.request.scene_snapshot, self.capabilities
+        )
+        finite(self.phase_timeout_s, "preparation timeout", positive=True)
+        if (
+            not isinstance(self.donor_holding_window, tuple)
+            or len(self.donor_holding_window) != 2
+        ):
+            raise ValueError("preparation requires a calibrated giver window")
+        lo, hi = self.donor_holding_window
+        if (
+            not 0
+            <= finite(lo, "giver opening minimum")
+            <= finite(hi, "giver opening maximum")
+        ):
+            raise ValueError("invalid preparation giver window")
+        if len(self.receiver_open) != 2 or dict(self.receiver_open[0]) != dict(
+            self.request.start_state
+        ):
+            raise ValueError(
+                "preparation opening must start at captured measured state"
+            )
+        for state in self.receiver_open:
+            if set(state) != set(self.request.start_state):
+                raise ValueError("preparation requires the complete measured state")
+            for name, value in state.items():
+                finite(value, f"preparation joint {name}")
+                if (
+                    not name.startswith(self.request.receiver.robot_id + "_gripper_")
+                    and value != self.request.start_state[name]
+                ):
+                    raise ValueError(
+                        "preparation opening changes an arm or giver finger"
+                    )
+        object.__setattr__(
+            self,
+            "receiver_open",
+            tuple(MappingProxyType(dict(s)) for s in self.receiver_open),
+        )
+        plan = self.rendezvous
+        if (
+            plan.participants != self.participants
+            or plan.scene_digest != self.request.scene_snapshot["scene_digest"]
+            or len(plan.trajectories) != 2
+        ):
+            raise ValueError("preparation trajectory identity mismatch")
+        if plan.synchronization_tolerance_s > self.request.profile.max_sync_skew_s:
+            raise ValueError("preparation synchronization tolerance exceeds policy")
+        grids = []
+        for trajectory in plan.trajectories:
+            if trajectory.robot_id not in self.participants or set(
+                trajectory.joint_names
+            ) != {f"{trajectory.robot_id}_joint{i}" for i in range(1, 7)}:
+                raise ValueError("preparation omits one complete arm")
+            grid = tuple(p.time_from_start_s for p in trajectory.points)
+            if (
+                len(grid) < 2
+                or grid[0] != 0
+                or grid[-1] >= self.phase_timeout_s
+                or any(b <= a for a, b in zip(grid, grid[1:]))
+            ):
+                raise ValueError("preparation lacks a bounded shared time grid")
+            grids.append(grid)
+            if trajectory.points[0].positions != tuple(
+                self.request.start_state[n] for n in trajectory.joint_names
+            ):
+                raise ValueError("preparation changed captured arm start")
+        if {t.robot_id for t in plan.trajectories} != set(self.participants) or grids[
+            0
+        ] != grids[1]:
+            raise ValueError("preparation requires both arms on one time grid")
+        object.__setattr__(self, "binding_sha256", self.current_binding())
+
+    @property
+    def participants(self) -> tuple[str, str]:
+        """Return the exact giver and receiver."""
+        return self.request.donor.robot_id, self.request.receiver.robot_id
+
+    @property
+    def identity(self) -> HandoverTransferIdentity:
+        """Preparation never changes physical ownership."""
+        return HandoverTransferIdentity(
+            self.request.operation_id,
+            *self.participants,
+            self.request.physical_instance_id,
+        )
+
+    @property
+    def object_to_donor_tcp(self) -> Pose:
+        """Keep the measured original grasp throughout paired preparation."""
+        observed = self.request.observation(self.request.donor.robot_id)
+        return compose(inverse(observed.object_pose), observed.tcp_pose)
+
+    def current_binding(self) -> str:
+        """Detect mutation without inventing a final contact candidate.
+
+        Returns:
+            The current immutable-input and carrying-trajectory binding.
+        """
+        raw = {
+            "request": self.request.binding_sha256,
+            "rendezvous": asdict(self.rendezvous),
+            "receiver_open": [dict(s) for s in self.receiver_open],
+            "donor_window": self.donor_holding_window,
+            "timeout": self.phase_timeout_s,
+            "capabilities": sorted(self.capabilities),
+            "simulation_authorization": asdict(self.simulation_authorization),
+        }
+        return hashlib.sha256(
+            json.dumps(raw, sort_keys=True, allow_nan=False).encode()
+        ).hexdigest()
+
+
+@dataclass(frozen=True)
 class CoordinatedHandoverProgram:
     """A completely certified paired program plus calibrated opening windows."""
 
     request: HandoverPlanningRequest
     candidate: HandoverCandidate
-    rendezvous: CoordinatedOperation
+    rendezvous: CoordinatedOperation | None
     paths: HandoverPhasePaths
     capabilities: frozenset[str]
     donor_holding_window: tuple[float, float]
@@ -74,6 +210,7 @@ class CoordinatedHandoverProgram:
     donor_release_window: tuple[float, float]
     phase_timeout_s: float
     simulation_authorization: SimulationHandoverAuthorization | None = None
+    preparation_binding_sha256: str | None = None
     binding_sha256: str = field(init=False)
 
     def __post_init__(self) -> None:
@@ -88,12 +225,25 @@ class CoordinatedHandoverProgram:
             )
         if self.candidate.binding_sha256 != self.request.binding_sha256 or (
             self.paths.candidate_id != self.candidate.candidate_id
-            or self.rendezvous.coordination_id != self.candidate.candidate_id
-            or set(self.rendezvous.participants) != set(self.participants)
-            or self.rendezvous.scene_digest
-            != self.request.scene_snapshot["scene_digest"]
+            or (
+                self.rendezvous is not None
+                and (
+                    self.rendezvous.coordination_id != self.candidate.candidate_id
+                    or set(self.rendezvous.participants) != set(self.participants)
+                    or self.rendezvous.scene_digest
+                    != self.request.scene_snapshot["scene_digest"]
+                )
+            )
         ):
             raise ValueError("HANDOVER program/candidate/path identity mismatch")
+        if self.rendezvous is None:
+            if self.simulation_authorization is None:
+                raise ValueError(
+                    "arrival continuation requires simulation authorization"
+                )
+            digest(self.preparation_binding_sha256, "executed preparation binding")
+        elif self.preparation_binding_sha256 is not None:
+            raise ValueError("arrival continuation must not redispatch preparation")
         self._validate_phase_chain()
         finite(self.phase_timeout_s, "phase timeout", positive=True)
         for window in (
@@ -133,7 +283,9 @@ class CoordinatedHandoverProgram:
         grid = None
         goals = {}
         starts = {}
-        for trajectory in self.rendezvous.trajectories:
+        for trajectory in (
+            self.rendezvous.trajectories if self.rendezvous is not None else ()
+        ):
             expected = {f"{trajectory.robot_id}_joint{i}" for i in range(1, 7)}
             if (
                 set(trajectory.joint_names) != expected
@@ -154,6 +306,9 @@ class CoordinatedHandoverProgram:
             grid = times
             starts.update(zip(trajectory.joint_names, trajectory.points[0].positions))
             goals.update(zip(trajectory.joint_names, trajectory.points[-1].positions))
+        if self.rendezvous is None:
+            starts = {n: self.request.start_state[n] for n in names}
+            goals = dict(starts)
         for name in names:
             if starts[name] != self.request.start_state[name] or (
                 goals[name] != paths.approach[0][name]
@@ -182,6 +337,11 @@ class CoordinatedHandoverProgram:
                     for i in range(1, 7)
                 ):
                     raise ValueError("HANDOVER constrained phase moves the held arm")
+
+    @property
+    def object_to_donor_tcp(self) -> Pose:
+        """Expose the same grasp guard for complete and preparation programs."""
+        return self.candidate.object_to_donor_tcp
 
     @property
     def participants(self) -> tuple[str, str]:
@@ -220,7 +380,10 @@ class CoordinatedHandoverProgram:
             "request": self.request.binding_sha256,
             "candidate": self.candidate.candidate_id,
             "paths": paths,
-            "rendezvous": asdict(self.rendezvous),
+            "rendezvous": asdict(self.rendezvous)
+            if self.rendezvous is not None
+            else None,
+            "preparation_binding_sha256": self.preparation_binding_sha256,
             "attachment": {
                 "position": self.paths.planned_receiver_attachment.position_xyz,
                 "orientation": self.paths.planned_receiver_attachment.orientation_xyzw,
@@ -272,30 +435,40 @@ class CoordinatedHandoverTransport(Protocol):
     """Already-running shared session; implementations never replan phases."""
 
     async def observe(
-        self, program: CoordinatedHandoverProgram
+        self, program: CoordinatedHandoverProgram | CoordinatedHandoverPreparation
     ) -> Mapping[str, object]:
         """Read current same-tick physics even while both actions are active."""
         ...
 
     async def execute_phase(
         self,
-        program: CoordinatedHandoverProgram,
+        program: CoordinatedHandoverProgram | CoordinatedHandoverPreparation,
         phase: str,
         receiver_attachment: Pose | None,
     ) -> HandoverPhaseReceipt:
         """Execute the admitted phase, recertifying measured finger deviations."""
         ...
 
-    async def cancel(self, program: CoordinatedHandoverProgram) -> Mapping[str, object]:
+    async def cancel(
+        self, program: CoordinatedHandoverProgram | CoordinatedHandoverPreparation
+    ) -> Mapping[str, object]:
         """Stop BOTH participants and return independently terminal-safe proof."""
         ...
 
 
 class CoordinatedHandoverFactory(Protocol):
-    """Capture actual post-lift input and finish all planning before dispatch."""
+    """Admit each stage before its dispatch, using measured preparation arrival."""
 
-    async def prepare(self, operation: RobotOperation) -> CoordinatedHandoverProgram:
-        """Return a full-model certified program, never legacy PICK targets."""
+    async def prepare(
+        self, operation: RobotOperation
+    ) -> CoordinatedHandoverProgram | CoordinatedHandoverPreparation:
+        """Return independently admitted preparation or a complete program."""
+        ...
+
+    async def complete_preparation(
+        self, operation: RobotOperation, preparation: CoordinatedHandoverPreparation
+    ) -> CoordinatedHandoverProgram:
+        """Certify contact only AFTER physical paired preparation has arrived."""
         ...
 
 
@@ -320,7 +493,7 @@ class CoordinatedHandoverBackend:
         """
         if operation.operation_id in self._active:
             raise ValueError("HANDOVER already has an owned execution")
-        state = _Execution(operation, self.transport, self.ledger)
+        state = _Execution(operation, self.transport, self.ledger, self.factory)
         self._active[operation.operation_id] = state
         try:
             state.program = await self.factory.prepare(operation)
@@ -360,6 +533,75 @@ class CoordinatedHandoverBackend:
             proof["custody_unknown"] = True
         return proof
 
+    async def execute_after_preparation(
+        self,
+        operation: RobotOperation,
+        preparation: CoordinatedHandoverPreparation,
+        completed: OperationExecution,
+    ) -> OperationExecution:
+        """Continue an executed paired arrival without redispatching rendezvous.
+
+        Returns:
+            The formal continuation result, including custody evidence.
+        """
+        if operation.operation_id in self._active:
+            raise ValueError("HANDOVER already has an owned execution")
+        state = _Execution(operation, self.transport, self.ledger, self.factory)
+        self._active[operation.operation_id] = state
+        try:
+            if (
+                not isinstance(preparation, CoordinatedHandoverPreparation)
+                or completed.operation_id != operation.operation_id
+                or completed.robot_id != operation.executor_robot_id
+                or completed.status != OperationStatus.CONFIRMED
+                or completed.passed is not True
+                or completed.terminal is not True
+                or completed.motion_sent is not True
+            ):
+                raise ValueError("continuation requires confirmed physical preparation")
+            proof = completed.evidence.get("preparation", {})
+            lifecycle = proof.get("lifecycle", {})
+            participants = lifecycle.get("participants", {})
+            if (
+                lifecycle.get("terminal") is not True
+                or lifecycle.get("safe_to_release") is not True
+                or set(participants) != set(preparation.participants)
+                or any(
+                    v.get("arrival_confirmed") is not True
+                    or v.get("terminal") is not True
+                    or v.get("safe") is not True
+                    for v in participants.values()
+                )
+            ):
+                raise ValueError("continuation lacks both terminal-safe arm arrivals")
+            state.program = preparation
+            state.motion_attempted = True
+            state.validate_operation()
+            state.details.update(completed.evidence)
+            state.details.update(
+                preparation_arrived=True,
+                preparation_only=False,
+                handover_complete=False,
+                completion_scope="full_handover_with_cohold_and_owner_transfer",
+                preparation_binding_sha256=preparation.binding_sha256,
+            )
+            complete = await self.factory.complete_preparation(operation, preparation)
+            if (
+                not isinstance(complete, CoordinatedHandoverProgram)
+                or complete.rendezvous is not None
+                or complete.preparation_binding_sha256 != preparation.binding_sha256
+            ):
+                raise ValueError("contact program is not bound to executed preparation")
+            state.program = complete
+            state.preparation_already_arrived = True
+            state.validate_operation()
+            return await state.execute()
+        except (Exception, asyncio.CancelledError) as error:
+            return await state.fail(error)
+        finally:
+            if state.inflight is None or state.inflight.done():
+                self._active.pop(operation.operation_id, None)
+
 
 class _Execution:
     """Private state owned by one operation and its two physical action lanes."""
@@ -369,20 +611,27 @@ class _Execution:
         operation: RobotOperation,
         transport: CoordinatedHandoverTransport,
         ledger: OperationStateLedger,
+        factory: CoordinatedHandoverFactory,
     ) -> None:
         """Initialize the explicitly bound fixture state."""
         self.operation, self.transport, self.ledger = operation, transport, ledger
-        self.program: CoordinatedHandoverProgram | None = None
+        self.factory = factory
+        self.program: (
+            CoordinatedHandoverProgram | CoordinatedHandoverPreparation | None
+        ) = None
         self.inflight: asyncio.Task[HandoverPhaseReceipt] | None = None
         self.cancel_requested = False
         self.motion_attempted = False
         self.custody_monitored = False
         self.last: HandoverObservation | None = None
+        self.last_phase: str | None = None
+        self.current_phase: str | None = None
         self.attachment: Pose | None = None
+        self.preparation_already_arrived = False
         self.details: dict[str, JSONValue] = {}
         self.stop_lock = asyncio.Lock()
 
-    def bound(self) -> CoordinatedHandoverProgram:
+    def bound(self) -> CoordinatedHandoverProgram | CoordinatedHandoverPreparation:
         """Require unchanged admitted input before every observation/dispatch.
 
         Returns:
@@ -477,15 +726,25 @@ class _Execution:
             else p.request.observation(p.identity.donor_robot_id)
         )
         gap = sample.donor.sim_time_s - previous.sim_time_s
+        if sample.donor.sequence <= previous.sequence or gap <= 0:
+            raise ValueError(
+                "HANDOVER monitor returned repeated/stale/discontinuous physics"
+            )
+        # Isaac may advance substantially while a preparation observation or
+        # phase handoff completes.  That interval is outside the contact proof:
+        # retain freshness/sequence checks, then establish a new baseline when
+        # the first contact phase begins.  Once contact monitoring is active,
+        # every subsequent sample remains subject to the strict profile gap.
         if (
-            sample.donor.sequence <= previous.sequence
-            or gap <= 0
-            or (self.last is not None and gap > p.request.profile.max_observation_gap_s)
+            self.last is not None
+            and self.current_phase in CONTACT_PHASES
+            and self.last_phase in CONTACT_PHASES
+            and gap > p.request.profile.max_observation_gap_s
         ):
             raise ValueError(
                 "HANDOVER monitor returned repeated/stale/discontinuous physics"
             )
-        self.last = sample
+        self.last, self.last_phase = sample, self.current_phase
         return sample
 
     def giver_guard(self, sample: HandoverObservation) -> None:
@@ -494,7 +753,7 @@ class _Execution:
             sample,
             profile=p.request.profile,
             donor_window=p.donor_holding_window,
-            expected_object_to_donor_tcp=p.candidate.object_to_donor_tcp,
+            expected_object_to_donor_tcp=p.object_to_donor_tcp,
         )
 
     def receiver_guard(self, sample: HandoverObservation, *, released: bool) -> None:
@@ -538,6 +797,7 @@ class _Execution:
         self.motion_attempted = (
             True  # BEFORE dispatch; send errors may have moved hardware.
         )
+        self.current_phase = phase
         self.inflight = asyncio.create_task(
             self.transport.execute_phase(p, phase, self.attachment)
         )
@@ -603,10 +863,47 @@ class _Execution:
                 profile=p.request.profile,
                 follow_samples=p.request.follow_samples,
                 donor_window=p.donor_holding_window,
-                expected_object_to_donor_tcp=p.candidate.object_to_donor_tcp,
+                expected_object_to_donor_tcp=p.object_to_donor_tcp,
             )
         )
-        for phase in ("receiver_open", "rendezvous", "approach", "receiver_close"):
+        if isinstance(p, CoordinatedHandoverPreparation):
+            for phase in ("receiver_open", "rendezvous"):
+                await self.phase(phase, self.giver_guard)
+            self.details["preparation_arrived"] = True
+            self.details["preparation_binding_sha256"] = p.binding_sha256
+            if self.last is not None:
+                self.details["preparation_arrival"] = to_json_value(
+                    {
+                        "sequence": self.last.donor.sequence,
+                        "sim_time_s": self.last.donor.sim_time_s,
+                        "object_pose": asdict(self.last.donor.object_pose),
+                        "tcp_poses": {
+                            p.identity.donor_robot_id: asdict(self.last.donor.tcp_pose),
+                            p.identity.receiver_robot_id: asdict(
+                                self.last.receiver.tcp_pose
+                            ),
+                        },
+                    }
+                )
+            complete = await self.factory.complete_preparation(self.operation, p)
+            if (
+                not isinstance(complete, CoordinatedHandoverProgram)
+                or complete.preparation_binding_sha256 != p.binding_sha256
+            ):
+                raise ValueError("contact program is not bound to executed preparation")
+            self.program = complete
+            self.validate_operation()
+            p = complete
+            remaining = ("approach", "receiver_close")
+        elif self.preparation_already_arrived:
+            remaining = ("approach", "receiver_close")
+        else:
+            remaining = (
+                ("receiver_open", "approach", "receiver_close")
+                if p.rendezvous is None
+                else ("receiver_open", "rendezvous", "approach", "receiver_close")
+            )
+        for phase in remaining:
             await self.phase(phase, self.giver_guard)
         samples = await self.window(self.giver_guard)
         co_hold = verify_co_hold(
@@ -699,6 +996,7 @@ class _Execution:
                 )
             }
         )
+        self.details["handover_complete"] = True
         return OperationExecution(
             self.operation.operation_id,
             self.operation.executor_robot_id,
