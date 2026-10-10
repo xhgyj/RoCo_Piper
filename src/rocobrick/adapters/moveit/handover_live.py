@@ -52,6 +52,7 @@ from rocobrick.robot_operation_plan import RobotOperation
 from rocobrick.runtime_session import MultiRobotIsaacMoveItSession
 from rocobrick.skills.coordinated_handover import (
     CoordinatedHandoverBackend,
+    CoordinatedHandoverPreparation,
     HandoverPhaseReceipt,
 )
 from rocobrick.skills.handover_contact import (
@@ -217,6 +218,7 @@ class LiveSimulationHandover:
             execution_capabilities=EXECUTION_CAPABILITIES,
             phase_timeout_s=90.0,
             simulation_authorization=self.authorization,
+            staged_preparation=True,
         )
         self.backend = CoordinatedHandoverBackend(self.factory, self, ledger)
         self.continuation = StationaryHandoverContinuation(session, ledger, self)
@@ -420,8 +422,9 @@ class LiveSimulationHandover:
             program.request.scene_snapshot,
             program.capabilities,
         )
-        shared = await asyncio.to_thread(self.session.observe_handover_scene)
-        snapshot = shared["scene_snapshot"]
+        # The independent monitor returns physics directly, unlike the idle
+        # planning observer's scene_snapshot/version/start_state envelope.
+        snapshot = await asyncio.to_thread(self.session.observe_handover_scene)
         donor, receiver, physical = (
             program.identity.donor_robot_id,
             program.identity.receiver_robot_id,
@@ -494,6 +497,11 @@ class LiveSimulationHandover:
         self._validate_contact_binding(program)
         if op_id in self.stopped or program.current_binding() != program.binding_sha256:
             raise ValueError("HANDOVER canceled or mutated before phase admission")
+        if isinstance(program, CoordinatedHandoverPreparation) and phase not in {
+            "receiver_open",
+            "rendezvous",
+        }:
+            raise ValueError("preparation program cannot authorize contact or release")
         shared = await asyncio.to_thread(self.session.observe_shared_scene)
         self.phases[op_id] = phase
         provider = self.providers[op_id]
@@ -521,7 +529,12 @@ class LiveSimulationHandover:
         target = dict(initial)
         for i in (1, 2):
             name = f"{robot}_gripper_joint{i}"
-            target[name] = getattr(p.paths, phase)[-1][name]
+            states = (
+                p.receiver_open
+                if isinstance(p, CoordinatedHandoverPreparation)
+                else getattr(p.paths, phase)
+            )
+            target[name] = states[-1][name]
         geometry = provider.geometry
         if not geometry.certify_segment(
             initial,
@@ -592,15 +605,10 @@ class LiveSimulationHandover:
         geometry = provider.geometry
         current = dict(shared["start_state"])
         if phase == "approach":
-            from rocobrick.skills.handover_region import candidate_from_endpoint
-
-            # Rebase only the short handler insertion on the measured arrival.
-            # No MoveGroup query, nominal endpoint replacement, or giver motion.
-            actual = candidate_from_endpoint(
-                p.request,
-                geometry.tcp_pose(p.identity.donor_robot_id, current),
-                geometry.tcp_pose(p.identity.receiver_robot_id, current),
-            )
+            # Rebase final contact on measured two-arm arrival. The local
+            # handler aligns receiver before insertion; no global query or
+            # giver motion occurs after joint preparation has completed.
+            actual = provider.rebase_receiver_contact(p.request, p.candidate, current)
             observed_object = shared["scene_snapshot"]["bricks"][
                 p.identity.physical_instance_id
             ]["pose"]
@@ -614,24 +622,23 @@ class LiveSimulationHandover:
                 or error[1] > p.request.profile.relative_orientation_tolerance_rad
             ):
                 raise ValueError("approach: measured carried-object transform drift")
-            states = provider._cartesian(
+            states = provider.receiver_approach_from_arrival(
                 p.request,
-                p.identity.receiver_robot_id,
+                actual,
                 current,
-                actual.receiver_precontact,
-                actual.receiver_contact,
                 deadline_s=time.monotonic() + 20,
-                holder=p.identity.donor_robot_id,
-                receiver_touch=True,
-                finger_contact=True,
             )
             if states is None:
                 raise ValueError(
-                    "approach: measured Cartesian insertion failed: "
+                    "approach: measured receiver alignment/insertion failed: "
                     f"{provider._cartesian_failure}"
                 )
             states = list(states)
         elif phase == "rendezvous":
+            if p.rendezvous is None:
+                raise ValueError(
+                    "arrival continuation cannot execute preparation again"
+                )
             states = []
             for index in range(len(p.rendezvous.trajectories[0].points)):
                 state = dict(current)
@@ -738,6 +745,7 @@ class LiveSimulationHandover:
             current,
             SynchronizationPolicy(0.02, TRACKING_ERROR_RAD, 0.2),
             p.phase_timeout_s,
+            moving_physical_instance_id=p.identity.physical_instance_id,
         )
         self.active[p.identity.operation_id] = ("motion", request_id, "")
         proofs = self._proofs(p)
@@ -761,6 +769,27 @@ class LiveSimulationHandover:
                 and lifecycle.get("prepared_binding_sha256") == request.binding_sha256
                 and lifecycle.get("replanned") is False
             )
+            arrival_evidence = {}
+            if passed and phase == "rendezvous":
+                arrived = await asyncio.to_thread(self.session.observe_shared_scene)
+                arrival_evidence = {
+                    "measured_start_state": current,
+                    "measured_arrival_state": dict(arrived["start_state"]),
+                    "measured_arm_delta_rad": {
+                        r: max(
+                            abs(
+                                arrived["start_state"][f"{r}_joint{i}"]
+                                - current[f"{r}_joint{i}"]
+                            )
+                            for i in range(1, 7)
+                        )
+                        for r in p.participants
+                    },
+                    "start_barrier_sim_time_s": lifecycle.get(
+                        "start_barrier_sim_time_s"
+                    ),
+                    "preparation_only": isinstance(p, CoordinatedHandoverPreparation),
+                }
             return self._receipt(
                 p,
                 phase,
@@ -777,6 +806,7 @@ class LiveSimulationHandover:
                     "handler_cartesian_rebased": phase == "approach",
                     "prepared_binding_sha256": request.binding_sha256,
                     "runtime": to_json_value(lifecycle),
+                    **arrival_evidence,
                     "simulation_only": True,
                     "collision_semantics": "nominal_mesh_and_measured_contact_guard"
                     if phase in CONTACT_PHASES

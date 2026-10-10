@@ -74,6 +74,10 @@ class PreparedMotionRequest:
     start_state: Mapping[str, float]
     policy: SynchronizationPolicy
     timeout_s: float
+    # A staged HANDOVER carries exactly one identified brick during the
+    # prepared dual-arm path.  Its rigid pose/AABB may advance with the giver;
+    # every other brick and every static environment collider remains bound.
+    moving_physical_instance_id: str | None = None
     max_scene_age_s: float = 0.5
     start_tolerance_rad: float = 0.002
     scene_position_tolerance_m: float = 0.001
@@ -118,6 +122,12 @@ class PreparedMotionRequest:
             raise ValueError(
                 "trajectory synchronization budget exceeds execution policy"
             )
+        if self.moving_physical_instance_id is not None and (
+            not isinstance(self.moving_physical_instance_id, str)
+            or not self.moving_physical_instance_id
+            or self.moving_physical_instance_id not in self.scene_snapshot.get("bricks", {})
+        ):
+            raise ValueError("prepared moving object is not an identified captured brick")
         snapshot = json.loads(json.dumps(self.scene_snapshot, allow_nan=False))
         object.__setattr__(self, "scene_snapshot", snapshot)
         object.__setattr__(self, "start_state", dict(self.start_state))
@@ -202,10 +212,23 @@ class PreparedMotionRequest:
                 or snapshot.get(key) is None
             ):
                 raise ValueError("prepared scene identity/model/calibration changed")
-        if not self.scene_snapshot.get("environment_colliders") or (
-            snapshot.get("environment_colliders")
-            != self.scene_snapshot["environment_colliders"]
-        ):
+        captured_environment = self.scene_snapshot.get("environment_colliders")
+        live_environment = snapshot.get("environment_colliders")
+        if not isinstance(captured_environment, Mapping) or not isinstance(
+            live_environment, Mapping
+        ) or not captured_environment:
+            raise ValueError("prepared environment geometry changed or is unavailable")
+        # The carried brick's collider is part of the moving physical object,
+        # not a static environment obstacle. Keep all non-object colliders
+        # exactly bound, and reject additions/removals even for the moving
+        # object. Static brick poses/AABBs are checked below.
+        moving = self.moving_physical_instance_id
+        for name, before in captured_environment.items():
+            if moving is not None and name.startswith("/World/managed/Parts/"):
+                continue
+            if name not in live_environment or live_environment[name] != before:
+                raise ValueError("prepared environment geometry changed or is unavailable")
+        if set(live_environment) != set(captured_environment):
             raise ValueError("prepared environment geometry changed or is unavailable")
         if set(joints) != set(self.start_state):
             raise ValueError("prepared live joint coverage changed")
@@ -234,24 +257,35 @@ class PreparedMotionRequest:
                     _pose(before.get(pose_key), "captured pose"),
                     _pose(after.get(pose_key), "live pose"),
                 )
-                if (
+                is_moving_object = key == "bricks" and identity == moving
+                if not is_moving_object and (
                     position > self.scene_position_tolerance_m
                     or rotation > self.scene_orientation_tolerance_rad
                 ):
                     raise ValueError(f"prepared live geometry drifted: {identity}")
                 if key == "bricks":
-                    for bounds in ("aabb_min", "aabb_max"):
-                        if (
-                            max(
-                                abs(a - b)
-                                for a, b in zip(
-                                    _vector(before.get(bounds), 3, "captured bounds"),
-                                    _vector(after.get(bounds), 3, "live bounds"),
-                                )
-                            )
-                            > self.scene_position_tolerance_m
+                    before_min = _vector(before.get("aabb_min"), 3, "captured bounds")
+                    before_max = _vector(before.get("aabb_max"), 3, "captured bounds")
+                    after_min = _vector(after.get("aabb_min"), 3, "live bounds")
+                    after_max = _vector(after.get("aabb_max"), 3, "live bounds")
+                    # A carried object may translate/rotate, but its authored
+                    # collision dimensions must remain unchanged.
+                    before_span = tuple(b - a for a, b in zip(before_min, before_max))
+                    after_span = tuple(b - a for a, b in zip(after_min, after_max))
+                    if is_moving_object:
+                        if any(
+                            abs(a - b) > self.scene_position_tolerance_m
+                            for a, b in zip(before_span, after_span)
                         ):
                             raise ValueError("prepared collision envelope drifted")
+                    elif any(
+                        abs(a - b) > self.scene_position_tolerance_m
+                        for a, b in zip(before_min, after_min)
+                    ) or any(
+                        abs(a - b) > self.scene_position_tolerance_m
+                        for a, b in zip(before_max, after_max)
+                    ):
+                        raise ValueError("prepared collision envelope drifted")
 
     def serialize(self) -> dict[str, object]:
         """Return an exact-key mailbox envelope with a complete immutable binding."""

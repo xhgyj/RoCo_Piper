@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+from dataclasses import replace
 from types import SimpleNamespace
 
 import pytest
@@ -79,6 +80,19 @@ def live_scene(request):
     scene = copy.deepcopy(request.scene_snapshot)
     scene.update(sequence=20, sim_time_s=2.0, scene_digest="e" * 64)
     return scene
+
+
+def test_prepared_allows_only_bound_carried_brick_to_move():
+    """A staged carrying path admits one identified brick's rigid motion."""
+    request = replace(
+        prepared_request(), moving_physical_instance_id="brick-1"
+    )
+    scene = live_scene(request)
+    brick = scene["bricks"]["brick-1"]
+    brick["pose"]["position_xyz"][0] += 0.05
+    brick["aabb_min"][0] += 0.05
+    brick["aabb_max"][0] += 0.05
+    request.validate_live(scene, 1, dict(request.start_state), 2.01)
 
 
 def test_prepared_round_trip_and_advancing_query_clock():
