@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from rocobrick.stap_contract import StapPlan, StructuralPart
+from rocobrick.expanded_bricks import expanded_lego_library
 
 
 class TopologyError(ValueError):
@@ -36,9 +37,14 @@ ColorParser = Callable[[str], tuple[int, int, int]]
 
 def _default_converter() -> tuple[TopologyConverter, ColorParser]:
     from bricksim.colors import parse_color
-    from bricksim.topology.legolization import legolization_json_to_topology_json
+    from bricksim.topology.legolization import legolization_json_to_topology_json, load_default_lego_library
 
-    return legolization_json_to_topology_json, parse_color
+    library = expanded_lego_library(load_default_lego_library())
+
+    def converter(structure, **kwargs):
+        return legolization_json_to_topology_json(structure, lego_library=library, **kwargs)
+
+    return converter, parse_color
 
 
 def _grid_record(part: StructuralPart) -> dict[str, object]:
