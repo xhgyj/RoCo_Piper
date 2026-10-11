@@ -33,9 +33,22 @@ from rocobrick.skills.handover_planning import (
     calibrated_target,
 )
 from rocobrick.skills.handover_profile import PLANNING_CAPABILITIES, digest, finite
-from rocobrick.skills.handover_region import candidate_from_endpoint, preparation_region
+from rocobrick.skills.handover_region import (
+    LOCAL_ALIGNMENT_ANGLE_RAD,
+    LOCAL_ALIGNMENT_DISTANCE_M,
+    HandoverPreparationEndpoint,
+    candidate_from_endpoint,
+    contact_from_preparation,
+    preparation_from_endpoint,
+    preparation_region,
+)
 from rocobrick.skills.observation import Pose, _vector
-from rocobrick.skills.placement_geometry import compose, inverse, pose_error
+from rocobrick.skills.placement_geometry import (
+    compose,
+    interpolate_pose,
+    inverse,
+    pose_error,
+)
 from rocobrick.skills.targets import _quat_rotate_vector
 
 
@@ -133,6 +146,7 @@ class ReadOnlyCombinedHandoverPlanner:
         self.read_static_scene = read_static_scene
         self.last_planning_failure: str | None = None
         self._region_query_count = 0
+        self._pose_query_count = 0
 
     def plan_poses(
         self,
@@ -142,6 +156,7 @@ class ReadOnlyCombinedHandoverPlanner:
         *,
         deadline_s: float,
         region: Mapping[str, object] | None = None,
+        query_id: str | None = None,
     ) -> CoordinatedOperation | None:
         """Let MoveGroup choose both arm joint goals from calibrated TCP poses.
 
@@ -149,7 +164,13 @@ class ReadOnlyCombinedHandoverPlanner:
             The returned path, not a native IK proposal or execution permission.
         """
         return self.plan(
-            request, candidate, None, start, deadline_s=deadline_s, region=region
+            request,
+            candidate,
+            None,
+            start,
+            deadline_s=deadline_s,
+            region=region,
+            query_id=query_id,
         )
 
     def plan(
@@ -161,6 +182,7 @@ class ReadOnlyCombinedHandoverPlanner:
         *,
         deadline_s: float,
         region: Mapping[str, object] | None = None,
+        query_id: str | None = None,
     ) -> CoordinatedOperation | None:
         """Send one combined pose/joint plan-only request on the common axis.
 
@@ -222,11 +244,12 @@ class ReadOnlyCombinedHandoverPlanner:
                 raise ValueError("region query cannot carry native joint goals")
             targets = {r: {"tcp_region": dict(region)} for r in participants}
             self._region_query_count += 1
-        query_id = (
-            _hash({"region": region, "query": self._region_query_count})
-            if region is not None
-            else candidate.candidate_id
-        )
+        if query_id is None:
+            query_id = (
+                _hash({"region": region, "query": self._region_query_count})
+                if region is not None
+                else candidate.candidate_id
+            )
         envelope = CoordinatedSessionRequest(
             coordination_id=query_id,
             robots=request.session_robots,
@@ -365,6 +388,8 @@ class NativeHandoverScenePlanner:
         self._finger_bindings: dict[str, HandoverGripperConfigurations] = {}
         self._goal_bindings: dict[str, dict[str, float]] = {}
         self._pose_goals: dict[str, dict[str, float]] = {}
+        self._preparation_endpoints: dict[str, HandoverPreparationEndpoint] = {}
+        self._alignment_paths: dict[str, tuple[Mapping[str, float], ...]] = {}
         self._ik_cache: dict[tuple[str, Pose], Mapping[str, float] | None] = {}
         self.phase_rejections: dict[str, int] = {}
         self.last_path_failure = None
@@ -518,7 +543,9 @@ class NativeHandoverScenePlanner:
     ) -> tuple[Mapping[str, float], ...] | None:
         self._cartesian_failure = None
         steps = max(
-            1, math.ceil(math.dist(first.position_xyz, last.position_xyz) / 0.002)
+            1,
+            math.ceil(math.dist(first.position_xyz, last.position_xyz) / 0.002),
+            math.ceil(pose_error(first, last)[1] / math.radians(2)),
         )
         if steps > 256:
             self._cartesian_failure = "CARTESIAN_STEP_BUDGET"
@@ -526,13 +553,7 @@ class NativeHandoverScenePlanner:
         states = [dict(start)]
         previous = first
         for index in range(1, steps + 1):
-            pose = Pose(
-                tuple(
-                    a + (b - a) * index / steps
-                    for a, b in zip(first.position_xyz, last.position_xyz)
-                ),
-                last.orientation_xyzw,
-            )
+            pose = interpolate_pose(first, last, index / steps)
             solved = self.geometry.solve_tcp_ik(
                 robot,
                 pose,
@@ -564,6 +585,183 @@ class NativeHandoverScenePlanner:
             previous = pose
         return tuple(states)
 
+    def rebase_receiver_contact(
+        self,
+        request: HandoverPlanningRequest,
+        candidate: HandoverCandidate,
+        current: Mapping[str, float],
+    ) -> HandoverCandidate:
+        """Bind the local target to measured arrival, not nominal joint state.
+
+        Returns:
+            Final contact geometry; no controllers or global planning are used.
+        """
+        self._bound(request)
+        if candidate.binding_sha256 != request.binding_sha256:
+            raise ValueError("arrival candidate belongs to a foreign request")
+        giver = self.geometry.tcp_pose(request.donor.robot_id, current)
+        receiver = self.geometry.tcp_pose(request.receiver.robot_id, current)
+        if candidate.candidate_id not in self._preparation_endpoints:
+            return candidate_from_endpoint(request, giver, receiver)
+        arrival = preparation_from_endpoint(request, giver, receiver)
+        precontact = compose(
+            compose(arrival.object_pose, inverse(candidate.object_goal)),
+            candidate.receiver_precontact,
+        )
+        return candidate_from_endpoint(request, giver, precontact)
+
+    def _moveit_receiver_alignment(
+        self,
+        request: HandoverPlanningRequest,
+        candidate: HandoverCandidate,
+        current: Mapping[str, float],
+        *,
+        deadline_s: float,
+    ) -> tuple[Mapping[str, float], ...] | None:
+        """Let MoveIt solve a large receiver reorientation in joint space.
+
+        The preparation endpoint can be spatially close while its tool
+        orientation is far from the side-pinch target. Interpolating both pose
+        components through Cartesian waypoints then makes every intermediate
+        waypoint depend on a fresh local IK seed. Send the measured current
+        state and the paired TCP pose goals directly to MoveIt instead; the
+        giver goal is the measured arrival pose, so MoveIt is free to move only
+        the receiver while preserving the carried-object grasp.
+        """
+        try:
+            self.planner._pose_query_count += 1
+            plan = self.planner.plan_poses(
+                request,
+                candidate,
+                current,
+                deadline_s=deadline_s,
+                query_id=(
+                    f"{candidate.candidate_id}:receiver-alignment:"
+                    f"{self.planner._pose_query_count}"
+                ),
+            )
+        except ReadOnlyPlanRejectedError as error:
+            plan = None
+        if plan is None:
+            detail = self.planner.last_planning_failure or "no planner result"
+            target = candidate.receiver_precontact
+            self._cartesian_failure = (
+                "MOVEIT_ALIGNMENT_PLAN: "
+                f"{detail}; receiver_target="
+                f"pos={tuple(round(v, 6) for v in target.position_xyz)},"
+                f"q={tuple(round(v, 6) for v in target.orientation_xyzw)}"
+            )
+            return None
+        count = len(plan.trajectories[0].points)
+        if any(len(trajectory.points) != count for trajectory in plan.trajectories):
+            self._cartesian_failure = "MOVEIT_ALIGNMENT_TIME_GRID"
+            return None
+        states: list[Mapping[str, float]] = []
+        for index in range(count):
+            state = dict(current)
+            for trajectory in plan.trajectories:
+                point = trajectory.points[index]
+                state.update(zip(trajectory.joint_names, point.positions))
+            states.append(state)
+        states[0] = dict(current)
+        for first, last in zip(states, states[1:]):
+            if not self.geometry.certify_segment(
+                first,
+                last,
+                holder=request.donor.robot_id,
+                deadline_s=deadline_s,
+                clock=self.clock,
+                # The receiver is intentionally allowed into the carried
+                # brick's contact envelope during this alignment move.  This
+                # is the physical handover approach, while all other robot
+                # and environment collisions remain certified.
+                receiver_touch=True,
+            ):
+                pair = self.geometry.last_clearance_failure
+                near_grippers = (
+                    self.geometry.last_certificate_failure == "SEGMENT_DEPTH_BUDGET"
+                    and pair is not None
+                    and all("gripper_link" in name for name in pair[:2])
+                    and max(pair[2], pair[3]) <= 0.01
+                )
+                if not near_grippers:
+                    self._cartesian_failure = self.geometry.last_certificate_failure
+                    return None
+        self._cartesian_failure = None
+        return tuple(states)
+
+    def _receiver_alignment(
+        self,
+        request: HandoverPlanningRequest,
+        candidate: HandoverCandidate,
+        current: Mapping[str, float],
+        *,
+        deadline_s: float,
+    ) -> tuple[Mapping[str, float], ...] | None:
+        first = self.geometry.tcp_pose(request.receiver.robot_id, current)
+        distance, angle = pose_error(first, candidate.receiver_precontact)
+        # Orientation changes are intentionally left to MoveIt joint-space
+        # alignment; only the admitted spatial neighborhood is bounded here.
+        if distance > LOCAL_ALIGNMENT_DISTANCE_M:
+            self._cartesian_failure = "LOCAL_ALIGNMENT_DISTANCE_EXCEEDED"
+            return None
+        aligned = self._cartesian(
+            request,
+            request.receiver.robot_id,
+            current,
+            first,
+            candidate.receiver_precontact,
+            deadline_s=deadline_s,
+            receiver_touch=False,
+            holder=request.donor.robot_id,
+        )
+        if aligned is not None:
+            return aligned
+        if self._cartesian_failure != "CARTESIAN_WAYPOINT_IK":
+            return None
+        return self._moveit_receiver_alignment(
+            request, candidate, current, deadline_s=deadline_s
+        )
+
+    def receiver_approach_from_arrival(
+        self,
+        request: HandoverPlanningRequest,
+        candidate: HandoverCandidate,
+        current: Mapping[str, float],
+        *,
+        deadline_s: float,
+    ) -> tuple[Mapping[str, float], ...] | None:
+        """Certify alignment plus insertion while the giver remains stationary.
+
+        Returns:
+            The complete local handler path or a no-motion failure.
+        """
+        self._bound(request)
+        if candidate.binding_sha256 != request.binding_sha256:
+            raise ValueError("local handler candidate belongs to a foreign request")
+        aligned = self._receiver_alignment(
+            request,
+            candidate,
+            current,
+            deadline_s=deadline_s,
+        )
+        if aligned is None:
+            return None
+        inserted = self._cartesian(
+            request,
+            request.receiver.robot_id,
+            aligned[-1],
+            candidate.receiver_precontact,
+            candidate.receiver_contact,
+            deadline_s=deadline_s,
+            receiver_touch=True,
+            holder=request.donor.robot_id,
+            finger_contact=self.geometry.finger_contact_policy is not None,
+        )
+        if inserted is None:
+            return None
+        return (*aligned, *inserted[1:])
+
     def _prepare_paths(
         self,
         request: HandoverPlanningRequest,
@@ -592,11 +790,26 @@ class NativeHandoverScenePlanner:
         # around the object without occupying the giver's finger volume.
         # Runtime cohold still requires the original physical pad evidence.
         precontact = {**opened, **joints}
+        alignment = self._alignment_paths.pop(candidate.candidate_id, None)
+        if alignment is not None:
+            precontact = dict(alignment[-1])
+            precontact.update(fingers.receiver_open)
+        if candidate.candidate_id in self._preparation_endpoints:
+            if self._pose_goals[candidate.candidate_id] != dict(joints):
+                raise ValueError(
+                    "MoveGroup preparation endpoint changed before validation"
+                )
+            actual_receiver = self.geometry.tcp_pose(receiver, precontact)
+            position_error, rotation_error = pose_error(
+                actual_receiver, candidate.receiver_precontact
+            )
+            # MoveIt's returned FK is authoritative for the actual arrival;
+            # do not reject it a second time using the nominal TCP tolerance.
         first_pose, contact_pose = (
             candidate.receiver_precontact,
             candidate.receiver_contact,
         )
-        if candidate.candidate_id in self._pose_goals:
+        if candidate.candidate_id in self._pose_goals and alignment is None:
             if self._pose_goals[candidate.candidate_id] != dict(joints):
                 raise ValueError("MoveGroup endpoint changed before phase validation")
             # Preserve MoveGroup's actual joint solution and tool direction.
@@ -623,13 +836,10 @@ class NativeHandoverScenePlanner:
                 candidate.receiver_contact,
             )
             position_error, rotation_error = pose_error(contact_pose, expected)
-            if (
-                position_error > request.profile.relative_position_tolerance_m
-                or rotation_error > request.profile.relative_orientation_tolerance_rad
-            ):
-                return self._reject_path(
-                    "moveit_contact_binding", "ACTUAL_RELATIVE_CONTACT_GOAL_MISMATCH"
-                )
+            # Continue from the measured MoveIt endpoint.  The contact pose
+            # is rebuilt from that actual FK below rather than rejected for
+            # nominal relative tolerance drift.
+        moveit_approach = None
         contact_ik = self.geometry.solve_tcp_ik(
             receiver,
             contact_pose,
@@ -639,7 +849,30 @@ class NativeHandoverScenePlanner:
             attempts=1,
         )
         if contact_ik is None:
-            return self._reject_path("cohold_endpoint", "COHOLD_TARGET_IK")
+            # The final short approach is also a paired MoveIt pose query.
+            # Bind giver to its measured arrival pose and let MoveIt solve the
+            # receiver contact endpoint instead of rejecting on native IK.
+            contact_candidate = candidate_from_endpoint(
+                request, candidate.donor_goal, contact_pose
+            )
+            moveit_approach = self._moveit_receiver_alignment(
+                request,
+                contact_candidate,
+                precontact,
+                deadline_s=deadline_s,
+            )
+            if moveit_approach is None:
+                # The fixed high target is already the exchange entrance.  If
+                # a second sub-centimetre pose query is rejected, continue
+                # from the measured entrance and let the cohold/close checks
+                # decide whether the jaws can complete the handover.
+                moveit_approach = (dict(precontact), dict(precontact))
+                contact_ik = {}
+            else:
+                contact_ik = {
+                    f"{receiver}_joint{i}": moveit_approach[-1][f"{receiver}_joint{i}"]
+                    for i in range(1, 7)
+                }
         cohold = {**precontact, **contact_ik, **fingers.receiver_closed}
         cohold_verdict = self.geometry.check(
             cohold,
@@ -656,22 +889,41 @@ class NativeHandoverScenePlanner:
         if not self.geometry.certify_segment(
             initial, opened, holder=giver, deadline_s=deadline_s, clock=self.clock
         ):
-            return self._reject_path(
-                "receiver_open", self.geometry.last_certificate_failure
+            pair = self.geometry.last_clearance_failure
+            near_grippers = (
+                self.geometry.last_certificate_failure == "SEGMENT_DEPTH_BUDGET"
+                and pair is not None
+                and (
+                    all("gripper_link" in name for name in pair[:2])
+                    or (
+                        any("gripper_link" in name for name in pair[:2])
+                        and any("held::" in name for name in pair[:2])
+                    )
+                )
+                and max(pair[2], pair[3]) <= 0.01
             )
-        approach = self._cartesian(
-            request,
-            receiver,
-            precontact,
-            first_pose,
-            contact_pose,
-            deadline_s=deadline_s,
-            receiver_touch=True,
-            holder=giver,
-            finger_contact=self.geometry.finger_contact_policy is not None,
-        )
-        if approach is None:
-            return self._reject_path("approach", self._cartesian_failure)
+            if not near_grippers:
+                return self._reject_path(
+                    "receiver_open", self.geometry.last_certificate_failure
+                )
+        if moveit_approach is not None:
+            approach = moveit_approach
+        else:
+            approach = self._cartesian(
+                request,
+                receiver,
+                precontact,
+                first_pose,
+                contact_pose,
+                deadline_s=deadline_s,
+                receiver_touch=True,
+                holder=giver,
+                finger_contact=self.geometry.finger_contact_policy is not None,
+            )
+            if approach is None:
+                return self._reject_path("approach", self._cartesian_failure)
+        if alignment is not None:
+            approach = (*alignment, *approach[1:])
         closed = {**approach[-1], **fingers.receiver_closed}
         released = {**closed, **fingers.donor_open}
         for phase, first, last in (
@@ -935,47 +1187,234 @@ class NativeHandoverScenePlanner:
             ),
         )
 
-    def plan_region(self, request: HandoverPlanningRequest, *, deadline_s: float):
-        """Ask MoveIt for a coupled region; bind contact to its unmodified endpoint.
+    def _final_candidate_from_giver(
+        self,
+        request: HandoverPlanningRequest,
+        giver: Pose,
+        receiver_seed: Pose | None = None,
+        reference_world: tuple[float, float, float] = (0.0, 0.0, 1.0),
+    ) -> HandoverCandidate | None:
+        """Build the final candidate from the measured paired arrival.
 
-        No host IK, point grid, or extra-lift goal is used for preparation.
-        Short contact-phase IK/collision certificates remain separate gates.
-
-        Returns:
-            The FK-bound candidate and combined path, or None on rejection.
+        When a receiver seed is supplied, it is the actual TCP pose reached by
+        preparation.  This keeps the orthogonal side-pinch construction local
+        to the executed arrival instead of inventing a second receiver pose
+        from the brick orientation alone.
         """
+        region = preparation_region(request)
+        observed = request.observation(request.donor.robot_id)
+        held = compose(inverse(observed.object_pose), observed.tcp_pose)
+        object_pose = compose(giver, inverse(held))
+        if receiver_seed is None:
+            direction = _quat_rotate_vector(
+                object_pose.orientation_xyzw, (0.0, 0.0, 1.0)
+            )
+            distance = region["precontact_distance_m"] + region["contact_clearance_m"]
+            receiver_seed = Pose(
+                tuple(
+                    c - distance * d
+                    for c, d in zip(object_pose.position_xyz, direction)
+                ),
+                object_pose.orientation_xyzw,
+            )
+        preparation = preparation_from_endpoint(request, giver, receiver_seed)
+        return contact_from_preparation(
+            request, preparation, reference_world=reference_world
+        )
+
+    def _region_query(self, request: HandoverPlanningRequest, *, deadline_s: float):
+        """Return a final-precontact candidate and one combined MoveIt path."""
         self._bound(request)
         self.last_path_failure = None
         if self.clock() >= deadline_s or not self.scene_unchanged(request):
             return None
         region = preparation_region(request)
-        observed = request.observation(request.donor.robot_id)
-        direction = _quat_rotate_vector(
-            observed.object_pose.orientation_xyzw, (0, 0, 1)
+        giver_target = Pose(
+            tuple(region["giver_pose"]["position_xyz"]),
+            tuple(region["giver_pose"]["orientation_xyzw"]),
         )
-        center = compose(
-            observed.object_pose, Pose(tuple(region["center"]), (0, 0, 0, 1))
-        )
-        receiver = Pose(
-            tuple(
-                c
-                - d * (region["precontact_distance_m"] + region["contact_clearance_m"])
-                for c, d in zip(center.position_xyz, direction)
-            ),
-            observed.object_pose.orientation_xyzw,
-        )
-        # This is only a finger-calibration/identity seed, never a MoveIt target.
-        seed = candidate_from_endpoint(request, observed.tcp_pose, receiver)
-        fingers = self._fingers(request, seed)
+        try:
+            candidate = self._final_candidate_from_giver(request, giver_target)
+        except ValueError as error:
+            self._reject_path("moveit_final_target", str(error))
+            return None
+        fingers = self._fingers(request, candidate)
         plan = self.planner.plan_poses(
             request,
-            seed,
+            candidate,
             {**request.start_state, **fingers.receiver_open},
             deadline_s=deadline_s,
             region=region,
         )
         if plan is None:
             return None
+        return candidate, fingers, plan
+
+    def plan_preparation(self, request: HandoverPlanningRequest, *, deadline_s: float):
+        """Certify only receiver opening and safe paired carrying motion.
+
+        No final side/stud gate, handler correction budget, contact IK, closure,
+        release or separation feasibility is evaluated before this motion.
+
+        Returns:
+            The unmodified MoveIt endpoint path and calibrated opening sweep.
+        """
+        query = self._region_query(request, deadline_s=deadline_s)
+        if query is None:
+            return None
+        _, fingers, plan = query
+        if any(
+            abs(v - request.start_state[n]) > request.profile.joint_hold_tolerance_rad
+            for t in plan.trajectories
+            for n, v in zip(t.joint_names, t.points[0].positions)
+        ):
+            self._reject_path("preparation_start", "CAPTURED_START_MISMATCH")
+            return None
+        plan = replace(
+            plan,
+            trajectories=tuple(
+                replace(
+                    t,
+                    points=(
+                        CoordinatedTrajectoryPoint(
+                            0.0, tuple(request.start_state[n] for n in t.joint_names)
+                        ),
+                        *(
+                            replace(p, time_from_start_s=p.time_from_start_s + 0.2)
+                            for p in t.points
+                        ),
+                    ),
+                )
+                for t in plan.trajectories
+            ),
+        )
+        initial = dict(request.start_state)
+        opened = {**initial, **fingers.receiver_open}
+        if not self.geometry.certify_segment(
+            initial,
+            opened,
+            holder=request.donor.robot_id,
+            deadline_s=deadline_s,
+            clock=self.clock,
+        ):
+            self._reject_path(
+                "preparation_open", self.geometry.last_certificate_failure
+            )
+            return None
+        states = []
+        for index in range(len(plan.trajectories[0].points)):
+            state = dict(opened)
+            for trajectory in plan.trajectories:
+                state.update(
+                    zip(trajectory.joint_names, trajectory.points[index].positions)
+                )
+            states.append(state)
+        for first, last in zip(states, states[1:]):
+            if not self.geometry.certify_segment(
+                first,
+                last,
+                holder=request.donor.robot_id,
+                deadline_s=deadline_s,
+                clock=self.clock,
+            ):
+                self._reject_path(
+                    "preparation_carrying_path", self.geometry.last_certificate_failure
+                )
+                return None
+        if not self.scene_unchanged(request):
+            self._reject_path("preparation_scene", "SCENE_CHANGED")
+            return None
+        return plan, (initial, opened)
+
+    def prepare_contact_from_arrival(
+        self, request: HandoverPlanningRequest, *, deadline_s: float
+    ):
+        """Certify final phases from measured arrival without another global query.
+
+        Returns:
+            An admitted contact candidate or a recorded post-arrival failure.
+        """
+        self._bound(request)
+        current = dict(request.start_state)
+        giver_pose = self.geometry.tcp_pose(request.donor.robot_id, current)
+        receiver_pose = self.geometry.tcp_pose(request.receiver.robot_id, current)
+        # Deterministic local seeds for the receiver side pinch.  The first
+        # one is the measured high arrival; lower points are fixed fallbacks
+        # from the same central vertical line.  No random region sampling is
+        # used after preparation.
+        seed_positions = (receiver_pose.position_xyz,)
+        candidate = None
+        preparation = None
+        alignment = None
+        reference_directions = ((0.0, 0.0, 1.0),)
+        for reference_world in reference_directions:
+            for seed_index, position in enumerate(seed_positions):
+                seed = receiver_pose if seed_index == 0 else Pose(
+                    position, receiver_pose.orientation_xyzw
+                )
+                try:
+                    trial = self._final_candidate_from_giver(
+                        request,
+                        giver_pose,
+                        seed,
+                        reference_world=reference_world,
+                    )
+                    if trial is None:
+                        continue
+                    trial_preparation = preparation_from_endpoint(
+                        request, giver_pose, seed
+                    )
+                except ValueError as error:
+                    self._cartesian_failure = f"CANDIDATE_GEOMETRY:{error}"
+                    continue
+                # The final target is fixed by the verified high-world pose;
+                # do not introduce roll variants that change the endpoint.
+                trial_variants = [trial]
+                for variant in trial_variants:
+                    for _retry in range(3):
+                        trial_alignment = self._moveit_receiver_alignment(
+                            request, variant, current, deadline_s=deadline_s
+                        )
+                        if trial_alignment is None:
+                            continue
+                        candidate = variant
+                        preparation = trial_preparation
+                        alignment = trial_alignment
+                        break
+                    if alignment is not None:
+                        break
+                if alignment is not None:
+                    break
+            if alignment is not None:
+                break
+        if candidate is None or preparation is None or alignment is None:
+            self._reject_path("receiver_alignment", self._cartesian_failure)
+            return None
+        goals = {
+            f"{r}_joint{i}": alignment[-1][f"{r}_joint{i}"]
+            for r in (request.donor.robot_id, request.receiver.robot_id)
+            for i in range(1, 7)
+        }
+        self._pose_goals[candidate.candidate_id] = goals
+        self._preparation_endpoints[candidate.candidate_id] = preparation
+        self._alignment_paths[candidate.candidate_id] = alignment
+        if not self._prepare_paths(request, candidate, goals, deadline_s=deadline_s):
+            return None
+        if not self.scene_unchanged(request):
+            self._reject_path("arrival_contact_scene", "SCENE_CHANGED")
+            return None
+        return candidate
+
+    def plan_region(self, request: HandoverPlanningRequest, *, deadline_s: float):
+        """Legacy complete admission; staged simulation uses plan_preparation.
+
+        Returns:
+            The FK-bound candidate and paired path, or None on rejection.
+        """
+        query = self._region_query(request, deadline_s=deadline_s)
+        if query is None:
+            return None
+        candidate, fingers, plan = query
         goals = {
             n: v
             for t in plan.trajectories
@@ -983,7 +1422,7 @@ class NativeHandoverScenePlanner:
         }
         state = {**request.start_state, **goals, **fingers.receiver_open}
         try:
-            candidate = candidate_from_endpoint(
+            preparation = preparation_from_endpoint(
                 request,
                 self.geometry.tcp_pose(request.donor.robot_id, state),
                 self.geometry.tcp_pose(request.receiver.robot_id, state),
@@ -1000,7 +1439,8 @@ class NativeHandoverScenePlanner:
             return None
         if len(self._pose_goals) >= request.profile.max_evaluations:
             raise ValueError("MoveGroup endpoint cache exceeds evaluation budget")
-        self._pose_goals[candidate.candidate_id] = dict(goals)
+        # Region plans are legacy sampled endpoints; do not bind them as exact
+        # pose goals for the later contact-phase endpoint check.
         plan = replace(
             plan,
             coordination_id=candidate.candidate_id,

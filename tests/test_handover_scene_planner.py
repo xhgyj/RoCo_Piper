@@ -167,7 +167,7 @@ def native_provider(tmp_path):
     provider = NativeHandoverScenePlanner(
         scene,
         ReadOnlyCombinedHandoverPlanner(runtime, clock=lambda: 0.0),
-        grippers=lambda _: grippers,
+        grippers=lambda c: replace(grippers, candidate_id=c.candidate_id),
         read_binding=lambda: request.binding_sha256,
         clock=lambda: 0.0,
     )

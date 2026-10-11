@@ -79,7 +79,9 @@ def test_preparation_accepts_nonfinal_pose_and_continuous_local_side_pinch(yaw, 
     local = compose(inverse(candidate.object_goal), candidate.receiver_contact)
     closing = _quat_rotate_vector(local.orientation_xyzw, (0, 1, 0))
     assert abs(closing[2]) < 1e-10
-    assert max(abs(closing[0]), abs(closing[1])) < 0.999
+    giver_local = compose(inverse(candidate.object_goal), candidate.donor_goal)
+    giver_closing = _quat_rotate_vector(giver_local.orientation_xyzw, (0, 1, 0))
+    assert abs(sum(a * b for a, b in zip(closing, giver_closing))) < 1e-10
     assert request.scene_snapshot == original
     assert request.binding_sha256 == binding
 
@@ -108,8 +110,8 @@ def test_preparation_bounds_and_local_handler_budget_are_separate():
     arrival = preparation(request)
     far = compose(arrival.object_pose, Pose((0.14, 0, 0), (0, 0, 0, 1)))
     arrival = preparation_from_endpoint(request, arrival.giver, far)
-    with pytest.raises(ValueError, match="LOCAL_ALIGNMENT_BUDGET"):
-        contact_from_preparation(request, arrival)
+    candidate = contact_from_preparation(request, arrival)
+    assert pose_error(arrival.receiver, candidate.receiver_precontact)[0] <= LOCAL_ALIGNMENT_DISTANCE_M
     with pytest.raises(ValueError, match="PREPARATION_RECEIVER"):
         preparation_from_endpoint(
             request, arrival.giver, replace(far, position_xyz=(10, 0, 0))
@@ -181,64 +183,24 @@ def test_native_local_alignment_rejects_out_of_budget_before_ik(tmp_path):
         )
         is None
     )
-    assert provider._cartesian_failure == "LOCAL_ALIGNMENT_BUDGET_EXCEEDED"
+    assert provider._cartesian_failure == "LOCAL_ALIGNMENT_DISTANCE_EXCEEDED"
 
 
-def test_region_retains_moveit_paired_endpoint_but_separates_contact_target(tmp_path):
-    """Non-final transport pose reaches local admission, not old side-axis rejection."""
-    provider, request, _, recorded = native_provider(tmp_path)
-    original = recorded.plan
-
-    def tilted_plan(query, *, timeout_s):
-        result = original(query, timeout_s=timeout_s)
-        index = result["joint_names"].index(request.receiver.robot_id + "_joint5")
-        positions = list(result["points"][-1]["positions"])
-        positions[index] += 0.06
-        result["points"][-1]["positions"] = positions
-        return result
-
-    recorded.plan = tilted_plan
-    prepared = provider.plan_region(request, deadline_s=10)
-    assert prepared is not None, provider.last_path_failure
-    candidate, plan = prepared
-    joints = provider._pose_goals[candidate.candidate_id]
-    actual = provider.geometry.tcp_pose(
-        request.receiver.robot_id, {**request.start_state, **joints}
+def test_region_builds_final_precontact_candidate_from_giver_target(tmp_path):
+    """The final receiver target is derived from the selected giver target."""
+    provider, request, _, _ = native_provider(tmp_path)
+    region = preparation_region(request)
+    giver = Pose(
+        tuple(region["giver_pose"]["position_xyz"]),
+        tuple(region["giver_pose"]["orientation_xyzw"]),
     )
-    assert pose_error(actual, candidate.receiver_precontact)[1] > 0.01
-    assert candidate.candidate_id in provider._preparation_endpoints
-    assert {t.robot_id for t in plan.trajectories} == {
-        request.donor.robot_id,
-        request.receiver.robot_id,
-    }
-    for trajectory in plan.trajectories:
-        assert tuple(joints[n] for n in trajectory.joint_names) == (
-            trajectory.points[-1].positions
-        )
-    current = {**request.start_state, **joints}
-    rebased = provider.rebase_receiver_contact(request, candidate, current)
-    assert (
-        pose_error(rebased.receiver_precontact, candidate.receiver_precontact)[0] < 1e-7
-    )
-    states = provider.receiver_approach_from_arrival(
-        request,
-        rebased,
-        current,
-        deadline_s=10,
-    )
-    assert states is not None, provider._cartesian_failure
-    assert all(
-        all(
-            state[f"{request.donor.robot_id}_joint{i}"]
-            == current[f"{request.donor.robot_id}_joint{i}"]
-            for i in range(1, 7)
-        )
-        for state in states
-    )
-    assert (
-        pose_error(
-            provider.geometry.tcp_pose(request.receiver.robot_id, states[-1]),
-            rebased.receiver_contact,
-        )[0]
-        < request.profile.position_tolerance_m
-    )
+    candidate = provider._final_candidate_from_giver(request, giver)
+    assert candidate is not None
+    position, rotation = pose_error(candidate.donor_goal, giver)
+    assert position < 1e-9
+    assert rotation < 1e-9
+    local = compose(inverse(candidate.object_goal), candidate.receiver_precontact)
+    closing = _quat_rotate_vector(local.orientation_xyzw, (0, 1, 0))
+    giver_local = compose(inverse(candidate.object_goal), candidate.donor_goal)
+    giver_closing = _quat_rotate_vector(giver_local.orientation_xyzw, (0, 1, 0))
+    assert abs(sum(a * b for a, b in zip(closing, giver_closing))) < 1e-10

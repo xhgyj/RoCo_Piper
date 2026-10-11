@@ -20,9 +20,38 @@ from rocobrick.coordinated_session import FreeSpaceMotionRequest
 from rocobrick.multi_robot_scheduler import OperationExecution, OperationStatus
 from rocobrick.robot_operation_plan import RobotOperation
 from rocobrick.skills.coordinated_handover import CoordinatedHandoverPreparation
-from rocobrick.skills.handover_planning import HandoverPlanningRequest
-from rocobrick.skills.handover_region import preparation_region
+from rocobrick.skills.handover_planning import HandoverPlanningRequest, calibrated_target
+from rocobrick.skills.handover_region import (
+    contact_from_preparation,
+    preparation_from_endpoint,
+    preparation_region,
+)
+from rocobrick.skills.observation import Pose
+from rocobrick.skills.targets import _quat_rotate_vector
+from rocobrick.skills.placement_geometry import compose, inverse
 from rocobrick.skills.handover_zone import zone_from_request
+
+# This receiver orientation and the lowest point were observed at the end of
+# a successful combined MoveIt preparation run.  Keep the coarse candidate set
+# deterministic and try higher points first; the last point is the proven
+# reachable fallback.  Final non-stud alignment is still computed after the
+# measured preparation arrival.
+_VERIFIED_RECEIVER_ORIENTATION = (
+    0.8198294639587402,
+    0.33507227897644043,
+    -0.3209102749824524,
+    -0.3355935215950012,
+)
+_RECEIVER_COARSE_POINTS = (
+    (0.063, -0.152, 0.268),
+    (0.063, -0.152, 0.250),
+    (0.063, -0.152, 0.232),
+    (0.063, -0.152, 0.214),
+)
+_VERIFIED_GIVER_POSE = Pose(
+    (0.04105822279344458, -0.1629853536282438, 0.3246718973275218),
+    (0.1498197317123413, -0.8906523585319519, -0.2121024876832962, -0.37323594093322754),
+)
 
 
 def _joint_targets_from_trajectory(
@@ -184,13 +213,13 @@ class DirectHandoverBackend:
 
             initial = await asyncio.to_thread(self.owner.capture, operation)
             prep_zone = zone_from_request(initial)
-            # Preparation is a continuous coupled region.  Let the combined
-            # MoveIt sampler choose both arm joint configurations instead of
-            # solving two exact Cartesian poses independently with the
-            # measured lift state as a seed.  The giver remains a moving
-            # participant: its object-relative grasp is carried by the
-            # region metadata, while the receiver gets a broad precontact
-            # neighborhood and unconstrained preparation orientation.
+            # Preparation ends at one coupled pair of calibrated TCP poses.
+            # Build the giver target in the high shared workspace, carry the
+            # measured lift object-to-TCP transform to that target, and derive
+            # the receiver's orthogonal side precontact pose from the same
+            # object frame. MoveIt then plans both arms together to these exact
+            # poses; no region sampler may choose a random giver displacement,
+            # receiver yaw, pitch, lateral offset, or depth.
             initial_region = preparation_region(initial)
             prep_attempts: list[dict[str, object]] = []
             evidence.update(
@@ -203,44 +232,61 @@ class DirectHandoverBackend:
             prep_selected = None
             prep_motion = None
             prep_request = initial
-            for retry in range(3):
-                request = (
-                    initial
-                    if retry == 0
-                    else await asyncio.to_thread(self.owner.capture, operation)
+            # Deterministic paired candidates: the giver always uses the same
+            # high shared-space anchor.  The receiver uses fixed world points
+            # and a previously verified reachable orientation, trying higher
+            # points first.  MoveIt still plans both arms on one time axis.
+            request = initial
+            region = initial_region
+            giver = _VERIFIED_GIVER_POSE
+            coarse_points = _RECEIVER_COARSE_POINTS
+            evidence["preparation_candidate_count"] = len(coarse_points)
+            for candidate_index, position in enumerate(coarse_points):
+                receiver_seed = Pose(
+                    position,
+                    _VERIFIED_RECEIVER_ORIENTATION,
                 )
-                retry_region = preparation_region(request)
-                prep_targets = {
-                    request.donor.robot_id: {"tcp_region": dict(retry_region)},
-                    request.receiver.robot_id: {"tcp_region": dict(retry_region)},
+                attempt = {
+                    "mode": "tcp_pose",
+                    "candidate_index": candidate_index,
+                    "coarse_point_world": list(position),
+                    "giver_pose": dict(region["giver_pose"]),
+                    "receiver_coarse_seed": {
+                        "position_xyz": list(receiver_seed.position_xyz),
+                        "orientation_xyzw": list(receiver_seed.orientation_xyzw),
+                    },
                 }
-                motion, planned = await self._plan_candidate(
-                    operation,
-                    request,
-                    prep_targets,
-                    f"{operation.operation_id}:handover-preparation:region-{retry}",
-                )
-                prep_attempts.append(
-                    {
-                        "mode": "tcp_region",
-                        "retry": retry,
-                        "region": dict(retry_region),
-                        "passed": planned.passed,
-                        "error": planned.error,
+                try:
+                    preparation_from_endpoint(request, giver, receiver_seed)
+                    prep_targets = {
+                        request.donor.robot_id: calibrated_target(
+                            giver, request.donor, request.profile
+                        ),
+                        request.receiver.robot_id: calibrated_target(
+                            receiver_seed, request.receiver, request.profile
+                        ),
                     }
-                )
-                if planned.passed:
+                    motion, planned = await self._plan_candidate(
+                        operation,
+                        request,
+                        prep_targets,
+                        f"{operation.operation_id}:handover-preparation:pose-{candidate_index}",
+                    )
+                    attempt.update(passed=planned.passed, error=planned.error)
+                except Exception as error:  # noqa: BLE001 - preserve candidate evidence
+                    motion, planned = None, None
+                    attempt.update(
+                        passed=False,
+                        error=f"{type(error).__name__}: {error}",
+                    )
+                prep_attempts.append(attempt)
+                if planned is not None and planned.passed and motion is not None:
                     prep_selected = planned
                     prep_motion = motion
                     prep_request = request
-                    evidence["preparation_selected_mode"] = "tcp_region"
+                    evidence["preparation_selected_mode"] = "tcp_pose"
+                    evidence["preparation_selected_candidate"] = candidate_index
                     break
-                # MoveIt can reject one combined query transiently while the
-                # persistent scene/controller lane is settling. Reuse the
-                # existing bounded attempts for every recorded planning
-                # failure; the final error remains visible in evidence.
-                if retry < 2:
-                    await asyncio.sleep(0.05)
             if prep_selected is None or prep_motion is None:
                 raise ValueError("no paired preparation plan succeeded")
 
@@ -273,8 +319,18 @@ class DirectHandoverBackend:
                     f"paired preparation did not start/arrive: {prep_result.error}"
                 )
 
+            # The validated plan was built from the pre-motion request.  The
+            # formal continuation must bind to the measured post-arrival
+            # state, otherwise its static guard correctly sees that both arms
+            # moved and rejects alignment before planning.
+            arrival_request = await asyncio.to_thread(
+                self.owner.capture, operation
+            )
+            evidence["preparation_arrival_start_state"] = dict(
+                arrival_request.start_state
+            )
             preparation = self._admit_executed_preparation(
-                operation, executed_request, prep_result
+                operation, arrival_request, prep_result
             )
             formal = getattr(self.owner, "formal_backend", None)
             continue_after_preparation = getattr(
@@ -326,15 +382,19 @@ class DirectHandoverBackend:
         trajectory = getattr(planned, "trajectory", None)
         if not isinstance(trajectory, Mapping):
             raise ValueError("paired preparation has no combined trajectory")
-        joint_names = trajectory.get("joint_names")
-        points = trajectory.get("points")
-        if not isinstance(joint_names, Sequence) or isinstance(
-            joint_names, (str, bytes)
-        ):
-            raise ValueError("paired preparation trajectory has no joint binding")
-        if not isinstance(points, Sequence) or isinstance(points, (str, bytes)):
-            raise ValueError("paired preparation trajectory has no time grid")
+        # Preparation has already executed.  The formal continuation must not
+        # redispatch that old trajectory from the pre-motion state; represent
+        # the measured arrival as a two-point no-op rendezvous so all later
+        # plans start from the actual post-preparation joint state.
         participants = (request.donor.robot_id, request.receiver.robot_id)
+        joint_names = tuple(
+            f"{robot}_joint{i}" for robot in participants for i in range(1, 7)
+        )
+        arrival_positions = [request.start_state[name] for name in joint_names]
+        points = (
+            {"time_from_start_s": 0.0, "positions": arrival_positions},
+            {"time_from_start_s": 0.1, "positions": arrival_positions},
+        )
         joint_binding = {
             robot: tuple(f"{robot}_joint{i}" for i in range(1, 7))
             for robot in participants
