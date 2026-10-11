@@ -1,0 +1,268 @@
+{
+  "schema": "robot-operation-plan/v1",
+  "plan_id": "robot-operation-plan-type1-c-scaled4-v1",
+  "source_plan_id": "assembly-plan-type1-c-scaled4-v1",
+  "robots": [
+    "piper_0",
+    "piper_1"
+  ],
+  "operations": [
+    {
+      "operation_id": "type1-c-piper0-transit-to-pick",
+      "source_task_id": "type1-c-place-up",
+      "skill": "TRANSIT",
+      "executor_robot_id": "piper_1",
+      "participants": [
+        "piper_1"
+      ],
+      "role_bindings": {
+        "executor": "piper_1"
+      },
+      "target": {
+        "from": {
+          "kind": "robot_current",
+          "physical_instance_id": null,
+          "connection_id": null,
+          "robot_id": null
+        },
+        "to": {
+          "kind": "part",
+          "physical_instance_id": "brick-d12343686f7080d88b25",
+          "connection_id": null,
+          "robot_id": null
+        },
+        "carrying_physical_instance_id": null
+      },
+      "parameters": {},
+      "preconditions": [
+        "scene_ready"
+      ],
+      "effects": [
+        "robot_at_pick_region"
+      ],
+      "resources": [
+        "robot:piper_1",
+        "part:brick-d12343686f7080d88b25"
+      ],
+      "evidence_requirements": [
+        "transit_feedback_confirmed"
+      ]
+    },
+    {
+      "operation_id": "type1-c-piper0-pick",
+      "source_task_id": "type1-c-place-up",
+      "skill": "PICK",
+      "executor_robot_id": "piper_1",
+      "participants": [
+        "piper_1"
+      ],
+      "role_bindings": {
+        "executor": "piper_1"
+      },
+      "target": {
+        "physical_instance_id": "brick-d12343686f7080d88b25"
+      },
+      "parameters": {},
+      "preconditions": [
+        "robot_at_pick_region"
+      ],
+      "effects": [
+        "holding:brick-d12343686f7080d88b25"
+      ],
+      "resources": [
+        "robot:piper_1",
+        "part:brick-d12343686f7080d88b25"
+      ],
+      "evidence_requirements": [
+        "gripper_feedback_confirmed",
+        "holding_confirmed"
+      ]
+    },
+    {
+      "operation_id": "type1-c-piper1-support-top",
+      "source_task_id": "type1-c-place-up",
+      "skill": "SUPPORT_TOP",
+      "executor_robot_id": "piper_0",
+      "participants": [
+        "piper_0"
+      ],
+      "role_bindings": {
+        "executor": "piper_0"
+      },
+      "target": {
+        "connection_id": "conn-type1-c-lower-upper",
+        "upper_physical_instance_id": "brick-86a19fb966148e51bba9",
+        "lower_physical_instance_id": "brick-d12343686f7080d88b25",
+        "placement_robot_id": "piper_1"
+      },
+      "parameters": {},
+      "preconditions": [
+        "scene_ready"
+      ],
+      "effects": [
+        "supporting:brick-86a19fb966148e51bba9"
+      ],
+      "resources": [
+        "robot:piper_0",
+        "connection:conn-type1-c-lower-upper",
+        "part:brick-86a19fb966148e51bba9"
+      ],
+      "evidence_requirements": [
+        "support_pose_confirmed",
+        "support_stability_confirmed"
+      ]
+    },
+    {
+      "operation_id": "type1-c-piper0-transit-to-place",
+      "source_task_id": "type1-c-place-up",
+      "skill": "TRANSIT",
+      "executor_robot_id": "piper_1",
+      "participants": [
+        "piper_1"
+      ],
+      "role_bindings": {
+        "executor": "piper_1"
+      },
+      "target": {
+        "from": {
+          "kind": "robot_current",
+          "physical_instance_id": null,
+          "connection_id": null,
+          "robot_id": null
+        },
+        "to": {
+          "kind": "connection",
+          "physical_instance_id": null,
+          "connection_id": "conn-type1-c-lower-upper",
+          "robot_id": null
+        },
+        "carrying_physical_instance_id": "brick-d12343686f7080d88b25"
+      },
+      "parameters": {},
+      "preconditions": [
+        "holding:brick-d12343686f7080d88b25",
+        "supporting:brick-86a19fb966148e51bba9"
+      ],
+      "effects": [
+        "robot_at_place_region"
+      ],
+      "resources": [
+        "robot:piper_1",
+        "part:brick-d12343686f7080d88b25"
+      ],
+      "evidence_requirements": [
+        "transit_feedback_confirmed",
+        "carrying_state_confirmed"
+      ]
+    },
+    {
+      "operation_id": "type1-c-piper0-place-up",
+      "source_task_id": "type1-c-place-up",
+      "skill": "PLACE_UP",
+      "executor_robot_id": "piper_1",
+      "participants": [
+        "piper_1",
+        "piper_0"
+      ],
+      "role_bindings": {
+        "executor": "piper_1",
+        "support": "piper_0"
+      },
+      "target": {
+        "connection_id": "conn-type1-c-lower-upper",
+        "upper_physical_instance_id": "brick-86a19fb966148e51bba9",
+        "lower_physical_instance_id": "brick-d12343686f7080d88b25",
+        "support_robot_id": "piper_0"
+      },
+      "parameters": {},
+      "preconditions": [
+        "robot_at_place_region",
+        "holding:brick-d12343686f7080d88b25",
+        "supporting:brick-86a19fb966148e51bba9"
+      ],
+      "effects": [
+        "assembled:brick-d12343686f7080d88b25"
+      ],
+      "resources": [
+        "robot:piper_1",
+        "robot:piper_0",
+        "connection:conn-type1-c-lower-upper",
+        "part:brick-86a19fb966148e51bba9",
+        "part:brick-d12343686f7080d88b25"
+      ],
+      "evidence_requirements": [
+        "connection_confirmed",
+        "release_confirmed",
+        "retreat_confirmed"
+      ]
+    }
+  ],
+  "dependencies": [
+    {
+      "predecessor_operation_id": "type1-c-piper0-transit-to-pick",
+      "successor_operation_id": "type1-c-piper0-pick",
+      "reason": "pick requires robot at pick region"
+    },
+    {
+      "predecessor_operation_id": "type1-c-piper0-pick",
+      "successor_operation_id": "type1-c-piper0-transit-to-place",
+      "reason": "transit requires confirmed holding"
+    },
+    {
+      "predecessor_operation_id": "type1-c-piper0-transit-to-place",
+      "successor_operation_id": "type1-c-piper0-place-up",
+      "reason": "place up requires placement robot at region"
+    },
+    {
+      "predecessor_operation_id": "type1-c-piper0-pick",
+      "successor_operation_id": "type1-c-piper1-support-top",
+      "reason": "support starts after the moving brick is secured"
+    }
+  ],
+  "execution_layers": [
+    [
+      "type1-c-piper0-transit-to-pick"
+    ],
+    [
+      "type1-c-piper0-pick"
+    ],
+    [
+      "type1-c-piper0-transit-to-place",
+      "type1-c-piper1-support-top"
+    ],
+    [
+      "type1-c-piper0-place-up"
+    ]
+  ],
+  "planned_schedule": [
+    [
+      {
+        "operation_id": "type1-c-piper0-transit-to-pick",
+        "robot_id": "piper_1"
+      }
+    ],
+    [
+      {
+        "operation_id": "type1-c-piper0-pick",
+        "robot_id": "piper_1"
+      }
+    ],
+    [
+      {
+        "operation_id": "type1-c-piper0-transit-to-place",
+        "robot_id": "piper_1"
+      },
+      {
+        "operation_id": "type1-c-piper1-support-top",
+        "robot_id": "piper_0"
+      }
+    ],
+    [
+      {
+        "operation_id": "type1-c-piper0-place-up",
+        "robot_id": "piper_1"
+      }
+    ]
+  ],
+  "evidence_requirements": []
+}

@@ -1,0 +1,79 @@
+{
+  "frame_id": "world",
+  "objects": [
+    {
+      "asset_revision_sha256": "scaled4-library-pending",
+      "brick_id": 13,
+      "physical_instance_id": "brick-d12343686f7080d88b25",
+      "prim_path": "/World/managed/Parts/Part_1",
+      "provenance": {
+        "source": "type1-c-scaled4-generated"
+      }
+    },
+    {
+      "asset_revision_sha256": "scaled4-library-pending",
+      "brick_id": 14,
+      "physical_instance_id": "brick-86a19fb966148e51bba9",
+      "prim_path": "/World/managed/Parts/Part_2",
+      "provenance": {
+        "source": "type1-c-scaled4-generated"
+      }
+    },
+    {
+      "asset_revision_sha256": "scaled4-library-pending",
+      "brick_id": 13,
+      "physical_instance_id": "brick-type1c-scaled4-03",
+      "prim_path": "/World/managed/Parts/Part_3",
+      "provenance": {
+        "source": "type1-c-scaled4-generated"
+      }
+    },
+    {
+      "asset_revision_sha256": "scaled4-library-pending",
+      "brick_id": 13,
+      "physical_instance_id": "brick-type1c-scaled4-04",
+      "prim_path": "/World/managed/Parts/Part_4",
+      "provenance": {
+        "source": "type1-c-scaled4-generated"
+      }
+    },
+    {
+      "asset_revision_sha256": "scaled4-library-pending",
+      "brick_id": 13,
+      "physical_instance_id": "brick-type1c-scaled4-05",
+      "prim_path": "/World/managed/Parts/Part_5",
+      "provenance": {
+        "source": "type1-c-scaled4-generated"
+      }
+    },
+    {
+      "asset_revision_sha256": "scaled4-library-pending",
+      "brick_id": 13,
+      "physical_instance_id": "brick-type1c-scaled4-06",
+      "prim_path": "/World/managed/Parts/Part_6",
+      "provenance": {
+        "source": "type1-c-scaled4-generated"
+      }
+    },
+    {
+      "asset_revision_sha256": "scaled4-library-pending",
+      "brick_id": 13,
+      "physical_instance_id": "brick-type1c-scaled4-07",
+      "prim_path": "/World/managed/Parts/Part_7",
+      "provenance": {
+        "source": "type1-c-scaled4-generated"
+      }
+    },
+    {
+      "asset_revision_sha256": "scaled4-library-pending",
+      "brick_id": 14,
+      "physical_instance_id": "brick-type1c-scaled4-08",
+      "prim_path": "/World/managed/Parts/Part_8",
+      "provenance": {
+        "source": "type1-c-scaled4-generated"
+      }
+    }
+  ],
+  "scene_id": "type1-c-scaled4",
+  "schema": "rocobrick-scene-snapshot-manifest/v1"
+}
