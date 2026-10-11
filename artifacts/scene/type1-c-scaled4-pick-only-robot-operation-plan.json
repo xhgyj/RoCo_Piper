@@ -1,0 +1,56 @@
+{
+  "schema": "robot-operation-plan/v1",
+  "plan_id": "robot-operation-plan-type1-c-scaled4-pick-v1",
+  "source_plan_id": "assembly-plan-type1-c-scaled4-v1",
+  "robots": [
+    "piper_0",
+    "piper_1"
+  ],
+  "operations": [
+    {
+      "operation_id": "type1-c-scaled4-pick",
+      "source_task_id": "type1-c-scaled4-pick",
+      "skill": "PICK",
+      "executor_robot_id": "piper_1",
+      "participants": [
+        "piper_1"
+      ],
+      "role_bindings": {
+        "executor": "piper_1"
+      },
+      "target": {
+        "physical_instance_id": "brick-2a4e726d47cd36cf71d9"
+      },
+      "parameters": {},
+      "preconditions": [
+        "scene_ready"
+      ],
+      "effects": [
+        "holding:brick-2a4e726d47cd36cf71d9"
+      ],
+      "resources": [
+        "robot:piper_1",
+        "part:brick-2a4e726d47cd36cf71d9"
+      ],
+      "evidence_requirements": [
+        "gripper_feedback_confirmed",
+        "holding_confirmed"
+      ]
+    }
+  ],
+  "dependencies": [],
+  "execution_layers": [
+    [
+      "type1-c-scaled4-pick"
+    ]
+  ],
+  "planned_schedule": [
+    [
+      {
+        "operation_id": "type1-c-scaled4-pick",
+        "robot_id": "piper_1"
+      }
+    ]
+  ],
+  "evidence_requirements": []
+}
