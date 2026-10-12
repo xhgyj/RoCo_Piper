@@ -8,8 +8,8 @@
                 48
             ],
             "Position": [
-                0,
-                -0.2,
+                0.0,
+                -0.05,
                 0.0
             ],
             "Orientation": [
@@ -54,8 +54,8 @@
                 ],
                 "Robot_Base_Frame": {
                     "Position": [
-                        0.25,
-                        -0.25,
+                        0.38,
+                        -0.4,
                         0.0
                     ],
                     "Orientation": [
@@ -119,8 +119,8 @@
                 ],
                 "Robot_Base_Frame": {
                     "Position": [
-                        -0.25,
-                        -0.25,
+                        -0.38,
+                        -0.4,
                         0.0
                     ],
                     "Orientation": [
@@ -158,14 +158,14 @@
     "Env_Config": {
         "Storage_Config": {
             "Size": [
-                1.0,
-                0.5,
+                0.6,
+                0.25,
                 0.2
             ],
             "Position": [
                 0.0,
-                0,
-                0.05
+                0.35,
+                0.1
             ],
             "Orientation": [
                 1.0,
