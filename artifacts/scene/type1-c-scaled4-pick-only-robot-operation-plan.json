@@ -19,18 +19,18 @@
         "executor": "piper_1"
       },
       "target": {
-        "physical_instance_id": "brick-2a4e726d47cd36cf71d9"
+        "physical_instance_id": "brick-2cb87847a23fe5accfa8"
       },
       "parameters": {},
       "preconditions": [
         "scene_ready"
       ],
       "effects": [
-        "holding:brick-2a4e726d47cd36cf71d9"
+        "holding:brick-2cb87847a23fe5accfa8"
       ],
       "resources": [
         "robot:piper_1",
-        "part:brick-2a4e726d47cd36cf71d9"
+        "part:brick-2cb87847a23fe5accfa8"
       ],
       "evidence_requirements": [
         "gripper_feedback_confirmed",
