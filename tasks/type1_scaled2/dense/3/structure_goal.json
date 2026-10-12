@@ -1,0 +1,50 @@
+{
+  "1": {
+    "brick_id": 21,
+    "color": "Orange",
+    "ori": 0,
+    "x": 0,
+    "y": 8,
+    "z": 0
+  },
+  "2": {
+    "brick_id": 21,
+    "color": "Green",
+    "ori": 0,
+    "x": 2,
+    "y": 0,
+    "z": 0
+  },
+  "3": {
+    "brick_id": 21,
+    "color": "Dark Turquoise",
+    "ori": 0,
+    "x": 2,
+    "y": 0,
+    "z": 1
+  },
+  "4": {
+    "brick_id": 21,
+    "color": "Yellow",
+    "ori": 0,
+    "x": 2,
+    "y": 12,
+    "z": 0
+  },
+  "5": {
+    "brick_id": 21,
+    "color": "Yellow",
+    "ori": 0,
+    "x": 2,
+    "y": 12,
+    "z": 1
+  },
+  "6": {
+    "brick_id": 21,
+    "color": "Dark Turquoise",
+    "ori": 0,
+    "x": 2,
+    "y": 6,
+    "z": 1
+  }
+}

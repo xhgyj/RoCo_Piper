@@ -42,7 +42,15 @@ def _default_converter() -> tuple[TopologyConverter, ColorParser]:
     library = expanded_lego_library(load_default_lego_library())
 
     def converter(structure, **kwargs):
-        return legolization_json_to_topology_json(structure, lego_library=library, **kwargs)
+        topology = legolization_json_to_topology_json(structure, lego_library=library, **kwargs)
+        rows = [(int(key), value) for key, value in structure.items() if str(key).isdigit()]
+        rows.sort(key=lambda item: item[0])
+        parts = topology.get('parts', [])
+        offset = 1 if kwargs.get('include_base_plate') else 0
+        for part, (_, row) in zip(parts[offset:], rows):
+            brick = library[str(row['brick_id'])]
+            part.setdefault('payload', {})['H'] = int(brick.get('layers', 1)) * 3
+        return topology
 
     return converter, parse_color
 

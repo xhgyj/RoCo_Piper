@@ -62,5 +62,45 @@
     "20": {
         "height": 4,
         "width": 4
+    },
+    "22": {
+        "height": 4,
+        "width": 8,
+        "layers": 2
+    },
+    "23": {
+        "height": 4,
+        "width": 12,
+        "layers": 2
+    },
+    "24": {
+        "height": 2,
+        "width": 16,
+        "layers": 2
+    },
+    "25": {
+        "height": 2,
+        "width": 8,
+        "layers": 2
+    },
+    "26": {
+        "height": 2,
+        "width": 12,
+        "layers": 2
+    },
+    "27": {
+        "height": 2,
+        "width": 4,
+        "layers": 2
+    },
+    "28": {
+        "height": 2,
+        "width": 2,
+        "layers": 2
+    },
+    "21": {
+        "height": 4,
+        "width": 4,
+        "layers": 2
     }
 }
