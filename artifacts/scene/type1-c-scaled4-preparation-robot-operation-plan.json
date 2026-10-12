@@ -1,0 +1,106 @@
+{
+  "schema": "robot-operation-plan/v1",
+  "plan_id": "robot-operation-plan-type1-c-preparation-v1",
+  "source_plan_id": "assembly-plan-type1-c-v1",
+  "robots": [
+    "piper_0",
+    "piper_1"
+  ],
+  "operations": [
+    {
+      "operation_id": "type1-c-v2-piper1-pick",
+      "source_task_id": "type1-c-place-up",
+      "skill": "PICK",
+      "executor_robot_id": "piper_1",
+      "participants": [
+        "piper_1"
+      ],
+      "role_bindings": {
+        "executor": "piper_1"
+      },
+      "target": {
+        "physical_instance_id": "brick-5089a6d7650d82c10125"
+      },
+      "parameters": {},
+      "preconditions": [],
+      "effects": [
+        "holding:brick-5089a6d7650d82c10125"
+      ],
+      "resources": [
+        "robot:piper_1",
+        "part:brick-5089a6d7650d82c10125"
+      ],
+      "evidence_requirements": [
+        "gripper_feedback_confirmed",
+        "holding_confirmed"
+      ]
+    },
+    {
+      "operation_id": "type1-c-v2-piper1-handover-to-piper0",
+      "source_task_id": "type1-c-place-up",
+      "skill": "HANDOVER",
+      "executor_robot_id": "piper_0",
+      "participants": [
+        "piper_0",
+        "piper_1"
+      ],
+      "role_bindings": {
+        "executor": "piper_0",
+        "donor": "piper_1",
+        "receiver": "piper_0"
+      },
+      "target": {
+        "physical_instance_id": "brick-5089a6d7650d82c10125",
+        "donor_robot_id": "piper_1",
+        "receiver_robot_id": "piper_0"
+      },
+      "parameters": {
+        "grasp_profile_id": "handover-bottom-coordinated-v1",
+        "co_hold_timeout_s": 10.0,
+        "follow_samples": 4
+      },
+      "preconditions": [
+        "holding:brick-5089a6d7650d82c10125"
+      ],
+      "effects": [
+        "holding:brick-5089a6d7650d82c10125"
+      ],
+      "resources": [
+        "robot:piper_0",
+        "robot:piper_1",
+        "part:brick-5089a6d7650d82c10125"
+      ],
+      "evidence_requirements": []
+    }
+  ],
+  "dependencies": [
+    {
+      "predecessor_operation_id": "type1-c-v2-piper1-pick",
+      "successor_operation_id": "type1-c-v2-piper1-handover-to-piper0",
+      "reason": "donor holding before transfer"
+    }
+  ],
+  "execution_layers": [
+    [
+      "type1-c-v2-piper1-pick"
+    ],
+    [
+      "type1-c-v2-piper1-handover-to-piper0"
+    ]
+  ],
+  "planned_schedule": [
+    [
+      {
+        "operation_id": "type1-c-v2-piper1-pick",
+        "robot_id": "piper_1"
+      }
+    ],
+    [
+      {
+        "operation_id": "type1-c-v2-piper1-handover-to-piper0",
+        "robot_id": "piper_0"
+      }
+    ]
+  ],
+  "evidence_requirements": []
+}
