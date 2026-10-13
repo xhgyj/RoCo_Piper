@@ -1,6 +1,7 @@
 """Offline regression for PhysX-to-render synchronization without Kit reentry."""
 
 import importlib.util
+import inspect
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -51,9 +52,14 @@ def test_both_headed_loops_refresh_before_kit_yield():
     blocks = source.split("if render_enabled and steps % render_stride == 0:")[1:]
     assert len(blocks) == 2
     for block in blocks:
-        assert block.index("state.refresh_viewport(world)") < block.index(
-            "await omni.kit.app.get_app().next_update_async()"
-        )
+        assert block.lstrip().startswith("await state.render_viewport(world)")
+    module = bridge_module()
+    renderer = inspect.getsource(module.BridgeState.render_viewport)
+    assert "lambda: self.refresh_viewport(world)" in renderer
+    helper = inspect.getsource(module.render_viewport_without_physics)
+    assert helper.index("refresh()") < helper.index("await app.next_update_async()")
+    assert helper.index("settings.set_bool(key, False)") < helper.index("refresh()")
+    assert "finally:" in helper and "settings.set_bool(key, previous)" in helper
 
 
 def test_headed_keeps_bricksim_fabric_delegate(monkeypatch):

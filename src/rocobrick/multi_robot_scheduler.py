@@ -627,7 +627,15 @@ class _RunState:
             for resource, owner in request.lease_owners.items()
         ):
             raise ExecutionContractError("predecessor lease changed during pre-phase")
+        targets = request.lease_targets
         for resource, owner in request.lease_owners.items():
+            target_id = targets.get(resource)
+            # A successor that does not claim a predecessor resource cannot
+            # steal it. This is the PICK -> SUPPORT_TOP case: the support
+            # operation gets its own resources while the carrier keeps the
+            # holding lease for the later PLACE_UP operation.
+            if target_id is None and successor is not None:
+                continue
             record = self.resource_records[(owner, resource)]
             self.resource_records[(owner, resource)] = dataclasses.replace(
                 record,
@@ -637,12 +645,22 @@ class _RunState:
             if successor is None:
                 del self.held[resource]
             else:
-                self.held[resource] = successor.operation_id
-                self.resource_records[(successor.operation_id, resource)] = (
+                successor_owner = (
+                    next(
+                        (
+                            operation
+                            for operation in request.successor_operations
+                            if operation.operation_id == target_id
+                        ),
+                        successor,
+                    )
+                )
+                self.held[resource] = successor_owner.operation_id
+                self.resource_records[(successor_owner.operation_id, resource)] = (
                     ResourceEvidence(
                         resource,
-                        successor.operation_id,
-                        successor.executor_robot_id,
+                        successor_owner.operation_id,
+                        successor_owner.executor_robot_id,
                         True,
                         False,
                         f"atomic adoption from {owner}",
@@ -654,7 +672,7 @@ class _RunState:
             evidence["physical_departure_confirmed"] = request.transition_id
             self.results[owner] = dataclasses.replace(
                 result,
-                resources_released=True,
+                resources_released=owner not in self.held.values(),
                 evidence=evidence,
             )
 
@@ -984,6 +1002,24 @@ class MultiRobotScheduler:
         order = {
             operation_id: index for index, operation_id in enumerate(operation_ids)
         }
+        predecessor_cohorts: dict[tuple[str, ...], list[RobotOperation]] = {}
+        for operation_id in operation_ids:
+            operation = plan.operations[operation_id]
+            predecessors = self._physical_predecessors(operation, plan, state)
+            if predecessors:
+                predecessor_cohorts.setdefault(predecessors, []).append(operation)
+        cohort_tasks: dict[tuple[str, ...], asyncio.Task[bool]] = {}
+        for predecessors, cohort in predecessor_cohorts.items():
+            if len(cohort) > 1:
+                cohort_tasks[predecessors] = asyncio.create_task(
+                    self._execute_successor_cohort_pre_phase(
+                        plan,
+                        predecessors,
+                        tuple(cohort),
+                        executor,
+                        state,
+                    )
+                )
         for operation_id in operation_ids:
             operation = plan.operations[operation_id]
             predecessors = self._physical_predecessors(operation, plan, state)
@@ -995,7 +1031,13 @@ class MultiRobotScheduler:
                 continue
             try:
                 running[operation_id] = asyncio.create_task(
-                    self._execute_successor(operation, plan, executor, state)
+                    self._execute_successor(
+                        operation,
+                        plan,
+                        executor,
+                        state,
+                        shared_pre_phase=cohort_tasks.get(predecessors),
+                    )
                 )
             except Exception as exc:
                 reason = f"dispatch failed for {operation_id!r}: {exc!r}"
@@ -1003,6 +1045,10 @@ class MultiRobotScheduler:
                 state.mark_failure(reason)
                 state.note_attention(operation_id)
         if not running:
+            for task in cohort_tasks.values():
+                task.cancel()
+            if cohort_tasks:
+                await asyncio.gather(*cohort_tasks.values(), return_exceptions=True)
             return OperationStatus.FAILED, results
         owners = {task: oid for oid, task in running.items()}
         pending: set[asyncio.Task[object]] = set(running.values())
@@ -1041,8 +1087,13 @@ class MultiRobotScheduler:
         except BaseException:
             for task in pending:
                 task.cancel()
+            for task in cohort_tasks.values():
+                if not task.done():
+                    task.cancel()
             if pending:
                 await asyncio.gather(*pending, return_exceptions=True)
+            if cohort_tasks:
+                await asyncio.gather(*cohort_tasks.values(), return_exceptions=True)
             raise
         pending_ids = [
             operation_id
@@ -1210,12 +1261,44 @@ class MultiRobotScheduler:
                 selected.append(owner)
         return tuple(selected)
 
+    async def _execute_successor_cohort_pre_phase(
+        self,
+        plan: RobotOperationPlan,
+        predecessor_ids: tuple[str, ...],
+        successors: tuple[RobotOperation, ...],
+        executor: object,
+        state: _RunState,
+    ) -> bool:
+        """Run one shared pre-phase for same-layer successor operations."""
+        if not successors:
+            return False
+        if set(predecessor_ids) & state.transitioning:
+            return False
+        state.transitioning.update(predecessor_ids)
+        try:
+            for operation in successors:
+                conflict = state.reserve(operation, predecessor_ids)
+                if conflict:
+                    state.mark_failure(conflict)
+                    return False
+            return await self._transition(
+                plan,
+                predecessor_ids,
+                successors[0],
+                executor,
+                state,
+                next_operations=successors,
+            )
+        finally:
+            state.transitioning.difference_update(predecessor_ids)
+
     async def _execute_successor(
         self,
         operation: RobotOperation,
         plan: RobotOperationPlan,
         executor: object,
         state: _RunState,
+        shared_pre_phase: asyncio.Task[bool] | None = None,
     ) -> object:
         """Run a retained-state transition inside the successor dispatch.
 
@@ -1237,21 +1320,27 @@ class MultiRobotScheduler:
 
         predecessors = self._physical_predecessors(operation, plan, state)
         if predecessors:
-            if set(predecessors) & state.transitioning:
-                return failure("predecessor lease is already transitioning")
-            state.transitioning.update(predecessors)
-            try:
-                conflict = state.reserve(operation, predecessors)
-                if conflict:
-                    return failure(conflict)
-                if not await self._transition(
-                    plan, predecessors, operation, executor, state
-                ):
+            if shared_pre_phase is not None:
+                if not await shared_pre_phase:
                     return failure(
                         "successor pre-phase failed; predecessor leases retained"
                     )
-            finally:
-                state.transitioning.difference_update(predecessors)
+            elif set(predecessors) & state.transitioning:
+                return failure("predecessor lease is already transitioning")
+            else:
+                state.transitioning.update(predecessors)
+                try:
+                    conflict = state.reserve(operation, predecessors)
+                    if conflict:
+                        return failure(conflict)
+                    if not await self._transition(
+                        plan, predecessors, operation, executor, state
+                    ):
+                        return failure(
+                            "successor pre-phase failed; predecessor leases retained"
+                        )
+                finally:
+                    state.transitioning.difference_update(predecessors)
         conflict = state.acquire(operation)
         if conflict:
             return failure(f"resource unavailable before dispatch: {conflict}")
@@ -1278,6 +1367,7 @@ class MultiRobotScheduler:
         executor: object,
         state: _RunState,
         policy: TerminalPrePhasePolicy | None = None,
+        next_operations: tuple[RobotOperation, ...] = (),
     ) -> bool:
         """Execute a bound transition and atomically adopt its physical leases.
 
@@ -1298,6 +1388,7 @@ class MultiRobotScheduler:
                     "shared snapshot/pre-phase runtime unavailable"
                 )
             operations = tuple(plan.operations[owner] for owner in predecessor_ids)
+            successors = next_operations or (() if successor is None else (successor,))
             participants = tuple(
                 sorted(
                     {
@@ -1305,11 +1396,12 @@ class MultiRobotScheduler:
                         for operation in operations
                         for robot in operation.participants
                     }
-                    | (
-                        set(successor.participants)
-                        if successor
-                        else set(policy.participants)
-                    )
+                    | {
+                        robot
+                        for operation in successors
+                        for robot in operation.participants
+                    }
+                    | (set(policy.participants) if not successors and policy else set())
                 )
             )
             snapshot = await asyncio.wait_for(
@@ -1332,6 +1424,7 @@ class MultiRobotScheduler:
                     for owner in predecessor_ids
                 },
                 next_operation=successor,
+                next_operations=successors,
                 participants=participants,
                 resources=tuple(sorted(owners)),
                 lease_owners=owners,
@@ -1387,9 +1480,11 @@ class MultiRobotScheduler:
                 )
             state.adopt(request, successor)
             proof = to_json_value(dataclasses.asdict(raw))
-            state.pre_phases[successor.operation_id if successor else transition_id] = (
-                proof
-            )
+            if request.successor_operations:
+                for operation in request.successor_operations:
+                    state.pre_phases[operation.operation_id] = proof
+            else:
+                state.pre_phases[transition_id] = proof
             state.deadline_events.append(
                 {
                     "kind": "pre_phase_adoption",

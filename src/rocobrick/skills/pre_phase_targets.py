@@ -14,6 +14,7 @@ from rocobrick.skills.observation import (
 from rocobrick.skills.placement_geometry import (
     interface_place_targets,
     interface_place_up_targets,
+    support_top_target,
 )
 from rocobrick.skills.targets import (
     _tcp_pose_target,
@@ -47,9 +48,35 @@ def serialize_target(target, robot):
 def derive_wire_targets(operation_document, shared, context_documents):
     """Decode calibrated execution context separately from immutable operations.
 
+    A wire document may carry cohort_operations. Their executor targets
+    are unioned into one combined request; non-executors retain the shared
+    hold-pose target from the primary operation.
+
     Returns:
-        Complete combined planner targets derived on the ROS side.
+        All participants' calibrated targets for the single combined request.
     """
+    cohort = operation_document.get("cohort_operations")
+    if isinstance(cohort, list) and cohort:
+        combined = {}
+        primary = dict(operation_document)
+        primary.pop("cohort_operations", None)
+        documents = [primary, *cohort]
+        for document in documents:
+            if not isinstance(document, Mapping):
+                raise ValueError("cohort operation must be a mapping")
+            single = dict(document)
+            single.pop("cohort_operations", None)
+            derived = derive_wire_targets(single, shared, context_documents)
+            robot = single.get("executor_robot_id")
+            if not isinstance(robot, str) or robot not in derived:
+                raise ValueError("cohort operation executor target is missing")
+            combined[robot] = derived[robot]
+        primary_targets = derive_wire_targets(primary, shared, context_documents)
+        for robot, target in primary_targets.items():
+            combined.setdefault(robot, target)
+        if not combined:
+            raise ValueError("cohort target derivation produced no targets")
+        return combined
     from rocobrick.robot_operation_plan import OperationTarget
     from rocobrick.skills.targets import RobotBaseFrame, SkillParams, TcpProvenance
 
@@ -147,14 +174,8 @@ def derive_pre_phase_targets(
             session_id=session,
             manifest_sha256=manifest,
         )
-        position = tuple(
-            (sample.aabb_min[i] + sample.aabb_max[i]) / 2 for i in range(2)
-        ) + (sample.aabb_max[2] + context.params.pregrasp_standoff_m,)
-        target = _tcp_pose_target(
-            world_position_to_base(position, context.base),
-            world_orientation_to_base(sample.tcp_pose.orientation_xyzw, context.base),
-            context.provenance,
-            context.params,
+        target = support_top_target(
+            sample, context.base, context.provenance, context.params, approach=True
         )
     elif operation.skill in {"PLACE_DOWN", "PLACE_UP"} or (
         operation.skill == "TRANSIT"
@@ -219,6 +240,37 @@ def derive_pre_phase_targets(
     else:
         raise ValueError(f"{operation.skill} does not define a motion pre-phase")
     result = {robot: serialize_target(target, robot)}
+    if (
+        operation.skill == "SUPPORT_TOP"
+        and values.get("placement_robot_id") in contexts
+    ):
+        carrier = values["placement_robot_id"]
+        upper, lower = (
+            values["upper_physical_instance_id"],
+            values["lower_physical_instance_id"],
+        )
+        carried = parse_place_observation(
+            shared,
+            robot_id=carrier,
+            upper_physical_instance_id=upper,
+            lower_physical_instance_id=lower,
+            session_id=session,
+            manifest_sha256=manifest,
+        )
+        interface = carried.interfaces["pairs"]["|".join(sorted((upper, lower)))]
+        carrier_context = contexts[carrier]
+        placement, _, _ = interface_place_up_targets(
+            carried.upper.object_pose,
+            _pose(interface["lower_to_upper"], "interface transform"),
+            carried.lower.object_pose,
+            carried.lower.tcp_pose,
+            carried.lower.opening_m,
+            carrier_context.base,
+            carrier_context.provenance,
+            carrier_context.params,
+            tuple(interface.get("allowed_upper_yaw_quarter_turns", (0,))),
+        )
+        result[carrier] = serialize_target(placement.preplace, carrier)
     for participant, participant_context in contexts.items():
         if participant in result:
             continue

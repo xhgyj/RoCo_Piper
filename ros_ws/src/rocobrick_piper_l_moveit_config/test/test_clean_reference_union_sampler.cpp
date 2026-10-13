@@ -1,12 +1,48 @@
 // SPDX-License-Identifier: BSD-3-Clause
 #include <rocobrick_piper_l_moveit_config/clean_reference_union_sampler.hpp>
 #include <rocobrick_piper_l_moveit_config/handover_region_sampler.hpp>
+#include <rocobrick_piper_l_moveit_config/grasp_region_sampler.hpp>
 #include <gtest/gtest.h>
 #include <srdfdom/model.h>
 #include <urdf_parser/urdf_parser.h>
 
 namespace
 {
+TEST(GraspRegion, DecodesContinuousRegionAndRejectsMalformedBindings)
+{
+  std::vector<rocobrick::GraspRegionSampler::Region> regions;
+  const std::string binding = "rocobrick-grasp-region/v1;1;piper_0;" + std::string(64, 'a') +
+      ";2;0;0;0;0;0;0;1;0;0;0;0;0;0;1;0;0;0;.01;.01;.01;0;.005;.001;.1305896;.06;-.0127;0;-.0048;.0127;0;.0052";
+  ASSERT_TRUE(rocobrick::GraspRegionSampler::decode(binding, regions));
+  ASSERT_EQ(regions.size(), 1u);
+  EXPECT_EQ(regions[0].robot, "piper_0");
+  EXPECT_EQ(regions[0].pads.size(), 2u);
+  EXPECT_FALSE(rocobrick::GraspRegionSampler::decode(binding + ";extra", regions));
+  EXPECT_FALSE(rocobrick::GraspRegionSampler::decode("rocobrick-grasp-region/v1;3", regions));
+  EXPECT_FALSE(rocobrick::GraspRegionSampler::decode("rocobrick-grasp-region/v1;1;piper_2", regions));
+}
+
+TEST(GraspRegion, ContactGeometryChecksRealPadFloorAndStudCorridor)
+{
+  rocobrick::GraspRegionSampler::Region region;
+  region.center = Eigen::Vector3d(0, 0, .01);
+  region.half = Eigen::Vector3d(.01, .01, .01);
+  region.floor_margin = .005;
+  region.contact_margin = .001;
+  region.flange = .1305896;
+  region.opening = .06;
+  region.pads = {Eigen::Vector3d(-.0127, 0, -.0048), Eigen::Vector3d(.0127, 0, .0052)};
+  Eigen::Isometry3d local = Eigen::Isometry3d::Identity();
+  local.linear() = Eigen::AngleAxisd(M_PI / 2., Eigen::Vector3d::UnitY()).toRotationMatrix();
+  local.translation() = Eigen::Vector3d(0, 0, .018);
+  EXPECT_TRUE(rocobrick::GraspRegionSampler::contactGeometry(region, Eigen::Isometry3d::Identity(), local));
+  local.translation().z() = .01;
+  EXPECT_FALSE(rocobrick::GraspRegionSampler::contactGeometry(region, Eigen::Isometry3d::Identity(), local));
+  local.translation().z() = .018;
+  local.linear() = Eigen::AngleAxisd(M_PI, Eigen::Vector3d::UnitY()).toRotationMatrix();
+  EXPECT_FALSE(rocobrick::GraspRegionSampler::contactGeometry(region, Eigen::Isometry3d::Identity(), local));
+}
+
 planning_scene::PlanningScenePtr makeScene()
 {
   const auto urdf = urdf::parseURDF(R"(

@@ -3,12 +3,14 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass
 from math import isfinite
+from math import pi
 from types import MappingProxyType
 from pathlib import Path
 from typing import Any
 
 from rocobrick.bricksim_topology import BaseplateSpec, BrickSimTopologyBundle, build_bricksim_topologies
 from rocobrick.isaac_scene import IsaacSceneConfig
+from rocobrick.initial_part_allocator import allocate_initial_slots
 from rocobrick.models import Pose
 from rocobrick.scene_bootstrap import RobotSpawnSpec
 from rocobrick.stap_contract import StapPlan
@@ -70,6 +72,10 @@ def build_runtime_host_inputs(
     color = plate.get("Color")
     if type(color) is not str or not color.strip():
         raise RuntimeHostInputError("baseplate color must be a non-empty string")
+    baseplate_position = _seq(plate.get("Position"), "baseplate position", 3)
+    baseplate_orientation = _seq(
+        plate.get("Orientation"), "baseplate orientation", 4
+    )
     topology = build_bricksim_topologies(plan, BaseplateSpec(size, color))
 
     robot_config = _mapping(config.get("Robot_Config"), "Robot_Config")
@@ -133,14 +139,65 @@ def build_runtime_host_inputs(
     if collision_filter_instance_ids and collision_filter_robot_id is None:
         raise RuntimeHostInputError("collision filter instances require a robot id")
 
+    # The topology stores numeric BrickSim ids; convert them to physical ids
+    # without relying on task-specific brick names.
+    loose_document = getattr(topology, "loose", {})
+    topology_instances = getattr(topology, "instance_by_topology_id", {})
+    loose_parts = (
+        loose_document.get("parts", [])
+        if isinstance(loose_document, Mapping)
+        else []
+    )
+    loose_instance_ids = tuple(
+        topology_instances[int(part["id"])]
+        for part in loose_parts
+        if isinstance(part, Mapping)
+        and int(part["id"]) in topology_instances
+    )
+    robot_base_xy = {
+        robot_id: tuple(spec.base_pose.position[:2])
+        for robot_id, spec in robots.items()
+    }
+    preferred_robots: dict[str, str] = {}
+    for instance_id in loose_instance_ids:
+        task = next(
+            (
+                item
+                for item in plan.tasks.values()
+                if item.physical_instance_id == instance_id
+            ),
+            None,
+        )
+        if task is not None and task.primary_robot in robot_base_xy:
+            preferred_robots[instance_id] = task.primary_robot
+        else:
+            preferred_robots[instance_id] = min(
+                robot_base_xy,
+                key=lambda robot: (
+                    (robot_base_xy[robot][0] - baseplate_position[0]) ** 2
+                    + (robot_base_xy[robot][1] - baseplate_position[1]) ** 2,
+                    robot,
+                ),
+            )
+    allocations = allocate_initial_slots(
+        loose_instance_ids,
+        preferred_robots=preferred_robots,
+        robot_base_xy=robot_base_xy,
+        board_center_xy=(baseplate_position[0], baseplate_position[1]),
+        board_half_extent_xy=(
+            max(0.08, size[0] * 0.008 / 2),
+            max(0.08, size[1] * 0.008 / 2),
+        ),
+    )
+
     env = _mapping(config.get("Env_Config"), "Env_Config")
     storage = _mapping(env.get("Storage_Config"), "Env_Config.Storage_Config")
     workspace_path = storage.get("Prim_Path", "/World/LegoWorkspace")
     if type(workspace_path) is not str or not workspace_path.startswith("/"):
         raise RuntimeHostInputError("workspace path must be absolute")
     scene_config = IsaacSceneConfig(
-        _seq(plate.get("Position"), "baseplate position", 3),
-        _seq(plate.get("Orientation"), "baseplate orientation", 4),
+        baseplate_position,
+        baseplate_orientation,
         workspace_path,
         _seq(storage.get("Size"), "workspace size", 3),
         _seq(storage.get("Position"), "workspace position", 3),
@@ -148,5 +205,11 @@ def build_runtime_host_inputs(
         60,
         collision_filter_robot_id,
         tuple(collision_filter_instance_ids),
+        {item: allocation.position_xy_m for item, allocation in allocations.items()},
+        {
+            item: float(plan.goal_parts[item].orientation_quarter_turns) * pi / 2.0
+            for item in allocations
+        },
+        {item: dict(allocation.reason) for item, allocation in allocations.items()},
     )
     return RuntimeHostInputs(topology, MappingProxyType(dict(robots)), scene_config)

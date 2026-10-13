@@ -274,7 +274,7 @@ def closing_yaw_deg(aabb_min: Sequence[float], aabb_max: Sequence[float]) -> flo
     if not (math.isfinite(dx) and math.isfinite(dy)):
         raise ValueError("brick AABB extents must be finite")
     if abs(dy - dx) <= 1e-4:
-        return 180.0
+        return 0.0
     return 90.0 if dy > dx else 0.0
 
 

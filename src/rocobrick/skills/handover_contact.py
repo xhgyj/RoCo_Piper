@@ -101,6 +101,7 @@ class FingerContactGuard:
         self.policy, self.bounds = policy, bounds
         self.pairs = finger_pairs(donor, receiver)
         self.last_time: float | None = None
+        self.last_phase: str | None = None
         self.contact_since: dict[frozenset[str], float] = {}
         self.previous_tcp: dict[str, Pose] = {}
         self.summary = {
@@ -132,12 +133,20 @@ class FingerContactGuard:
         if not isinstance(frames, list) or not frames:
             raise ValueError("finger contact history is empty")
         now = finite(snapshot["sim_time_s"], "finger observation time")
-        if (
-            self.last_time is not None
-            and not 0 < now - self.last_time <= self.policy.max_report_gap_s
+        allowed = phase in CONTACT_PHASES
+        # Preparation/free-space observations only prove that no named finger
+        # pair contacted.  They can be separated by a slow control round trip
+        # while Isaac continues stepping, so they must not seed the strict
+        # continuity window used by contact phases.  Rebase on the first
+        # contact-phase sample, then retain the fail-closed gap check across
+        # all subsequent contact phases.
+        if not allowed or self.last_phase not in CONTACT_PHASES:
+            self.last_time = None
+            self.previous_tcp = {}
+        elif self.last_time is not None and not (
+            0 < now - self.last_time <= self.policy.max_report_gap_s
         ):
             raise ValueError("finger contact observer gap exceeded")
-        allowed = phase in CONTACT_PHASES
         # A shared scene snapshot includes the actual physics TCPs. Bound both
         # arms' motion during contact, not just the receiver's command speed.
         if allowed and self.last_time is not None:
@@ -227,7 +236,11 @@ class FingerContactGuard:
                 p: t for p, t in self.contact_since.items() if p in totals
             }
             self.summary["samples"] += 1
-        self.last_time, self.previous_tcp = now, dict(tcp_poses)
+        self.last_time, self.previous_tcp, self.last_phase = (
+            now,
+            dict(tcp_poses),
+            phase,
+        )
 
     def require_clear(self) -> None:
         """Require physical contact loss before leaving the contact window."""

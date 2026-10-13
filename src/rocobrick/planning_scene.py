@@ -106,6 +106,10 @@ def scene_digest(update: PlanningSceneUpdate) -> str:
                 f"allowed_collision_pair={first}|{second}"
                 for first, second in update.allowed_collision_pairs
             ],
+            *[
+                f"forbidden_collision_pair={first}|{second}"
+                for first, second in update.forbidden_collision_pairs
+            ],
         )
     )
     return _sha256_text(identity)
@@ -215,6 +219,7 @@ class PlanningSceneUpdate:
     expected_scene_digest: str
     allowed_collision_pairs: tuple[tuple[str, str], ...] = ()
     schema: str = SCHEMA
+    forbidden_collision_pairs: tuple[tuple[str, str], ...] = ()
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "scene_id", _string(self.scene_id, "scene_id"))
@@ -246,6 +251,16 @@ class PlanningSceneUpdate:
                 "allowed_collision_pairs must be unique and lexicographically ordered"
             )
         object.__setattr__(self, "allowed_collision_pairs", pairs)
+        forbidden = tuple((str(first), str(second))
+                          for first, second in self.forbidden_collision_pairs)
+        if (any(not first or not second or first >= second
+                for first, second in forbidden)
+                or len(set(forbidden)) != len(forbidden)
+                or tuple(sorted(forbidden)) != forbidden):
+            raise ValueError("forbidden_collision_pairs must be canonical unique ordered pairs")
+        if set(forbidden) & set(pairs):
+            raise ValueError("collision pairs cannot be both allowed and forbidden")
+        object.__setattr__(self, "forbidden_collision_pairs", forbidden)
         if not _is_sha256(self.expected_scene_digest):
             raise ValueError(
                 "expected_scene_digest must be a lowercase SHA-256 digest"

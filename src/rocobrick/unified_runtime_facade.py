@@ -4,15 +4,21 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Mapping
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from typing import Protocol
 
 from rocobrick.coordinated_session import (
     CoordinatedSessionRequest,
+    CoordinatedSessionResult,
     FreeSpaceMotionEvidence,
     FreeSpaceMotionRequest,
 )
 from rocobrick.execution.operation_state_ledger import OperationStateLedger
+from rocobrick.planning_scene import box_from_aabb
+from rocobrick.skills.observation import _pose, parse_pick_observation
+from rocobrick.skills.pick import _tcp_relative_aabb
+from rocobrick.skills.placement_geometry import compose, inverse, pose_error
+from rocobrick.skills.support_evidence import verify_support_contact
 from rocobrick.unified_dual_arm_runtime import (
     SharedSceneSnapshot,
     SuccessorPrePhaseEvidence,
@@ -44,7 +50,7 @@ class HandoverContinuationBoundary(Protocol):
 
 
 class UnifiedDualArmRuntimeFacade:
-    """Dispatch combined planning without claiming physical execution."""
+    """Dispatch one combined plan and require measured physical completion."""
 
     def __init__(
         self,
@@ -153,6 +159,70 @@ class UnifiedDualArmRuntimeFacade:
             {str(name): float(value) for name, value in start_state.items()},
         )
 
+    def _free_space_request(
+        self, request: FreeSpaceMotionRequest, *, plan_only: bool
+    ) -> CoordinatedSessionRequest:
+        """Use the same measured collision facts for planning and execution.
+
+        Returns:
+            A request bound to this snapshot, joints and physical facts.
+        """
+        coordinated = request.to_coordinated_request(plan_only=plan_only)
+        robots = request.scene_snapshot.get("robots", {})
+        facts = {
+            robot: dict((robots.get(robot) or {}).get("facts") or {})
+            for robot in request.participants
+        }
+        for robot, carried in request.physical_facts.items():
+            facts[robot].update(dict(carried))
+        if self._state_ledger is not None:
+            for robot in request.participants:
+                facts[robot].update(
+                    {
+                        key: dict(state.evidence)
+                        for key, state in self._state_ledger.snapshot(robot).items()
+                        if key.startswith(("holding:", "supporting:"))
+                    }
+                )
+        return replace(
+            coordinated,
+            physical_facts=self._refresh_physical_facts(request.scene_snapshot, facts),
+        )
+
+    async def plan_free_space(
+        self, request: FreeSpaceMotionRequest
+    ) -> CoordinatedSessionResult:
+        """Evaluate a candidate in the existing plan-only worker lane.
+
+        This may refresh the measured MoveIt world, but never prepares or
+        sends controller goals. Selected targets are revalidated/replanned
+        from fresh measured state by normal execute_free_space afterward.
+
+        Returns:
+            Strict no-motion planning evidence, not arrival or custody.
+        """
+        if not isinstance(request, FreeSpaceMotionRequest):
+            raise TypeError("plan_free_space requires FreeSpaceMotionRequest")
+        coordinated = self._free_space_request(request, plan_only=True)
+        plan = getattr(self._session, "execute_successor_pre_phase", None)
+        if not callable(plan):
+            raise RuntimeError("combined plan-only transport is unavailable")
+        result = await asyncio.to_thread(plan, coordinated)
+        if not isinstance(result, CoordinatedSessionResult) or (
+            result.coordination_id != coordinated.coordination_id
+            or result.robots != coordinated.robots
+            or result.participants != coordinated.participants
+            or result.lifecycle.get("plan_only") is not True
+            or result.lifecycle.get("physical_execution") is not False
+            or result.lifecycle.get("started") is not False
+            or result.lifecycle.get("prepared") is not False
+            or result.lifecycle.get("terminal") is not True
+        ):
+            raise RuntimeError(
+                "candidate plan returned unbound or physical execution evidence"
+            )
+        return result
+
     async def execute_free_space(
         self, request: FreeSpaceMotionRequest
     ) -> FreeSpaceMotionEvidence:
@@ -164,41 +234,7 @@ class UnifiedDualArmRuntimeFacade:
         if not isinstance(request, FreeSpaceMotionRequest):
             raise TypeError("execute_free_space requires FreeSpaceMotionRequest")
         try:
-            coordinated = request.to_coordinated_request(plan_only=False)
-            robots = request.scene_snapshot.get("robots")
-            if isinstance(robots, Mapping):
-                facts = {
-                    robot: dict((robots.get(robot) or {}).get("facts") or {})
-                    for robot in request.participants
-                    if isinstance(robots.get(robot), Mapping)
-                }
-            else:
-                facts = {}
-            for robot, carried in request.physical_facts.items():
-                facts.setdefault(robot, {}).update(dict(carried))
-            if self._state_ledger is not None:
-                for robot in request.participants:
-                    confirmed = {
-                        key: dict(state.evidence)
-                        for key, state in self._state_ledger.snapshot(robot).items()
-                        if key.startswith(("holding:", "supporting:"))
-                    }
-                    if confirmed:
-                        facts.setdefault(robot, {}).update(confirmed)
-            coordinated = CoordinatedSessionRequest(
-                coordination_id=coordinated.coordination_id,
-                robots=coordinated.robots,
-                participants=coordinated.participants,
-                scene_digest=coordinated.scene_digest,
-                planning_group=coordinated.planning_group,
-                plan_only=False,
-                timeout_s=coordinated.timeout_s,
-                targets=coordinated.targets,
-                scene_snapshot=coordinated.scene_snapshot,
-                scene_version=coordinated.scene_version,
-                physical_facts=facts,
-                start_state=coordinated.start_state,
-            )
+            coordinated = self._free_space_request(request, plan_only=False)
             execute = getattr(self._session, "execute_coordinated_pre_phase", None)
             if not callable(execute):
                 raise RuntimeError("combined free-space transport is unavailable")
@@ -316,18 +352,31 @@ class UnifiedDualArmRuntimeFacade:
                 request, "pre-phase requires a motion successor and contexts"
             )
         try:
-            snapshot = await asyncio.to_thread(self._session.observe_all)
+            shared = await asyncio.to_thread(self._session.observe_shared_scene)
+            snapshot = shared["scene_snapshot"]
+            if "scene_digest" not in snapshot:
+                snapshot = await asyncio.to_thread(self._session.observe_all)
+            start_state = shared.get("start_state", {})
             document = request.scene_snapshot.document
             robots = document.get("robots")
             facts = (
                 {
                     robot: dict(block.get("facts") or {})
                     for robot, block in (robots or {}).items()
+                    if robot in request.participants
                 }
                 if isinstance(robots, Mapping)
                 else {}
             )
-            operation = request.successor_operations[0]
+            facts = self._refresh_physical_facts(snapshot, facts)
+            facts = {robot: facts.get(robot, {}) for robot in request.participants}
+            operations = request.successor_operations
+            operation = operations[0]
+            operation_document = asdict(operation)
+            if len(operations) > 1:
+                operation_document["cohort_operations"] = [
+                    asdict(item) for item in operations[1:]
+                ]
             coordinated = CoordinatedSessionRequest(
                 coordination_id=request.transition_id,
                 robots=tuple(sorted(self._contexts)),
@@ -338,8 +387,10 @@ class UnifiedDualArmRuntimeFacade:
                 timeout_s=60.0,
                 targets={},
                 scene_snapshot=snapshot,
+                scene_version=shared["planning_scene_version"],
+                start_state=start_state,
                 physical_facts=facts or {robot: {} for robot in request.participants},
-                operation=asdict(operation),
+                operation=operation_document,
                 target_contexts={
                     robot: asdict(context)
                     for robot, context in self._contexts.items()
@@ -353,13 +404,20 @@ class UnifiedDualArmRuntimeFacade:
                     "combined physical pre-phase transport is unavailable",
                 )
             result = await asyncio.to_thread(execute, coordinated)
+            if (
+                not isinstance(result, CoordinatedSessionResult)
+                or result.coordination_id != request.transition_id
+                or result.participants != request.participants
+                or result.robots != coordinated.robots
+            ):
+                raise RuntimeError("combined pre-phase result identity mismatch")
         except Exception as error:
             return failed_pre_phase(
                 request, f"combined pre-phase dispatch failed: {error}"
             )
         lifecycle = result.lifecycle
         participants = lifecycle.get("participants") or {}
-        arrival = bool(participants) and all(
+        arrival = set(participants) == set(request.participants) and all(
             isinstance(item, Mapping) and item.get("arrival_confirmed") is True
             for item in participants.values()
         )
@@ -378,6 +436,14 @@ class UnifiedDualArmRuntimeFacade:
             }
             for robot in request.participants
         }
+        continuity_error = None
+        if passed and arrival:
+            try:
+                final_snapshot = await asyncio.to_thread(self._session.observe_all)
+                final_facts = self._refresh_physical_facts(final_snapshot, final_facts)
+            except (ValueError, RuntimeError, KeyError) as error:
+                continuity_error = str(error)
+                passed = False
         return SuccessorPrePhaseEvidence(
             transition_id=request.transition_id,
             predecessor_operation_ids=request.predecessor_operation_ids,
@@ -398,10 +464,17 @@ class UnifiedDualArmRuntimeFacade:
             evidence={
                 "lifecycle": dict(lifecycle),
                 "trajectory": dict(result.trajectory),
-                "plan_only_admission": result.passed,
+                "combined_execution_passed": result.passed,
             },
             terminal_cleanup=False,
-            reason=None if passed else str(result.error or lifecycle.get("error")),
+            reason=None
+            if passed and arrival
+            else str(
+                continuity_error
+                or result.error
+                or lifecycle.get("error")
+                or "participant arrival not confirmed"
+            ),
         )
 
     async def validate_pre_phase(
@@ -430,25 +503,118 @@ class UnifiedDualArmRuntimeFacade:
         except Exception:
             return False
         document = request.scene_snapshot.document
+        trajectory = evidence.evidence.get("trajectory", {})
+        planning = (
+            trajectory.get("planning_scene", {})
+            if isinstance(trajectory, Mapping)
+            else {}
+        )
+        expected_version = (
+            planning.get("scene_version", request.scene_version)
+            if isinstance(planning, Mapping)
+            else request.scene_version
+        )
+        if isinstance(trajectory, Mapping):
+            expected_version = trajectory.get(
+                "planning_scene_version", expected_version
+            )
         return (
             snapshot.get("session_id") == document.get("session_id")
             and snapshot.get("manifest_sha256") == document.get("manifest_sha256")
-            and version == request.scene_version
+            and version == expected_version
         )
 
     async def cancel_pre_phase(self, transition_id: str) -> Mapping[str, object]:
-        """Report that this plan-only facade has not dispatched controller motion.
+        """Cancel physical participants through the existing session boundary.
 
         Returns:
-            Explicit no-motion cancellation evidence.
+            The actual session's independent cancellation/terminal proof.
         """
-        return {
-            "transition_id": transition_id,
-            "attempted": False,
-            "terminal": True,
-            "safe": True,
-            "motion_sent": False,
-        }
+        result = await self.cancel_free_space(transition_id)
+        return {**result, "transition_id": transition_id}
+
+    def _refresh_physical_facts(self, snapshot, facts):
+        """Carry measured attachments and recheck custody/support across motion.
+
+        Returns:
+            A fresh copy of the retained facts, never newly inferred custody.
+        """
+        refreshed = {robot: dict(block) for robot, block in facts.items()}
+        for robot, block in refreshed.items():
+            for key, proof in tuple(block.items()):
+                if key.startswith("holding:"):
+                    identity = key.removeprefix("holding:")
+                    sample = parse_pick_observation(
+                        snapshot,
+                        robot_id=robot,
+                        physical_instance_id=identity,
+                        session_id=snapshot["session_id"],
+                        manifest_sha256=snapshot["manifest_sha256"],
+                    )
+                    reference = proof.get("continuation_observation") or proof.get(
+                        "lift_start_observation"
+                    )
+                    if isinstance(reference, Mapping):
+                        old = compose(
+                            inverse(_pose(reference["object_pose"], "held reference")),
+                            _pose(reference["tcp_pose"], "held TCP reference"),
+                        )
+                        live = compose(inverse(sample.object_pose), sample.tcp_pose)
+                        position, angle = pose_error(live, old)
+                        context = self._contexts.get(robot)
+                        if context is not None and (
+                            position > context.params.hold_follow_tolerance_m
+                            or angle > context.params.holding_orientation_tolerance_rad
+                        ):
+                            raise ValueError(
+                                f"{robot} lost measured holding continuity"
+                            )
+                    minimum, maximum = _tcp_relative_aabb(sample)
+                    payload = dict(proof.get("attachment") or {})
+                    payload.update(
+                        {
+                            "object_id": identity,
+                            "frame_id": f"{robot}_rocobrick_tcp",
+                            "link_name": f"{robot}_rocobrick_tcp",
+                            "minimum_m": list(minimum),
+                            "maximum_m": list(maximum),
+                            "geometry_digest": box_from_aabb(
+                                object_id=identity,
+                                frame_id=f"{robot}_rocobrick_tcp",
+                                minimum_m=minimum,
+                                maximum_m=maximum,
+                            ).geometry_digest,
+                            "touch_links": [
+                                f"{robot}_gripper_link1",
+                                f"{robot}_gripper_link2",
+                            ],
+                        }
+                    )
+                    block[key] = {
+                        **proof,
+                        "attachment": payload,
+                        "continuation_observation": asdict(sample),
+                    }
+                elif key.startswith("supporting:"):
+                    identity = key.removeprefix("supporting:")
+                    sample, contact = verify_support_contact(
+                        snapshot,
+                        robot_id=robot,
+                        upper_id=identity,
+                        session_id=snapshot["session_id"],
+                        manifest_sha256=snapshot["manifest_sha256"],
+                    )
+                    if isinstance(proof.get("upper_pose"), Mapping):
+                        position, angle = pose_error(
+                            sample.object_pose,
+                            _pose(proof["upper_pose"], "support reference"),
+                        )
+                        if position > 0.002 or angle > 0.05236:
+                            raise ValueError(
+                                "supported upper deflected before continuation"
+                            )
+                    block[key] = {**proof, "support_contact_confirmed": contact}
+        return refreshed
 
     def terminal_pre_phase_policy(self, operations) -> TerminalPrePhasePolicy | None:
         """Return the explicit terminal departure policy, never an inferred one.

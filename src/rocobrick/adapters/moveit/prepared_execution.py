@@ -61,7 +61,11 @@ def perform_prepared_motion(
         def admit_live() -> None:
             if cancel_requested is not None and cancel_requested():
                 raise ValueError("prepared motion canceled before dispatch")
-            version = session.unified_planning_scene_version()
+            # Production MoveIt exposes the scene version as a property;
+            # older test/worker transports expose a zero-argument method.
+            version = getattr(session, "unified_planning_scene_version", None)
+            if callable(version):
+                version = version()
             joints = session.unified_start_state()
             snapshot = session.observe_all()
             request.validate_live(

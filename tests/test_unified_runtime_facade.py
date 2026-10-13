@@ -129,9 +129,9 @@ def test_facade_exposes_the_complete_scheduler_protocol():
         "terminal_pre_phase_policy",
     ):
         assert callable(getattr(facade, name)), name
-    assert asyncio.run(
-        facade.cancel_pre_phase("transition-1")
-    )["motion_sent"] is False
+    cancellation = asyncio.run(facade.cancel_pre_phase("transition-1"))
+    assert cancellation["terminal"] is False
+    assert cancellation["safe"] is False
     assert facade.terminal_pre_phase_policy(()) is None
 
 
@@ -235,15 +235,15 @@ def test_execute_pre_phase_promotes_only_full_physical_evidence():
             "safe_to_release": True,
             "participants": {
                 "piper_0": {"arrival_confirmed": True},
-                "piper_1": {"arrival_confirmed": True},
             },
         },
         True,
+        participants=("piper_0",),
     )
     session = FakeSession()
     session.execution_result = ok
     facade = UnifiedDualArmRuntimeFacade(
-        session, contexts={"piper_0": _context()}, state_ledger=ledger()
+        session, contexts={robot: _context() for robot in ROBOTS}, state_ledger=ledger()
     )
     evidence = asyncio.run(facade.execute_pre_phase(request()))
     assert evidence.passed
@@ -265,6 +265,7 @@ def test_execute_pre_phase_promotes_only_full_physical_evidence():
         },
         False,
         "arrival missed",
+        participants=("piper_0",),
     )
     session.execution_result = no_arrival
     denied = asyncio.run(facade.execute_pre_phase(request()))
@@ -292,7 +293,7 @@ def test_executor_routes_the_scheduler_protocol_through_the_facade():
         executor.execute_pre_phase(asyncio.run(_request_for(("piper_0",), item)))
     )
     assert not evidence.passed
-    assert "physical facts must cover every participant" in (evidence.reason or "")
+    assert "scene-state schema" in (evidence.reason or "")
     assert executor.terminal_pre_phase_policy(()) is None
 
 

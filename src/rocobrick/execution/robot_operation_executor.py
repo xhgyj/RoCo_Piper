@@ -873,6 +873,17 @@ class SkillOperationExecutor:
         if self._state_ledger is None:
             return False
         self._state_ledger.reconcile_pre_phase(request, evidence)
+        # Pass the validated receipt out-of-band: the external plan stays
+        # immutable and a skill must not repeat the public-space movement.
+        backends = {
+            "SUPPORT_TOP": self._support_backends,
+            "PLACE_UP": self._place_up_backends,
+        }
+        for operation in request.successor_operations:
+            handler = backends.get(operation.skill, {}).get(operation.executor_robot_id)
+            bind = getattr(handler, "bind_pre_phase", None)
+            if callable(bind):
+                bind(operation.operation_id, evidence)
         return True
 
     async def cancel_pre_phase(self, transition_id: str) -> Mapping[str, object]:

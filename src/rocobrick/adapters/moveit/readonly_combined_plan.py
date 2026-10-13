@@ -229,6 +229,7 @@ def perform_readonly_combined_plan(
         AttributeError,
         KeyError,
         RuntimeError,
+        TimeoutError,
         TypeError,
         ValueError,
     ) as error:
@@ -249,7 +250,7 @@ def perform_readonly_combined_plan(
                 "plan_only": True,
                 "read_only": True,
                 "physical_execution": False,
-                "terminal": True,
+                "terminal": not isinstance(error, TimeoutError),
                 "safe_to_release": False,
                 **failure_details,
             },

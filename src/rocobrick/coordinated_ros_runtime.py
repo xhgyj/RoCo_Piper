@@ -223,8 +223,20 @@ class CoordinatedMoveItPlanRuntime:
             goal.planning_options.plan_only = True
             goal.planning_options.replan = False
             return goal
-        for robot_id in request.participants:
-            target = request.targets[robot_id]
+        planning_targets = self._planning_targets(request)
+        grasp_regions = []
+        for robot_id, target in planning_targets.items():
+            if "grasp_region" in target:
+                if set(target) != {"grasp_region"}:
+                    raise ValueError(
+                        "grasp_region cannot carry fixed joint/pose targets"
+                    )
+                region = target["grasp_region"]
+                self._append_grasp_constraints(
+                    constraints, region, robot_id, source, factories
+                )
+                grasp_regions.append(region)
+                continue
             raw_pose = target.get("tcp_pose")
             if request.scene_snapshot and isinstance(raw_pose, Mapping):
                 if not isinstance(source, Mapping) or any(
@@ -306,12 +318,103 @@ class CoordinatedMoveItPlanRuntime:
             raise ValueError(
                 f"target {robot_id} must carry exact tcp_pose or joint_positions"
             )
+        if grasp_regions:
+            constraints.name = self._grasp_sampler_binding(grasp_regions)
         motion.goal_constraints.append(constraints)
         motion.path_constraints = path_constraints
         goal.request = motion
         goal.planning_options.plan_only = True
         goal.planning_options.replan = False
         return goal
+
+    @staticmethod
+    def _planning_targets(request):
+        """Keep non-dispatched session arms fixed for a region request.
+
+        Returns:
+            Actual participants plus measured whole-path stationary peers.
+        """
+        targets = dict(request.targets)
+        if any("grasp_region" in target for target in targets.values()):
+            for robot in request.robots:
+                targets.setdefault(robot, {"maintain_pose": True})
+        return targets
+
+    @staticmethod
+    def _grasp_sampler_binding(regions):
+        """Encode bounded geometry for the native MoveIt goal sampler.
+
+        Returns:
+            One combined sampler binding, with independent per-arm regions.
+        """
+        from rocobrick.skills.grasp_region import GRASP_REGION_SCHEMA
+
+        tokens = [GRASP_REGION_SCHEMA, str(len(regions))]
+        for region in regions:
+            vertices = region["pad_vertices_tcp"]
+            numbers = [
+                *region["object_in_base"]["position_xyz"],
+                *region["object_in_base"]["orientation_xyzw"],
+                *region["base_in_world"]["position_xyz"],
+                *region["base_in_world"]["orientation_xyzw"],
+                *region["center"],
+                *region["half_extents"],
+                region["ground_top_world_m"],
+                region["floor_margin_m"],
+                region["contact_margin_m"],
+                region["flange_to_tcp_m"],
+                region["approach_opening_m"],
+                *(value for vertex in vertices for value in vertex),
+            ]
+            tokens.extend(
+                [region["robot_id"], region["source_sha256"], str(len(vertices))]
+            )
+            tokens.extend(format(value, ".17g") for value in numbers)
+        return ";".join(tokens)
+
+    @staticmethod
+    def _append_grasp_constraints(constraints, region, robot_id, source, factories):
+        """Broad ROS envelopes; the native sampler enforces side-pinch geometry."""
+        from rocobrick.skills.grasp_region import validate_grasp_region
+        from rocobrick.skills.observation import Pose, _pose
+        from rocobrick.skills.placement_geometry import compose
+
+        validate_grasp_region(region)
+        if (
+            region["robot_id"] != robot_id
+            or not isinstance(source, Mapping)
+            or any(
+                region[key] != source.get(key)
+                for key in ("runtime_model_sha256", "source_sha256")
+            )
+        ):
+            raise ValueError("grasp region identity/calibration does not match runtime")
+        pc = factories.position_constraint_factory()
+        pc.header.frame_id = region["frame_id"]
+        pc.link_name = region["tip_link"]
+        primitive = factories.solid_primitive_factory()
+        primitive.type = getattr(type(primitive), "SPHERE", 2)
+        primitive.dimensions = [math.sqrt(sum(e * e for e in region["half_extents"]))]
+        center = compose(
+            _pose(region["object_in_base"], "object"),
+            Pose(tuple(region["center"]), (0.0, 0.0, 0.0, 1.0)),
+        )
+        pose = factories.pose_factory()
+        pose.position.x, pose.position.y, pose.position.z = center.position_xyz
+        pose.orientation.w = 1.0
+        pc.constraint_region.primitives.append(primitive)
+        pc.constraint_region.primitive_poses.append(pose)
+        pc.weight = 1.0
+        constraints.position_constraints.append(pc)
+        oc = factories.orientation_constraint_factory()
+        oc.header.frame_id = pc.header.frame_id
+        oc.link_name = pc.link_name
+        oc.orientation.w = 1.0
+        oc.absolute_x_axis_tolerance = math.pi
+        oc.absolute_y_axis_tolerance = math.pi
+        oc.absolute_z_axis_tolerance = math.pi
+        oc.weight = 1.0
+        constraints.orientation_constraints.append(oc)
 
     @staticmethod
     def _append_region_constraints(constraints, region, request, factories) -> None:
@@ -407,7 +510,7 @@ class CoordinatedMoveItPlanRuntime:
         """Reject returned plans that moved a held joint at any waypoint."""
         if len(set(names)) != len(names):
             raise ValueError("returned joint names are duplicated")
-        for robot, target in request.targets.items():
+        for robot, target in self._planning_targets(request).items():
             if target.get("maintain_pose") is not True:
                 continue
             tolerance = self._hold_tolerance(target)

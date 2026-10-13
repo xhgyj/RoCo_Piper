@@ -6,7 +6,11 @@ import math
 from collections.abc import Mapping
 from dataclasses import asdict
 
-from rocobrick.skills.observation import _pose, parse_place_observation
+from rocobrick.skills.observation import (
+    _pose,
+    parse_pick_observation,
+    parse_place_observation,
+)
 from rocobrick.skills.placement_geometry import compose, inverse, pose_error
 
 GUARD_KEYS = frozenset(
@@ -50,6 +54,19 @@ UP_GUARD_KEYS = frozenset(
     }
 )
 UP_MODES = ("insert_up", "unload_up")
+SUPPORT_GUARD_KEYS = frozenset(
+    {
+        "robot_id",
+        "session_id",
+        "manifest_sha256",
+        "upper_id",
+        "supported_pose",
+        "supported_position_m",
+        "supported_angle_rad",
+        "force_limit_n",
+        "mode",
+    }
+)
 
 # Probe mode stops at the FIRST measured interface contact: the held and
 # support AABBs overlap laterally and their world-Z separation has closed to
@@ -66,6 +83,7 @@ def allows_recovery(reason: object) -> bool:
     """
     return reason in {
         "connection_confirmed",
+        "support_contact_confirmed",
         "support_deflected",
         "supported_upper_disturbed",
         "grasp_slipped",
@@ -88,8 +106,20 @@ def validate_guard(document: object) -> Mapping[str, object]:
     if not isinstance(document, Mapping):
         raise ValueError("contact guard must be a mapping")
     mode = document.get("mode")
-    if mode in UP_MODES:
-        expected: frozenset[str] = UP_GUARD_KEYS
+    if mode == "support_top":
+        expected = SUPPORT_GUARD_KEYS
+        poses = ("supported_pose",)
+        numbers = ("supported_position_m", "supported_angle_rad", "force_limit_n")
+    elif mode in UP_MODES:
+        expected = UP_GUARD_KEYS
+        if "support_robot_id" in document:
+            expected = expected | {"support_robot_id"}
+            if (
+                not isinstance(document["support_robot_id"], str)
+                or not document["support_robot_id"]
+                or document["support_robot_id"] == document.get("robot_id")
+            ):
+                raise ValueError("contact guard support robot identity is invalid")
         poses = ("supported_pose", "held_transform", "desired_lower")
         numbers = (
             "supported_position_m",
@@ -110,12 +140,13 @@ def validate_guard(document: object) -> Mapping[str, object]:
         )
     if set(document) != expected:
         raise ValueError("contact guard keys do not match the strict schema")
-    for key in ("robot_id", "session_id", "manifest_sha256", "upper_id", "lower_id"):
+    identity_keys = ("robot_id", "session_id", "manifest_sha256", "upper_id")
+    for key in identity_keys + (() if mode == "support_top" else ("lower_id",)):
         if not isinstance(document[key], str) or not document[key]:
             raise ValueError(f"contact guard {key} must be nonempty")
-    if document["upper_id"] == document["lower_id"]:
+    if mode != "support_top" and document["upper_id"] == document["lower_id"]:
         raise ValueError("contact guard pair must contain distinct objects")
-    if mode not in ("insert", "unload", "probe", *UP_MODES):
+    if mode not in ("insert", "unload", "probe", "support_top", *UP_MODES):
         raise ValueError("contact guard mode is unsupported")
     for key in poses:
         _pose(document[key], key)
@@ -250,6 +281,21 @@ def _inspect_upward(sample, scene, guard):
         return None, measurements
     if conflict:
         return "wrong_interface_connection", measurements
+    if "support_robot_id" in guard:
+        from rocobrick.skills.support_evidence import verify_support_contact
+
+        try:
+            _, support = verify_support_contact(
+                scene,
+                robot_id=guard["support_robot_id"],
+                upper_id=guard["upper_id"],
+                session_id=guard["session_id"],
+                manifest_sha256=guard["manifest_sha256"],
+            )
+            measurements["support_contact"] = support
+        except ValueError as error:
+            measurements["support_contact_error"] = str(error)
+            return "support_contact_lost", measurements
     if (
         supported_p > guard["supported_position_m"]
         or supported_a > guard["supported_angle_rad"]
@@ -275,6 +321,66 @@ def inspect_contact(scene: Mapping[str, object], guard: Mapping[str, object]):
         Stop reason (or None) and JSON-safe measurements of this observation.
     """
     validate_guard(guard)
+    if guard["mode"] == "support_top":
+        from rocobrick.skills.support_evidence import verify_support_contact
+
+        sample = parse_pick_observation(
+            scene,
+            robot_id=guard["robot_id"],
+            physical_instance_id=guard["upper_id"],
+            session_id=guard["session_id"],
+            manifest_sha256=guard["manifest_sha256"],
+        )
+        position, angle = pose_error(
+            sample.object_pose, _pose(guard["supported_pose"], "supported upper")
+        )
+        measured = {
+            "sequence": sample.sequence,
+            "sim_time_s": sample.sim_time_s,
+            "supported_position_m": position,
+            "supported_angle_rad": angle,
+        }
+        if (
+            position > guard["supported_position_m"]
+            or angle > guard["supported_angle_rad"]
+        ):
+            return "supported_upper_disturbed", measured
+        report = scene.get("pad_object_contacts")
+        if not isinstance(report, Mapping) or not isinstance(
+            report.get("contacts"), list
+        ):
+            raise ValueError("support approach requires actual contact sensing")
+        if (
+            report.get("schema") != "rocobrick-pad-object-contacts/v1"
+            or report.get("source") != "physx_contact_report"
+            or any(
+                report.get(key) != scene.get(key)
+                for key in ("session_id", "manifest_sha256", "sequence", "sim_time_s")
+            )
+        ):
+            raise ValueError("support approach contact report is stale or foreign")
+        force = sum(
+            float(item["normal_force_n"])
+            for item in report["contacts"]
+            if item.get("robot_id") == guard["robot_id"]
+            and item.get("physical_instance_id") == guard["upper_id"]
+        )
+        if not math.isfinite(force) or force < 0:
+            raise ValueError("support reaction is not finite")
+        measured["support_force_n"] = force
+        if force > guard["force_limit_n"]:
+            return "support_force_exceeded", measured
+        if force > 0:
+            _, contact = verify_support_contact(
+                scene,
+                robot_id=guard["robot_id"],
+                upper_id=guard["upper_id"],
+                session_id=guard["session_id"],
+                manifest_sha256=guard["manifest_sha256"],
+            )
+            measured["support_contact"] = contact
+            return "support_contact_confirmed", measured
+        return None, measured
     sample = parse_place_observation(
         scene,
         robot_id=guard["robot_id"],

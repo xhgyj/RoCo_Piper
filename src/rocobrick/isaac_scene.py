@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import os
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from math import cos, sin
 from pathlib import Path
 
 from rocobrick.bricksim_topology import BrickSimTopologyBundle
@@ -29,6 +30,15 @@ class IsaacSceneConfig:
     physics_hz: int
     collision_filter_robot_id: str | None = None
     collision_filter_instance_ids: tuple[str, ...] = ()
+    # Optional allocator output. Z and orientation remain those measured from
+    # the imported BrickSim part; only the initial XY slot is selected here.
+    initial_part_positions_xy: Mapping[str, tuple[float, float]] = field(
+        default_factory=dict
+    )
+    initial_part_yaws_rad: Mapping[str, float] = field(default_factory=dict)
+    initial_part_allocation: Mapping[str, Mapping[str, object]] = field(
+        default_factory=dict
+    )
 
 
 @dataclass(frozen=True)
@@ -211,6 +221,51 @@ async def load_verified_scene(
     )
     if unarranged or set(arranged) != set(loose_paths.values()):
         raise SceneBootstrapError(f"failed to arrange loose parts: {unarranged}")
+    if config.initial_part_positions_xy:
+        for instance_id, position_xy in config.initial_part_positions_xy.items():
+            topology_id = topology.topology_id_by_instance.get(instance_id)
+            if topology_id is None or topology_id not in loose_paths:
+                raise SceneBootstrapError(
+                    f"allocator target is not a loose loaded part: {instance_id}"
+                )
+            if (
+                not isinstance(position_xy, (tuple, list))
+                or len(position_xy) != 2
+            ):
+                raise SceneBootstrapError(
+                    f"allocator XY position is invalid for {instance_id}"
+                )
+            prim = SingleXFormPrim(prim_path=loose_paths[topology_id])
+            part_payload = next(
+                (
+                    item.get("payload", {})
+                    for item in topology.goal.get("parts", [])
+                    if isinstance(item, Mapping)
+                    and item.get("id") == topology_id
+                ),
+                {},
+            )
+            height_units = part_payload.get("H", 3)
+            if isinstance(height_units, bool) or not isinstance(height_units, (int, float)):
+                height_units = 3
+            # BrickSim's H units are 3.2 mm plate layers plus the 1.7 mm
+            # stud/top surface. Loose parts are outside the baseplate, so
+            # place the bottom on the ground plane instead of preserving
+            # arrange_parts_in_workspace's random Z/tilt.
+            height_m = float(height_units) * 0.0032 + 0.0017
+            yaw = float(config.initial_part_yaws_rad.get(instance_id, 0.0))
+            prim.set_world_pose(
+                position=np.asarray(
+                    (
+                        float(position_xy[0]),
+                        float(position_xy[1]),
+                        float(config.baseplate_position_m[2]) + height_m / 2.0,
+                    )
+                ),
+                orientation=np.asarray(
+                    (cos(yaw / 2.0), 0.0, 0.0, sin(yaw / 2.0))
+                ),
+            )
 
     articulations: dict[str, object] = {}
     for robot_id in sorted(robots):

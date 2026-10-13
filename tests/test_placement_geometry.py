@@ -102,3 +102,86 @@ def test_only_explicit_asset_symmetry_can_change_nominal_yaw(
         1
     ] == pytest.approx(expected_angle)
     assert desired.position_xyz == pytest.approx((0.092, 0.224, 0.0196))
+
+
+@pytest.mark.parametrize(
+    "quaternion",
+    [
+        (
+            -0.011421002447605133,
+            0.001834752270951867,
+            0.004789809696376324,
+            0.9999216198921204,
+        ),
+        (
+            -0.011421273462474346,
+            0.0018344814889132977,
+            0.004789730999618769,
+            0.9999216198921204,
+        ),
+        (
+            -0.011421500705182552,
+            0.0018346573924645782,
+            0.0047898320481181145,
+            0.9999216198921204,
+        ),
+    ],
+)
+@pytest.mark.parametrize("sign", [1, -1])
+def test_pose_error_recorded_lift_quaternions_have_no_false_rotation(quaternion, sign):
+    """Recorded sequences 73/74/75 retain their raw floats and equivalent signs."""
+    measured = Pose((0.0, 0.0, 0.0), quaternion)
+    expected = Pose((0.0, 0.0, 0.04), tuple(sign * value for value in quaternion))
+    original = measured.orientation_xyzw
+    distance, angle = pose_error(measured, expected)
+    assert distance == pytest.approx(0.04)
+    assert angle == 0.0
+    assert measured.orientation_xyzw == original
+
+
+@pytest.mark.parametrize(
+    "angle", [0.0, 1e-10, 1e-8, 1e-7, 1e-5, 0.2, math.pi, 2 * math.pi - 0.2]
+)
+@pytest.mark.parametrize("sign", [1, -1])
+@pytest.mark.parametrize(
+    "scales", [(1.0, 1.0), (1 - 1e-7, 1 + 1e-7), (1 + 1e-7, 1 - 1e-7)]
+)
+def test_pose_error_preserves_real_small_rotation_and_shortest_arc(angle, sign, scales):
+    """Normalizing valid sensor roundoff must never erase a genuine rotation."""
+    left = Pose((0.0, 0.0, 0.0), (0.0, 0.0, 0.0, scales[0]))
+    right = Pose(
+        (0.0, 0.0, 0.0),
+        (
+            0.0,
+            0.0,
+            sign * scales[1] * math.sin(angle / 2),
+            sign * scales[1] * math.cos(angle / 2),
+        ),
+    )
+    shortest = min(angle, 2 * math.pi - angle)
+    assert pose_error(left, right)[1] == pytest.approx(shortest, rel=1e-10, abs=1e-15)
+    assert pose_error(right, left)[1] == pytest.approx(shortest, rel=1e-10, abs=1e-15)
+
+
+@pytest.mark.parametrize(
+    "quaternion",
+    [
+        (0.0, 0.0, 0.0, 0.0),
+        (0.0, 0.0, float("nan"), 1.0),
+        (0.0, 0.0, float("inf"), 1.0),
+        (0.0, 0.0, 0.0, 2.0),
+        (False, 0.0, 0.0, 1.0),
+        (0.0, 0.0, 1.0),
+    ],
+)
+@pytest.mark.parametrize("invalid_side", ["measured", "expected"])
+def test_pose_error_rejects_invalid_quaternions_before_normalization(
+    quaternion, invalid_side
+):
+    """Bad poses fail closed instead of being turned into valid orientations."""
+    valid = Pose((0.0, 0.0, 0.0), (0.0, 0.0, 0.0, 1.0))
+    invalid = Pose((0.0, 0.0, 0.0), quaternion)
+    with pytest.raises(ValueError):
+        pose_error(
+            *((invalid, valid) if invalid_side == "measured" else (valid, invalid))
+        )

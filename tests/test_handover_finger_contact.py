@@ -174,6 +174,44 @@ def test_history_gap_and_observer_gap_are_errors():
         inspect(g, snapshot(1.3, sequence=2))
 
 
+def test_free_phase_observer_gap_rebases_before_contact():
+    """Slow preparation polling cannot block the first contact motion."""
+    g = guard()
+    inspect(g, snapshot(1.0), phase="free")
+    inspect(g, snapshot(1.3, sequence=2), phase="rendezvous")
+    # The first contact sample establishes a fresh continuity baseline.
+    inspect(g, snapshot(1.31, sequence=3), phase="approach")
+
+
+def test_contact_gap_remains_strict_after_preparation_rebase():
+    """Preparation rebasing does not weaken continuity during contact."""
+    g = guard()
+    inspect(g, snapshot(1.0), phase="free")
+    inspect(g, snapshot(1.3, sequence=2), phase="rendezvous")
+    inspect(g, snapshot(1.31, sequence=3), phase="approach")
+    with pytest.raises(ValueError, match="observer gap"):
+        inspect(g, snapshot(1.6, sequence=4), phase="receiver_close")
+
+
+@pytest.mark.parametrize("extra_render_steps", [False, True])
+def test_six_step_headed_history_requires_every_physics_tick(extra_render_steps):
+    """Render ticks cannot be silently missing from a purported 60 Hz history."""
+    dt = 1.0 / 60.0
+    time = 0.0
+    frames = []
+    for index in range(30):
+        time += dt
+        frames.append(dict(sim_time_s=time, dt_s=dt, contacts=[]))
+        if extra_render_steps and index % 6 == 0:
+            time += dt
+    raw = snapshot(frames[-1]["sim_time_s"], frames=frames)
+    if extra_render_steps:
+        with pytest.raises(ValueError, match="physics history is discontinuous"):
+            inspect(guard(), raw)
+    else:
+        inspect(guard(), raw)
+
+
 def test_measured_contact_speed_is_guarded():
     """Command retiming is not a substitute for measured speed admission."""
     g = guard()
@@ -256,7 +294,7 @@ def test_live_observer_actually_enforces_finger_guard(bad):
     live = object.__new__(LiveSimulationHandover)
     live.authorization, live.finger_policy = token, policy
     live.session = SimpleNamespace(
-        observe_handover_scene=lambda: {"scene_snapshot": raw}
+        observe_handover_scene=lambda: raw
     )
     live.phases = {request.operation_id: "approach"}
     live.contact_clear_required = set()

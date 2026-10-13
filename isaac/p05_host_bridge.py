@@ -102,7 +102,7 @@ import shlex
 import signal
 import sys
 import time
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -1252,6 +1252,34 @@ def sync_viewport_physics(world: object, fabric: object) -> None:
     fabric.force_update(float(world.get_physics_dt()), float(world.current_time))
 
 
+async def render_viewport_without_physics(
+    world: object, settings: object, app: object, refresh: Callable[[], None]
+) -> None:
+    """Yield to Kit for rendering, without adding an unobserved physics tick.
+
+    The bridge owns manual physics stepping and samples contacts after each
+    step. Match Isaac 5.1 SimulationContext.render_async's playSimulations
+    guard while retaining our explicit Fabric refresh and non-reentrant update.
+    Restore the caller's setting even on cancellation or rendering failure.
+    """
+    key = "/app/player/playSimulations"
+    previous = settings.get(key)
+    if not isinstance(previous, bool):
+        raise RuntimeError("Kit playSimulations setting is not a boolean")
+    before = (float(world.current_time), world.current_time_step_index)
+    settings.set_bool(key, False)
+    try:
+        refresh()
+        await app.next_update_async()
+        after = (float(world.current_time), world.current_time_step_index)
+        if after != before:
+            raise RuntimeError(
+                f"render-only Kit update advanced physics: {before} -> {after}"
+            )
+    finally:
+        settings.set_bool(key, previous)
+
+
 class BridgeState:
     """Holds live Kit/rclpy objects so ``shutdown`` can clean up in order."""
 
@@ -1261,6 +1289,7 @@ class BridgeState:
         self.defer_app_shutdown = False
         self.viewport_fabric = None
         self.viewport_sync_count = 0
+        self.viewport_render_only_count = 0
         self.exit_diagnostics_enabled = (
             os.environ.get("ROCOBRICK_EXIT_DIAGNOSTICS") == "1"
         )
@@ -1321,6 +1350,16 @@ class BridgeState:
         sync_viewport_physics(world, self.viewport_fabric)
         self.viewport_sync_count += 1
 
+    async def render_viewport(self, world: object) -> None:
+        """Refresh the viewport without letting Kit auto-step physics."""
+        from carb.settings import get_settings
+        from omni.kit.app import get_app
+
+        await render_viewport_without_physics(
+            world, get_settings(), get_app(), lambda: self.refresh_viewport(world)
+        )
+        self.viewport_render_only_count += 1
+
     def capture_exit_diagnostics(self, phase: str) -> None:
         """Record opt-in exit images and body poses without commanding motion."""
         if not self.exit_diagnostics_enabled:
@@ -1332,6 +1371,7 @@ class BridgeState:
             "host_pid": os.getpid(),
             "robots": {},
             "viewport_fabric_updates": self.viewport_sync_count,
+            "viewport_render_only_updates": self.viewport_render_only_count,
         }
         reports = self.evidence.setdefault("exit_diagnostics", {})
         try:
@@ -2474,6 +2514,10 @@ async def run_bridge(
                 collision_filter_robot_id=args.physics_filter_robot_id,
                 collision_filter_instance_ids=tuple(args.physics_filter_instance_id),
             )
+            evidence["scene_runtime"]["initial_part_allocation"] = {
+                instance_id: dict(reason)
+                for instance_id, reason in inputs.scene_config.initial_part_allocation.items()
+            }
             runtime_host = await bootstrap_runtime_host(
                 plan, inputs.topology, inputs.robots, inputs.scene_config
             )
@@ -2745,12 +2789,7 @@ async def run_bridge(
         world.step(render=False)
         bridge.capture_pad_contacts(world)
         if render_enabled and steps % render_stride == 0:
-            # The bridge itself runs as a Kit async-engine coroutine.  Calling
-            # World.render_async() here re-enters the simulation context; one
-            # Refresh Fabric explicitly: next_update_async alone does not
-            # perform SimulationContext.render's physics-to-render writeback.
-            state.refresh_viewport(world)
-            await omni.kit.app.get_app().next_update_async()
+            await state.render_viewport(world)
         steps += 1
         now = time.monotonic()
         if now - last_publish >= PUBLISH_PERIOD_S:
@@ -2808,12 +2847,7 @@ async def run_bridge(
         world.step(render=False)
         bridge.capture_pad_contacts(world)
         if render_enabled and steps % render_stride == 0:
-            # The bridge itself runs as a Kit async-engine coroutine.  Calling
-            # World.render_async() here re-enters the simulation context; one
-            # Refresh Fabric explicitly: next_update_async alone does not
-            # perform SimulationContext.render's physics-to-render writeback.
-            state.refresh_viewport(world)
-            await omni.kit.app.get_app().next_update_async()
+            await state.render_viewport(world)
         steps += 1
         hold_steps += 1
         now = time.monotonic()
@@ -2961,10 +2995,9 @@ def main(argv: list[str] | None = None) -> int:
                 evidence["evidence_write_error"] = str(exc)
             if state.exit_diagnostics_enabled and state.world is not None:
                 try:
-                    state.refresh_viewport(state.world)
-                    from omni.kit.app import get_app
-
-                    await asyncio.wait_for(get_app().next_update_async(), timeout=2)
+                    await asyncio.wait_for(
+                        state.render_viewport(state.world), timeout=2
+                    )
                 except Exception as exc:
                     evidence["exit_pre_render_error"] = f"{type(exc).__name__}: {exc}"
             state.capture_exit_diagnostics("before-stop")

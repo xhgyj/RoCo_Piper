@@ -120,8 +120,8 @@ def test_grasp_orientation_is_normalized() -> None:
     [
         (WIDE_MIN, WIDE_MAX, 0.0),  # dy (0.016) <= dx (0.032): straddle x
         (TALL_MIN, TALL_MAX, 90.0),  # dy (0.032) > dx (0.016): straddle y
-        ((0.0, 0.0, 0.0), (1.0, 1.0, 1.0), 180.0),  # square uses symmetric yaw
-        ((0.0, 0.0, 0.0), (1.0, 1.00005, 1.0), 180.0),  # measurement noise is square
+        ((0.0, 0.0, 0.0), (1.0, 1.0, 1.0), 0.0),  # square closes across world y
+        ((0.0, 0.0, 0.0), (1.0, 1.00005, 1.0), 0.0),  # measurement noise is square
         ((0.0, 0.0, 0.0), (1.0, 1.0002, 1.0), 90.0),  # larger y uses quarter-turn
     ],
 )

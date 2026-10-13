@@ -159,18 +159,136 @@ def generate_zone_targets(
                   for i in range(3)), object_orientation
         )
         giver_goal = compose(object_goal, held)
+        orientation_candidates = [
+            ("receiver-measured", receiver.tcp_pose.orientation_xyzw, 0.0),
+        ]
         for yaw in (math.radians(90), math.radians(-90), 0.0):
             local_tool = _rotation("z", yaw)
             tool = compose(object_goal, local_tool)
+            orientation_candidates.append(("object-derived", tool.orientation_xyzw, 0.04))
+        for _, tool_orientation, orientation_penalty in orientation_candidates:
             contact = Pose(tuple(p - request.profile.contact_clearance_m * d
-                                 for p, d in zip(center, receiver_inward)), tool.orientation_xyzw)
+                                 for p, d in zip(center, receiver_inward)), tool_orientation)
             precontact = Pose(tuple(p - request.profile.precontact_distance_m * d
-                                    for p, d in zip(contact.position_xyz, receiver_inward)), tool.orientation_xyzw)
+                                    for p, d in zip(contact.position_xyz, receiver_inward)), tool_orientation)
             giver_distance, giver_rotation = pose_error(observed.tcp_pose, giver_goal)
             receiver_distance, receiver_rotation = pose_error(receiver.tcp_pose, precontact)
             midpoint_distance = math.hypot(center[0] - zone.midpoint[0], center[1] - zone.midpoint[1])
             score = (giver_distance + 0.35 * receiver_distance + 0.03 * giver_rotation
-                     + 0.01 * receiver_rotation + 0.5 * midpoint_distance)
+                     + 0.01 * receiver_rotation + 0.5 * midpoint_distance
+                     + orientation_penalty)
             proposals.append(ZoneTarget(center, object_goal, giver_goal, precontact,
                                         contact, donor_inward, receiver_inward, score))
+    return zone, tuple(sorted(proposals, key=lambda value: value.score))
+
+
+def generate_preparation_targets(
+    request: HandoverPlanningRequest,
+) -> tuple[HandoverZone, tuple[ZoneTarget, ...]]:
+    """Generate paired post-lift preparation targets.
+
+    The giver carries the measured grasp to a larger central move and changes
+    the object's wrist orientation. The receiver approaches using its measured
+    TCP orientation, which gives MoveIt a reachable preparation problem before
+    any contact-specific orientation is requested.
+    """
+    zone = zone_from_request(request)
+    observed = request.observation(request.donor.robot_id)
+    receiver_observed = request.observation(request.receiver.robot_id)
+    geometry = request.object_geometry
+    local_center = tuple(
+        (a + b) / 2 for a, b in zip(geometry.minimum_m, geometry.maximum_m)
+    )
+    measured_center = compose(
+        observed.object_pose, Pose(local_center, (0.0, 0.0, 0.0, 1.0))
+    ).position_xyz
+    held = compose(inverse(observed.object_pose), observed.tcp_pose)
+    receiver_current = receiver_observed.tcp_pose
+    proposals: list[ZoneTarget] = []
+    # Keep the object inside the table, but move it considerably farther than
+    # the old 0.35/0.55/0.75 interpolation. The receiver enters from its side.
+    for along in (-0.04, 0.0, 0.04):
+        for forward in (0.06, 0.10):
+            for height in (0.17, 0.21):
+                center = tuple(
+                    zone.midpoint[i] + along * zone.along[i]
+                    + forward * zone.forward[i]
+                    if i < 2 else zone.tabletop_z_m + height
+                    for i in range(3)
+                )
+                donor_inward = _unit((
+                    center[0] - request.donor.base.position_xyz[0],
+                    center[1] - request.donor.base.position_xyz[1],
+                    0.0,
+                ))
+                receiver_inward = _unit((
+                    center[0] - request.receiver.base.position_xyz[0],
+                    center[1] - request.receiver.base.position_xyz[1],
+                    0.0,
+                ))
+                approach = tuple(
+                    center[i] - 0.11 * receiver_inward[i] for i in range(3)
+                )
+                for pitch in (-0.35, 0.0, 0.35):
+                    for roll in (0.0,):
+                        local_rotation = compose(
+                            _rotation("y", pitch), _rotation("x", roll)
+                        )
+                        object_pose = compose(
+                            observed.object_pose,
+                            Pose((0.0, 0.0, 0.0), local_rotation.orientation_xyzw),
+                        )
+                        object_goal = Pose(
+                            tuple(
+                                center[i]
+                                - _quat_rotate_vector(
+                                    object_pose.orientation_xyzw, local_center
+                                )[i]
+                                for i in range(3)
+                            ),
+                            object_pose.orientation_xyzw,
+                        )
+                        giver_goal = compose(object_goal, held)
+                        giver_distance, giver_rotation = pose_error(
+                            observed.tcp_pose, giver_goal
+                        )
+                        for receiver_blend in (0.60, 0.80):
+                            receiver_position = tuple(
+                                receiver_current.position_xyz[i]
+                                * (1.0 - receiver_blend)
+                                + approach[i] * receiver_blend
+                                for i in range(3)
+                            )
+                            receiver_precontact = Pose(
+                                receiver_position,
+                                receiver_current.orientation_xyzw,
+                            )
+                            receiver_distance, receiver_rotation = pose_error(
+                                receiver_current, receiver_precontact
+                            )
+                            midpoint_distance = math.hypot(
+                                center[0] - zone.midpoint[0],
+                                center[1] - zone.midpoint[1],
+                            )
+                            score = (
+                                giver_distance
+                                + 0.25 * receiver_distance
+                                + 0.03 * giver_rotation
+                                + 0.01 * receiver_rotation
+                                + 0.5 * midpoint_distance
+                                + 0.02 * abs(pitch)
+                                + 0.01 * abs(roll)
+                            )
+                            proposals.append(
+                                ZoneTarget(
+                                    center,
+                                    object_goal,
+                                    giver_goal,
+                                    receiver_precontact,
+                                    receiver_precontact,
+                                    donor_inward,
+                                    receiver_inward,
+                                    score,
+                                )
+                            )
     return zone, tuple(sorted(proposals, key=lambda value: value.score))

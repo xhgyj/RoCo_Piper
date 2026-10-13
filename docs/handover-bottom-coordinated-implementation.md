@@ -1100,3 +1100,274 @@ plan SHA remains
 Terminal results, command counters and before-/after-stop screenshots are
 retained under this run and in the local workspace's evidence directory.
 No Git commit/push or hardware motion was performed.
+
+## 29. Preparation seed quaternion error localized and repaired (2026-10-07)
+
+The section 28 blocker is now numerically reproduced using saved ROS worker
+shared-scene responses from the same run, rather than inferred from screenshots:
+sequences 73 and 74 contain raw object quaternion norm-squared values
+0.9999999938174134 and 0.9999999982605685. Contact/precontact quaternion components
+are identical, tool-axis error is zero, approach distance is 0.04 m, and
+collinearity residual is below 1.4e-13 m. Nevertheless the old raw-dot/acos
+pose_error reports false angles 0.0002223975999906021 and
+0.00011796377370156664 rad, exceeding the unchanged 1e-7 rad candidate gate.
+Sequence 75 has norm-squared slightly above one and the old clamp reports zero:
+acceptance incorrectly depends on the sign of sensor norm roundoff.
+
+Both failing snapshots reproduce the same constructor error in pure geometry
+replay. The diagnostic uses actual saved TCP/object poses and local collider
+descriptors with a minimal read-only request adapter, not a complete runtime
+replay or a MoveGroup query. Normalizing only the comparison in that diagnostic
+admits the seeds, while a genuine 1e-5 rad rotation remains measurable.
+
+The production shared pose_error now validates both poses through the existing
+strict pose contract, normalizes only local comparison copies, aligns quaternion
+signs, and computes the shortest angle from quaternion difference/sum norms
+using atan2. This avoids acos loss of precision near identical orientations.
+Raw observations, hashes, immutable inputs and grasp transforms are not changed.
+Zero, nonfinite, malformed or grossly nonunit quaternions fail closed. No region
+bound, contact allowance, collision policy, joint limit, controller, sampler or
+execution authorization was relaxed.
+
+Regressions cover recorded raw rotations on either side of unit norm, q/-q
+equivalence, genuine rotations down to 1e-10 rad, shortest-arc behavior, illegal
+quaternions on either input, and production-formula HANDOVER seed construction.
+The seed test also rejects a genuine precontact-only rotation at the unchanged
+axis/orientation gate. Focused CPU regression: **180 passed**. Full locked CPU
+suite: **2363 passed / 2 skipped** (18.97 s). The three touched Python files
+pass Ruff. Replaying saved shared poses 73/74/75 against the repaired production
+functions now admits all three candidates with zero false orientation error,
+without any diagnostic function replacement.
+
+No Isaac, ROS node, MoveGroup query, gripper or arm motion has been started for
+this repair. Complete HANDOVER remains unverified; notify the user before any
+headed execution. This repair does not establish that later IK, collision,
+local insertion, co-hold or release gates will pass.
+
+## 30. Quaternion repair: authorized single headed trial (2026-10-07)
+
+Run: `runs/pick-handover-quaternion-fix-20261007T140404Z`.
+Runtime: `20261007T140503.696532Z_3f745a01-f6c5-4221-91e8-af9739ca8482`.
+Used the original headed/simulation/exit-diagnostics piper_run entry and unchanged
+prepared-v1 external plan. Terminal **EXECUTION_FAILED**, exit 10.
+
+PICK/lift: PICK_CONFIRMED, motion_sent=true, measured lift
+0.09989526169374585 m. HANDOVER: motion_sent=false; piper_1 received/applied
+zero commands, and no HANDOVER execution request exists. The prior preparation
+seed quaternion rejection is gone; region queries reached actual MoveGroup.
+
+There were 61 read-only region results: 60 returned combined trajectories and
+one failed with ABORTED/error_code=-2. All 60 returned endpoints were rejected
+by `moveit_region_endpoint:STUD_FACE_OR_SIDE_PINCH_CONSTRAINT`. Final:
+`NO_FEASIBLE_HANDOVER_IN_PREPARATION_REGION; evaluated=61`.
+No collision pair was reported at this gate. This does not prove later contact
+or collision certification would pass; those phases were not reached.
+
+Current blocker is agreement between MoveIt's region endpoint and the native
+brick-local stud/side-pinch invariant, not the previous numerical seed error or
+a complete absence of MoveIt trajectories. The shared rejection covers three
+predicate components; their per-endpoint numerical values are not yet audited.
+Next diagnostic should replay saved endpoint joints and compare sampler frame
+semantics, calibrated TCP/object transforms and native FK without sending motion.
+
+Cleanup passed: own container removed, host orderly exit 0, worker orderly,
+no session-owned process/container leftovers, host port 17650 released.
+All five original input SHA values are unchanged; external plan remains
+`3d0db58db2dc8114c0599d7336c6929f93bec89af939c773742c8ad819cfebca`.
+Before/after-stop screenshots and raw execution evidence are retained remotely
+and copied to the collaborating local evidence directory. No tuning, second
+trial, additional production fix, commit or push followed this result.
+
+## 31. Paired preparation separated from local contact (2026-10-07)
+
+User approved relaxing preparation-only side-axis requirements, keeping giver
+and receiver jointly adjustable, adding local receiver correction, then ONE
+headed simulated PICK/lift -> HANDOVER trial with advance notification.
+
+HandoverPreparationEndpoint now represents actual paired MoveIt arrival with
+the original binding and preserved giver attachment. Preparation checks the
+existing giver neighborhood and receiver 0.15 m proximity; it does not require
+final side-pinch/stud orientation. Both six-joint arm endpoints remain exactly
+those returned by MoveIt. The donor is not locked at the original lift pose.
+
+The local contact geometry projects the arrival's closing direction onto the
+brick side plane continuously, rather than demanding X/Y-only pinch. Final
+stud half-space and side-plane gates remain, as do actual pad, cohold, collision,
+gripper sweep, joint-limit and custody proofs. The receiver correction is
+bounded by 0.08 m and pi/2 rad; degeneracy or excess correction fails closed.
+This geometric projection is a handler target, not host global IK/search.
+
+Before dispatch, the provider certifies receiver-only alignment with strict
+no-touch geometry, then insertion and the remaining complete contact/release/
+separation/follow paths. Giver arm joints stay fixed only during local receiving,
+not combined preparation. Local rigid-pose interpolation includes rotation;
+the Cartesian tube proof uses rotational midpoints and bounds desired angular
+motion as well as joint motion. The native collision/limit policy is unchanged.
+
+At actual arrival, the runtime rebases the chosen contact target using measured
+giver FK and the preserved object attachment, verifies measured brick drift,
+then recertifies alignment/insertion from measured joints. It never executes a
+nominal preparation endpoint or silently replaces MoveIt's returned joint goal.
+Validation and the authorized headed trial outcome will be recorded below.
+
+### 31.1 Validation and ONE authorized headed trial
+
+Focused regressions: 220 passed. New preparation module: 24 passed. Final full
+locked CPU suite: 2387 passed / 2 skipped (19.33 s). Six modified Python files
+pass Ruff; git diff --check passes. Original inputs remained immutable.
+
+Run: runs/pick-handover-preparation-local-20261007T145134Z.
+Runtime: 20261007T145205.409477Z_badf84aa-3716-4d7c-8141-c643c85325b4.
+Original headed/simulation/exit-diagnostics entry and prepared-v1 plan were used.
+Terminal EXECUTION_FAILED (exit 10). PICK_CONFIRMED, motion_sent=true, measured
+object lift 0.10827102558687329 m. HANDOVER motion_sent=false; receiver received
+and applied zero commands; no preparation/contact motion was dispatched.
+
+52 read-only region queries: 48 trajectories, 3 ABORTED/error_code=-2, final
+query timed out. Terminal exception: read-only combined result identity/capability
+mismatch. Identity fields match, but the timeout result omits lifecycle.read_only
+and terminal. Capability checking precedes ordinary planning failure handling,
+so this incomplete failure result masked the normal bounded-search diagnostic.
+This is not evidence that physical HANDOVER or collision avoidance is impossible.
+
+Offline FK and current production preparation/contact geometry replay (no IK,
+ROS, simulation or motion) on the 48 successful endpoints: 41 rejected with
+LOCAL_ALIGNMENT_BUDGET_EXCEEDED, 5 with COUPLED_PRECONTACT_REGION_ESCAPE, and
+2 passed geometric admission only. No geometry-admitted candidate acquired
+complete path/execution permission. The final exception does not persist their
+path rejection counters; do not assert IK, collision or limit failure without
+further read-only evidence. Broad preparation and bounded local-handler reach
+still need alignment; merely removing the old side-axis gate is insufficient.
+
+Cleanup passed: own container removed, host orderly exit 0, worker orderly exit
+0, no owned leftovers, port 17650 released. All five original input hashes are
+unchanged. Raw result, host evidence, screenshots and endpoint replay are retained
+in the local evidence/pick-handover-preparation-local-20261007T145134Z directory.
+Before-stop camera is occluded by the table edge; no contact conclusion is drawn
+from that screenshot. No camera adjustment, tuning, second trial, additional
+production fix, commit or push followed this result. Next proposed work: repair
+timeout lifecycle/failure classification, retain phase rejection evidence, then
+diagnose the two geometrically admitted endpoints before changing motion policy.
+
+## 32. Execute paired preparation before contact admission (2026-10-07)
+
+User explicitly approved separating safe preparation movement from final
+HANDOVER feasibility and requested a headed verification of simultaneous
+giver/receiver movement. Live simulation now opts into staged_preparation.
+Hardware remains behind its existing qualification/full-program boundary.
+
+CoordinatedHandoverPreparation binds the captured PICK/lift grasp, calibrated
+receiver opening and returned combined MoveIt trajectory. The native provider
+certifies the opening sweep and carrying path (both complete arms, unchanged
+joint limits, grippers, carried brick, environment, tracking and scene binding).
+It does NOT test local correction budgets, stud/side contact geometry, contact
+IK, cohold, receiver closure, donor release or separation before preparation.
+Both arm endpoints are still MoveIt's, on one shared time grid and synchronized
+execution barrier. No extra lift or artificial demonstration movement is added.
+
+Only after receiver opening and physical paired arrival does the factory capture
+fresh measured joints/TCPs/object pose and compile all final contact paths. The
+continuation has rendezvous=None and binds the executed preparation hash; it
+cannot repeat receiver opening/preparation. Contact failure is reported as
+HANDOVER_AFTER_PREPARATION, retains arrival evidence, stops both participants
+and never opens the donor or publishes receiver custody. The operation remains
+FAILED even if preparation succeeded. Measured joint changes and runtime start
+barrier evidence are retained separately from command receipts.
+
+TimeoutError now preserves the read-only/no-physical-execution envelope instead
+of falling into the generic worker result. It retains terminal=false rather
+than claiming that an unproven planning cancellation settled. No identity or
+capability check is bypassed. Verification and the single headed outcome follow.
+
+### 32.1 CPU regression and initial headed integration result
+
+Focused tests: 96 passed; full locked suite: 2400 passed / 2 skipped (19.90 s).
+Six changed Python files pass Ruff; git diff --check passes. Original inputs
+are unchanged. Initial headed run: pick-handover-staged-preparation-20261007T152512Z,
+runtime 20261007T152536.104798Z_018a7d73-61fd-4d8c-8841-03bb5fa43edd.
+PICK_CONFIRMED, lift 0.11323465825989842 m. Two read-only queries were recorded;
+the preparation program compiled and obtained its bound program hash. It failed
+at first live observation, BEFORE receiver opening or arm dispatch, with
+KeyError: scene_snapshot. Receiver commands remain zero; both-arm motion was
+NOT verified. Cleanup passed, own host/worker exited 0, no own leftovers.
+
+The concrete observe_handover_scene/observe_monitor contract returns the physics
+snapshot DIRECTLY, not the idle observe_shared_scene planning wrapper. The live
+observer incorrectly unwrapped it again; the finger-guard unit double had copied
+that incorrect wrapper and hidden this latent integration defect. The consumer
+now uses the direct snapshot, and the existing live-guard regression uses the
+real contract. No provenance, monitor guard, contact policy or safety check was
+relaxed. User is notified before an additional headed validation of this repair.
+
+### 32.2 Second headed trial: missing physics-history ticks
+
+Run: pick-handover-staged-monitor-fix-20261007T153241Z, runtime
+20261007T153316.504904Z_a845431b-1a54-4f79-bf5c-756e510f65be.
+PICK_CONFIRMED, lift 0.10391346924006939 m. Preparation compiled after one
+read-only query, but the first live monitor rejected the rolling contact history
+with "finger physics history is discontinuous", before HANDOVER dispatch.
+Receiver commands were zero; simultaneous preparation motion was not verified.
+The monitor contained 25 frames at sim_time_s=94.56667159870267: every sixth
+sample interval was 33.333 ms instead of the declared 16.667 ms. Cleanup passed;
+own host/worker exited 0, own container removed, no own leftovers and all five
+original input hashes unchanged.
+
+## 33. Render-only Kit updates preserve contact sampling (2026-10-07)
+
+User explicitly requested repair of the periodic missing physics/contact tick.
+Installed Isaac 5.1 SimulationContext.render_async guards its Kit update with
+/app/player/playSimulations=false. The bridge's direct next_update_async lacked
+that guard: the playing Kit timeline could step physics on each sixth-step
+viewport refresh, after the bridge had already captured its contact report.
+
+Readiness, operation hold and pre-stop diagnostic rendering now share a guarded
+render-only coroutine. It refreshes Fabric explicitly, disables automatic Kit
+physics for the awaited update, and restores the original boolean setting in
+finally (including cancellation). Simulation time AND physics-step index must
+remain unchanged across rendering, otherwise the bridge fails explicitly.
+Manual world.step(render=False) and its immediate native contact capture remain
+the sole intended step/sample pair. No timeline reset, synthetic history,
+threshold relaxation, contact-policy change or dependency installation is used.
+After-stop diagnostic updates remain after world/timeline teardown.
+
+Offline regressions cover the six-step auto-tick reproduction, continuous
+capture, settings restoration, cancellation, unexpected time/index advance and
+the unchanged contact guard's rejection of histories with missing ticks.
+CPU and authorized headed verification results follow after execution.
+
+### 33.1 Regression and ONE headed verification outcome
+
+Focused bridge/contact regressions: 157 passed. Full locked CPU suite:
+2413 passed / 2 skipped (20.02 s). Existing Fabric-order regression now verifies
+the shared guarded renderer, with refresh still preceding the non-reentrant Kit
+yield. Ruff reports no new diagnostics relative to the captured baselines
+(bridge had 13, its older test file had 2); modified contact/Fabric tests pass
+Ruff outright. git diff --check passes. Unrelated dirty changes are preserved.
+
+Run: runs/pick-handover-render-tick-fix-20261007155144Z.
+Runtime: 20261007T155149.123047Z_4231616f-841d-48e5-b633-65d4c2bfe472.
+Original headed/simulation/exit-diagnostics piper-run entry and prepared-v1
+plan were used, with no input changes. 1926 render-only updates completed
+without time/index advance errors. All nine saved native scene/contact
+snapshots contain 30 consecutive frames each; the maximum interval deviation
+from the declared 1/60 s is 8.692344032057431e-10 s. The earlier periodic 33.333 ms
+interval is absent. No interpolation or continuity-policy relaxation was used.
+
+Terminal EXECUTION_FAILED (exit 10), with a different downstream monitor
+failure: "finger contact observer gap exceeded". PICK_CONFIRMED, motion_sent=true,
+lift 0.1096079908311367 m. The first HANDOVER monitoring snapshots have sequences
+76/77/78 at sim_time_s=89.48333800025284 / 89.73333801329136 /
+89.96667135879397: the first interval is 0.25000001303852 s, exceeding the
+unchanged 0.2 s observer limit despite each rolling physics history being
+complete. HANDOVER motion_sent=false; receiver received/applied zero commands.
+Neither simultaneous arm preparation nor a completed handover is established.
+Preparation compiled, but initial repeated monitoring failed before dispatch.
+The next issue is observation scheduling/latency versus advancing simulation
+time, not missing native physics samples or demonstrated geometric infeasibility.
+No observer-gap threshold tuning or further trial followed this result.
+
+Cleanup passed: own host/worker exited 0, own container removed, no own process
+or container leftovers, port 17650 released. All five original input hashes
+remain unchanged. Result, operation run, host evidence, three HANDOVER native
+monitor snapshots and before/after-stop screenshots are retained in local
+evidence/pick-handover-render-tick-fix-20261007155144Z. No commit or push was made.

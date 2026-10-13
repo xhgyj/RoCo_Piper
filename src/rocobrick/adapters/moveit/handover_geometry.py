@@ -26,7 +26,12 @@ from rocobrick.skills.handover_planning import HandoverPlanningRequest
 from rocobrick.skills.handover_profile import EXECUTION_CAPABILITIES, digest, finite
 from rocobrick.skills.handover_simulation import SimulationHandoverAuthorization
 from rocobrick.skills.observation import Pose, _vector
-from rocobrick.skills.placement_geometry import compose, inverse
+from rocobrick.skills.placement_geometry import (
+    compose,
+    interpolate_pose,
+    inverse,
+    pose_error,
+)
 
 
 @dataclass(frozen=True)
@@ -467,9 +472,7 @@ class IsolatedHandoverGeometry:
         # Snap only nanoscopic solver/readback roundoff to the unchanged
         # bounds. Real excursions remain outside and fail check(); raw action
         # feedback is not rewritten. Arm tracking uncertainty is much larger.
-        clipped = self.np.clip(
-            q, self._lower_limits, self._upper_limits
-        )
+        clipped = self.np.clip(q, self._lower_limits, self._upper_limits)
         near = self.np.abs(clipped - q) <= 1e-8
         q[near] = clipped[near]
         return q
@@ -502,16 +505,12 @@ class IsolatedHandoverGeometry:
         receiver_attachment: Pose | None = None,
         finger_contact: bool = False,
     ) -> bool:
-        """Certify collision and constant-orientation Cartesian tube throughout.
+        """Certify collision and the position/shortest-rotation tube throughout.
 
         Returns:
             False when joint-linear interpolation cannot be proved to remain
             within profile position/rotation tolerances; endpoint IK is not proof.
         """
-        from rocobrick.skills.placement_geometry import pose_error
-
-        if pose_error(first_pose, last_pose)[1] > 1e-7:
-            raise ValueError("Cartesian segment requires constant tool orientation")
         if not self.certify_segment(
             initial,
             final,
@@ -532,10 +531,7 @@ class IsolatedHandoverGeometry:
                 return False
             first, last, a, b, depth = queue.pop()
             middle = {name: (first[name] + last[name]) / 2 for name in first}
-            target = Pose(
-                tuple((x + y) / 2 for x, y in zip(a.position_xyz, b.position_xyz)),
-                a.orientation_xyzw,
-            )
+            target = interpolate_pose(a, b, 0.5)
             position, rotation = pose_error(self.tcp_pose(robot, middle), target)
             if position > self.request.profile.position_tolerance_m or (
                 rotation > self.request.profile.orientation_tolerance_rad
@@ -545,6 +541,7 @@ class IsolatedHandoverGeometry:
             # Bound FK and desired-line movement from the interval midpoint.
             displacement = self.motion_bound(first, last) / 4
             desired = math.dist(a.position_xyz, b.position_xyz) / 2
+            desired_angle = pose_error(a, b)[1] / 2
             angle = sum(
                 abs(last[n] - first[n]) / 2
                 for n in self._variables
@@ -556,7 +553,10 @@ class IsolatedHandoverGeometry:
             if (
                 position + displacement + desired
                 <= self.request.profile.position_tolerance_m
-                and (rotation + angle <= self.request.profile.orientation_tolerance_rad)
+                and (
+                    rotation + angle + desired_angle
+                    <= self.request.profile.orientation_tolerance_rad
+                )
             ):
                 continue
             if depth >= 24:
@@ -725,9 +725,7 @@ class IsolatedHandoverGeometry:
         self._exact_pair_distances.clear()
         self._bind_holder(holder, receiver_attachment)
         q = self.configuration(joints)
-        if self.np.any(q < self._lower_limits) or (
-            self.np.any(q > self._upper_limits)
-        ):
+        if self.np.any(q < self._lower_limits) or (self.np.any(q > self._upper_limits)):
             return CollisionVerdict(False, 0.0, (), "MODEL_JOINT_LIMIT_VIOLATION")
         allowed = {f"{holder}_gripper_link{i}" for i in (1, 2)}
         if receiver_touch:

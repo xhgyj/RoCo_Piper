@@ -59,10 +59,17 @@ def fingers_to_contact_opening(
     values = (float(finger_1_m), float(finger_2_m))
     if not all(math.isfinite(value) for value in values):
         raise ValueError("measured gripper fingers must be finite")
-    # A zero value is retained as an invalid/missing feedback case.
-    if values[0] <= 0.0 or values[1] >= 0.0:
+    # A finger at its calibrated zero limit is still a valid physical
+    # measurement when the opposing finger is displaced. This occurs during
+    # receiver opening in Isaac while the mimic pair settles asynchronously;
+    # preserve the measured separation instead of converting it to missing
+    # feedback. The zero-zero state remains invalid because it carries no
+    # observable opening.
+    if values[0] < 0.0 or values[1] > 0.0:
         raise ValueError("measured gripper fingers do not identify opposing contact")
     opening = values[0] - values[1]
+    if opening <= 0.0:
+        raise ValueError("measured gripper fingers do not identify opposing contact")
     if not 0.0 <= opening <= 0.1:
         raise ValueError("measured gripper opening is outside the official range")
     return opening

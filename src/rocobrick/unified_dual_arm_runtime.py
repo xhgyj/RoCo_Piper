@@ -173,6 +173,9 @@ class SuccessorPrePhaseRequest:
     lease_owners: Mapping[str, str]
     scene_snapshot: SharedSceneSnapshot
     terminal_policy: TerminalPrePhasePolicy | None = None
+    # Additional same-layer successors that share this one combined plan.
+    # next_operation remains the compatibility primary successor.
+    next_operations: tuple[RobotOperation, ...] = ()
 
     def __post_init__(self) -> None:
         """Require exact owners, endpoints, participants and snapshot provenance."""
@@ -189,6 +192,12 @@ class SuccessorPrePhaseRequest:
             for state in self.predecessor_states.values()
         ):
             raise ValueError("predecessor endpoint lacks terminal-safe evidence")
+        successors = self.successor_operations
+        if self.next_operation is not None and self.next_operations:
+            if self.next_operations[0].operation_id != self.next_operation.operation_id:
+                raise ValueError("next_operation must be the primary next_operations entry")
+        if any(operation.skill == "WAIT" for operation in successors):
+            raise ValueError("WAIT cannot be a motion successor")
         _identities(self.participants, "participants")
         _identities(self.resources, "resources")
         if set(self.lease_owners) != set(self.resources) or not set(
@@ -207,10 +216,11 @@ class SuccessorPrePhaseRequest:
             for operation in self.predecessor_operations
             for robot in operation.participants
         }
-        if self.next_operation is not None:
-            if self.terminal_policy is not None or self.next_operation.skill == "WAIT":
-                raise ValueError("WAIT or terminal policy cannot be a motion successor")
-            expected_participants.update(self.next_operation.participants)
+        if successors:
+            if self.terminal_policy is not None:
+                raise ValueError("terminal policy cannot accompany motion successors")
+            for operation in successors:
+                expected_participants.update(operation.participants)
         elif self.terminal_policy is None:
             raise ValueError("terminal departure requires an explicit policy")
         else:
@@ -234,23 +244,49 @@ class SuccessorPrePhaseRequest:
 
     @property
     def successor_operation_ids(self) -> tuple[str, ...]:
-        """Return the actual successor, or none for authorized terminal cleanup.
-
-        Returns:
-            The identified, bound result; physical proof remains separately checked.
-        """
-        return (
-            () if self.next_operation is None else (self.next_operation.operation_id,)
-        )
+        """Return every successor sharing this pre-phase."""
+        return tuple(operation.operation_id for operation in self.successor_operations)
 
     @property
     def successor_operations(self) -> tuple[RobotOperation, ...]:
-        """Return the immutable external successor operation.
-
-        Returns:
-            The identified, bound result; physical proof remains separately checked.
-        """
+        """Return all immutable external successors sharing this pre-phase."""
+        if self.next_operations:
+            return self.next_operations
         return () if self.next_operation is None else (self.next_operation,)
+
+    @property
+    def lease_targets(self) -> Mapping[str, str]:
+        """Return resources explicitly adopted by successor operations.
+
+        Resources absent from this mapping remain owned by their predecessor.
+        This preserves a carrier's holding lease while a support successor
+        establishes its own supporting lease.
+        """
+        targets: dict[str, str] = {}
+        successors = self.successor_operations
+        primary = successors[0] if successors else None
+        for operation in successors:
+            for resource in operation.resources:
+                previous = targets.get(resource)
+                if previous is not None and previous != operation.operation_id:
+                    raise ValueError(
+                        f"successor resource {resource!r} has multiple owners"
+                    )
+                targets[resource] = operation.operation_id
+        # A singleton successor keeps the compatibility behavior of the
+        # original scheduler: omitted resource declarations are inherited.
+        # A cohort must claim resources explicitly so one successor cannot
+        # silently take another successor's physical lease.
+        if primary is not None and len(successors) == 1:
+            for predecessor in self.predecessor_operations:
+                # Omitted carrier resources can follow the same executor,
+                # never a different robot that only establishes support.
+                if predecessor.executor_robot_id not in primary.participants:
+                    continue
+                for resource, owner in self.lease_owners.items():
+                    if owner == predecessor.operation_id:
+                        targets.setdefault(resource, primary.operation_id)
+        return targets
 
     @property
     def scene_digest(self) -> str:

@@ -20,6 +20,7 @@ host-background + container-probe orchestration.
 from __future__ import annotations
 
 import ast
+import asyncio
 import importlib.util
 import os
 import sys
@@ -708,3 +709,136 @@ def test_exit_frames_bracket_world_stop_and_precede_app_shutdown(bridge_source):
     assert final.index("state.shutdown()") < final.index('"after-stop"')
     assert final.index('"after-stop"') < final.rindex("get_app().shutdown()")
     assert "next_update_async()" in final and "app.update(" not in final
+
+
+class RenderSettings:
+    """Synthetic Kit setting; no simulator is started by these tests."""
+
+    def __init__(self, value=True):
+        """Remember the synthetic player's original setting."""
+        self.value = value
+
+    def get(self, key):
+        """Return the synthetic setting.
+
+        Returns:
+            The previously assigned test value.
+        """
+        assert key == "/app/player/playSimulations"
+        return self.value
+
+    def set_bool(self, key, value):
+        """Assign the synthetic setting without importing Kit."""
+        assert key == "/app/player/playSimulations"
+        self.value = value
+
+
+@pytest.mark.parametrize("previous", [True, False])
+@pytest.mark.parametrize("failure", [None, RuntimeError, asyncio.CancelledError])
+def test_render_only_update_restores_setting(bridge_module, previous, failure):
+    """Rendering is physics-free; exceptions and cancellation restore state."""
+    settings = RenderSettings(previous)
+    world = SimpleNamespace(current_time=1.0, current_time_step_index=60)
+    calls = []
+
+    def refresh():
+        assert settings.value is False
+        calls.append("fabric")
+
+    async def update():
+        assert settings.value is False
+        calls.append("kit")
+        if failure is not None:
+            raise failure()
+
+    task = bridge_module.render_viewport_without_physics(
+        world, settings, SimpleNamespace(next_update_async=update), refresh
+    )
+    if failure is None:
+        asyncio.run(task)
+    else:
+        with pytest.raises(failure):
+            asyncio.run(task)
+    assert settings.value is previous
+    assert calls == ["fabric", "kit"]
+    assert world.current_time == 1.0
+    assert world.current_time_step_index == 60
+
+
+@pytest.mark.parametrize("field", ["current_time", "current_time_step_index"])
+def test_render_only_update_rejects_unexpected_physics(bridge_module, field):
+    """Do not conceal an extra tick or synthesize missing contact evidence."""
+    settings = RenderSettings()
+    world = SimpleNamespace(current_time=1.0, current_time_step_index=60)
+
+    async def update():
+        setattr(world, field, getattr(world, field) + 1)
+
+    with pytest.raises(RuntimeError, match="render-only Kit update advanced physics"):
+        asyncio.run(
+            bridge_module.render_viewport_without_physics(
+                world, settings, SimpleNamespace(next_update_async=update), lambda: None
+            )
+        )
+    assert settings.value is True
+
+
+def test_render_only_update_rejects_unknown_setting(bridge_module):
+    """An unknown setting cannot be restored safely or authorize rendering."""
+    with pytest.raises(RuntimeError, match="not a boolean"):
+        asyncio.run(
+            bridge_module.render_viewport_without_physics(
+                object(), RenderSettings(None), object(), lambda: None
+            )
+        )
+
+
+def test_headed_six_step_rendering_preserves_contact_history(bridge_module):
+    """Reproduce Kit auto-stepping and verify actual per-step capture survives."""
+    settings = RenderSettings()
+    world = SimpleNamespace(current_time=0.0, current_time_step_index=0)
+    world.get_physics_dt = lambda: bridge_module.PHYSICS_DT
+
+    def step():
+        world.current_time += world.get_physics_dt()
+        world.current_time_step_index += 1
+
+    async def update():
+        if settings.value:
+            step()  # The original unguarded Kit update loses this contact tick.
+
+    bridge = bridge_module.InProcessBridge.__new__(bridge_module.InProcessBridge)
+    bridge._pad_contact_reader = SimpleNamespace(
+        capture=lambda **values: SimpleNamespace(**values)
+    )
+    bridge._finger_contact_history = []
+
+    async def run():
+        for index in range(120):
+            step()
+            bridge.capture_pad_contacts(world)
+            if index % 6 == 0:
+                await bridge_module.render_viewport_without_physics(
+                    world,
+                    settings,
+                    SimpleNamespace(next_update_async=update),
+                    lambda: None,
+                )
+
+    asyncio.run(run())
+    frames = bridge._finger_contact_history
+    assert world.current_time_step_index == 120
+    assert bridge._pad_contact_error is None
+    assert len(frames) >= 30
+    assert frames[-1].sim_time_s == world.current_time
+    for previous, current in zip(frames, frames[1:]):
+        assert current.sim_time_s - previous.sim_time_s == pytest.approx(current.dt_s)
+
+
+def test_all_playing_viewport_updates_use_render_only_guard(bridge_source):
+    """Readiness, operation hold and before-stop diagnostics share one guard."""
+    assert bridge_source.count("await state.render_viewport(world)") == 2
+    final = bridge_source[bridge_source.index("async def _child_bridge") :]
+    before_stop = final[: final.index("state.shutdown()")]
+    assert "state.render_viewport(state.world)" in before_stop
+    assert "get_app().next_update_async()" not in before_stop

@@ -94,6 +94,7 @@ PLANNING_SCENE_PAYLOAD_KEYS = frozenset({
     "boxes",
     "expected_scene_digest",
     "allowed_collision_pairs",
+    "forbidden_collision_pairs",
 })
 PLANNING_SCENE_BOX_KEYS = frozenset({
     "object_id",
@@ -436,6 +437,7 @@ def tcp_pose_operation(
         timeout_s=float(timeout_s),
         request_id=request_id,
     )
+
 
 
 def guarded_tcp_operation(
@@ -964,7 +966,10 @@ def planning_scene_update_from_payload(
             content mismatch.
     """
     _require_exact_keys(
-        payload, PLANNING_SCENE_PAYLOAD_KEYS, "planning scene payload"
+        payload,
+        (PLANNING_SCENE_PAYLOAD_KEYS if "forbidden_collision_pairs" in payload
+         else PLANNING_SCENE_PAYLOAD_KEYS - {"forbidden_collision_pairs"}),
+        "planning scene payload",
     )
     assert isinstance(payload, Mapping)  # noqa: S101 - narrowed above
     if payload["schema"] != PLANNING_SCENE_SCHEMA:
@@ -1009,12 +1014,22 @@ def planning_scene_update_from_payload(
                 "must be a pair of non-empty strings"
             )
         pairs.append((str(pair[0]), str(pair[1])))
+    forbidden_document = payload.get("forbidden_collision_pairs", ())
+    if not isinstance(forbidden_document, (list, tuple)):
+        raise OperationContractError("forbidden_collision_pairs must be an array")
+    forbidden = []
+    for pair in forbidden_document:
+        if (not isinstance(pair, (list, tuple)) or len(pair) != 2
+                or not all(isinstance(value, str) and value for value in pair)):
+            raise OperationContractError("forbidden_collision_pairs must contain string pairs")
+        forbidden.append(tuple(pair))
     try:
         update = PlanningSceneUpdate(
             scene_id=scene_id,
             boxes=boxes,  # type: ignore[arg-type]
             expected_scene_digest=str(expected_digest),
             allowed_collision_pairs=tuple(pairs),
+            forbidden_collision_pairs=tuple(forbidden),
         )
     except ValueError as error:
         raise OperationContractError(

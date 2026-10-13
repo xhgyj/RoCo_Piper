@@ -19,21 +19,23 @@ from rocobrick.coordinated_session import (
     FreeSpaceMotionRequest,
 )
 from rocobrick.execution.operation_state_ledger import OperationStateLedger
-from rocobrick.isaac_backend import RuntimeOperation, tcp_pose_operation
+from rocobrick.isaac_backend import (
+    RuntimeOperation,
+    guarded_tcp_operation,
+    planning_scene_operation,
+)
 from rocobrick.multi_robot_scheduler import (
     JSONValue,
     OperationExecution,
     OperationStatus,
 )
 from rocobrick.robot_operation_plan import RobotOperation
-from rocobrick.skills.observation import Pose, parse_pick_observation
-from rocobrick.skills.placement_geometry import pose_error
-from rocobrick.skills.targets import (
-    _tcp_pose_target,
-    world_orientation_to_base,
-    world_position_to_base,
-)
+from rocobrick.skills.observation import PickObservation, Pose, parse_pick_observation
+from rocobrick.skills.placement_geometry import pose_error, support_top_target
+from rocobrick.skills.successor_motion import contact_scene_payload, move_boundary
+from rocobrick.skills.support_evidence import verify_support_contact
 from rocobrick.transit_adapter import TransitContext
+from rocobrick.unified_dual_arm_runtime import SuccessorPrePhaseEvidence
 
 
 class SupportObservationTransport(Protocol):
@@ -105,6 +107,20 @@ class SupportTopHandler:
         self._poll_interval_s = float(poll_interval_s)
         self._active_requests: dict[str, str] = {}
         self._cancelled_operations: set[str] = set()
+        self._pre_phases: dict[str, SuccessorPrePhaseEvidence] = {}
+        self._active_boundaries: dict[str, str] = {}
+
+    def bind_pre_phase(
+        self, operation_id: str, evidence: SuccessorPrePhaseEvidence
+    ) -> None:
+        """Consume only a validated receipt belonging to this successor."""
+        if (
+            not isinstance(evidence, SuccessorPrePhaseEvidence)
+            or not evidence.passed
+            or operation_id not in evidence.successor_operation_ids
+        ):
+            raise ValueError("support pre-phase receipt is not bound")
+        self._pre_phases[operation_id] = evidence
 
     async def execute_free_space_phase(
         self,
@@ -116,7 +132,11 @@ class SupportTopHandler:
         start_state: Mapping[str, float],
         session_robots: tuple[str, ...] | None = None,
     ) -> FreeSpaceMotionEvidence:
-        """Execute only the free-space approach, never support contact."""
+        """Execute only the free-space approach, never support contact.
+
+        Returns:
+            Bound physical free-space completion evidence.
+        """
         if self._free_space is None:
             raise RuntimeError("SUPPORT_TOP free-space transport is unavailable")
         session_ids = session_robots or tuple(
@@ -183,7 +203,11 @@ class SupportTopHandler:
     async def _dispatch(
         self, operation: RobotOperation, phase: str, runtime_operation: RuntimeOperation
     ) -> Mapping[str, JSONValue]:
-        """Dispatch one support pose and return strict runtime evidence."""
+        """Dispatch one support pose and return strict runtime evidence.
+
+        Returns:
+            The runtime phase's independently observed lifecycle proof.
+        """
         if operation.operation_id in self._cancelled_operations:
             raise RuntimeError("operation cancelled before phase")
         if self._motion is None:
@@ -195,6 +219,18 @@ class SupportTopHandler:
                 operation.executor_robot_id,
                 runtime_operation,
             )
+        except Exception as error:
+            # An unanswered motion request is not evidence that it stopped.
+            return {
+                "phase": phase,
+                "request_id": runtime_operation.request_id,
+                "motion_sent": True,
+                "runtime": {
+                    "passed": False,
+                    "execution": {"terminal": False, "safe_to_release": False},
+                    "error": f"support dispatch failed: {error}",
+                },
+            }
         finally:
             self._active_requests.pop(operation.operation_id, None)
         if not isinstance(record, Mapping):
@@ -207,8 +243,15 @@ class SupportTopHandler:
         }
 
     async def cancel(self, operation_id: str) -> Mapping[str, object]:
-        """Cancel the active support pose operation."""
+        """Cancel the active support pose operation.
+
+        Returns:
+            Actual cancellation evidence from the active execution boundary.
+        """
         self._cancelled_operations.add(operation_id)
+        motion_id = self._active_boundaries.get(operation_id)
+        if motion_id is not None:
+            return await self._free_space.cancel_free_space(motion_id)
         request_id = self._active_requests.get(operation_id)
         if request_id is None or self._motion is None:
             return {"attempted": False, "terminal": False, "safe": False}
@@ -222,94 +265,126 @@ class SupportTopHandler:
             advancing upper-brick observations prove the upper remains stable.
         """
         motion_sent = False
+        terminal_safe = True
         evidence: dict[str, JSONValue] = {}
         try:
             admission = await self.preflight(operation)
             if self._context is None or self._motion is None:
                 raise ValueError("support context or motion transport unavailable")
-            sample = admission.sample
             base = self._context.base
             params = self._context.params
-            # Place the TCP just above the measured upper surface, then move
-            # downward by support_press_m so PhysX supplies a bounded support
-            # reaction. This is a pose-only action; gripper state is untouched.
-            top_z = max(
-                admission.sample_aabb_max[2], admission.sample.position_xyz[2]
+            if self._free_space is None:
+                raise ValueError("support combined transport unavailable")
+            sample = parse_pick_observation(
+                await self._observations.observe(admission.robot_id),
+                robot_id=admission.robot_id,
+                physical_instance_id=admission.upper_physical_instance_id,
+                session_id=self._session_id,
+                manifest_sha256=self._manifest_sha256,
             )
-            world = (
-                (admission.sample_aabb_min[0] + admission.sample_aabb_max[0]) / 2.0,
-                (admission.sample_aabb_min[1] + admission.sample_aabb_max[1]) / 2.0,
-                top_z - params.support_press_m,
-            )
-            target = _tcp_pose_target(
-                world_position_to_base(world, base),
-                world_orientation_to_base(sample.orientation_xyzw, base),
-                self._context.provenance,
-                params,
-            )
-            if self._free_space is not None:
-                scene, scene_version, start_state = (
-                    await self._free_space.free_space_context(
-                        tuple(operation.participants)
-                    )
+            receipt = self._pre_phases.pop(operation.operation_id, None)
+            if receipt is None:
+                approach = support_top_target(
+                    sample, base, self._context.provenance, params, approach=True
                 )
-                free_target = {
-                    operation.executor_robot_id: {
-                        "tcp_pose": {
-                            "position": tuple(target.position),
-                            "orientation_xyzw": tuple(target.orientation_xyzw),
-                            "frame_id": f"{operation.executor_robot_id}_base_link",
-                            "tip_link": f"{operation.executor_robot_id}_rocobrick_tcp",
-                            "runtime_model_sha256": target.runtime_model_sha256,
-                            "source_sha256": target.source_sha256,
-                            "position_tolerance_m": target.position_tolerance_m,
-                            "orientation_tolerance_rad": target.orientation_tolerance_rad,
-                        }
-                    }
-                }
-                free_result = await self.execute_free_space_phase(
+                result = await move_boundary(
+                    self._free_space,
                     operation,
-                    scene_snapshot=scene,
-                    scene_version=scene_version,
-                    targets=free_target,
-                    start_state=start_state,
+                    self._context,
+                    approach,
+                    phase="support_approach",
+                    active_requests=self._active_boundaries,
                 )
-                evidence["free_space_approach"] = dict(free_result.evidence)
-                if not free_result.passed:
-                    raise ValueError(
-                        free_result.reason or "support free-space approach failed"
-                    )
+                evidence["free_space_approach"] = dict(result.evidence)
+                motion_sent = result.started
+                terminal_safe = result.terminal and result.safe_to_release
+                if not result.passed:
+                    raise ValueError(result.reason or "support approach failed")
+            else:
+                evidence["successor_pre_phase"] = dict(receipt.evidence)
+            target = support_top_target(
+                sample, base, self._context.provenance, params, approach=False
+            )
+            contact_scene, _, _ = await self._free_space.free_space_context(
+                (admission.robot_id, admission.placement_robot_id)
+            )
+            contact_pairs = [
+                (
+                    admission.upper_physical_instance_id,
+                    f"{admission.robot_id}_gripper_link{index}",
+                )
+                for index in (1, 2)
+            ]
+            scene_record = await self._dispatch(
+                operation,
+                "support_contact_scene",
+                planning_scene_operation(
+                    contact_scene_payload(
+                        contact_scene,
+                        scene_id=f"{operation.operation_id}-contact",
+                        attached_ids=(admission.lower_physical_instance_id,),
+                        allowed_pairs=contact_pairs,
+                    ),
+                    60.0,
+                    f"{operation.operation_id}:support_contact_scene",
+                ),
+            )
+            evidence["support_contact_scene"] = scene_record
+            if scene_record["runtime"].get("passed") is not True:
+                raise ValueError("support contact scene readback failed")
+            guard = {
+                "robot_id": admission.robot_id,
+                "session_id": self._session_id,
+                "manifest_sha256": self._manifest_sha256,
+                "upper_id": admission.upper_physical_instance_id,
+                "supported_pose": asdict(admission.sample),
+                "supported_position_m": 0.002,
+                "supported_angle_rad": 0.05236,
+                "force_limit_n": 8.0,
+                "mode": "support_top",
+            }
             record = await self._dispatch(
                 operation,
-                "support_pose",
-                tcp_pose_operation(
-                    target, 60.0, f"{operation.operation_id}:support_pose"
+                "support_contact",
+                guarded_tcp_operation(
+                    target, guard, 60.0, f"{operation.operation_id}:support_contact"
                 ),
             )
             evidence["support_pose"] = record
-            motion_sent = bool(record.get("motion_sent"))
+            motion_sent = motion_sent or record["motion_sent"] is True
+            execution = record["runtime"].get("execution") or {}
+            terminal_safe = (
+                execution.get("terminal") is True
+                and execution.get("safe_to_release") is True
+            )
             if not _passed(record):
-                raise ValueError("support pose action did not pass terminal gates")
-            samples = [
-                parse_pick_observation(
-                    await self._observations.observe(operation.executor_robot_id),
-                    robot_id=operation.executor_robot_id,
-                    physical_instance_id=admission.upper_physical_instance_id,
+                raise ValueError("support contact motion failed terminal gates")
+            stop = (execution.get("details") or {}).get("contact_stop_reason")
+            if stop not in (None, "support_contact_confirmed"):
+                raise ValueError(f"support contact stopped: {stop}")
+            samples: list[PickObservation] = []
+            contacts = []
+            for index in range(3):
+                if index:
+                    await asyncio.sleep(self._poll_interval_s)
+                observed, proof = verify_support_contact(
+                    await self._observations.observe(admission.robot_id),
+                    robot_id=admission.robot_id,
+                    upper_id=admission.upper_physical_instance_id,
                     session_id=self._session_id,
                     manifest_sha256=self._manifest_sha256,
                 )
-            ]
-            for _ in range(2):
-                await asyncio.sleep(self._poll_interval_s)
-                samples.append(
-                    parse_pick_observation(
-                        await self._observations.observe(operation.executor_robot_id),
-                        robot_id=operation.executor_robot_id,
-                        physical_instance_id=admission.upper_physical_instance_id,
-                        session_id=self._session_id,
-                        manifest_sha256=self._manifest_sha256,
-                    )
-                )
+                if samples and (
+                    observed.sequence <= samples[-1].sequence
+                    or observed.sim_time_s <= samples[-1].sim_time_s
+                ):
+                    raise ValueError("support samples did not advance")
+                samples.append(observed)
+                contacts.append(proof)
+            evidence["support_pose_confirmed"] = {
+                "confirmed": True,
+                "samples": contacts,
+            }
             max_position = max(
                 pose_error(item.object_pose, admission.sample)[0] for item in samples
             )
@@ -331,6 +406,7 @@ class SupportTopHandler:
                 "max_orientation_error_rad": max_angle,
             }
             evidence["handoff_required"] = True
+            evidence["terminal_safe"] = True
             evidence["support_hold"] = {
                 "mode": "maintain_until_next_transport_handoff",
                 "upper_physical_instance_id": admission.upper_physical_instance_id,
@@ -345,6 +421,9 @@ class SupportTopHandler:
                     "upper_physical_instance_id": admission.upper_physical_instance_id,
                     "lower_physical_instance_id": admission.lower_physical_instance_id,
                     "mode": "non_grasping_tcp_support",
+                    "support_contact_confirmed": contacts[-1],
+                    "upper_pose": asdict(samples[-1].object_pose),
+                    "tcp_pose": asdict(samples[-1].tcp_pose),
                 },
             )
             return OperationExecution(
@@ -362,13 +441,17 @@ class SupportTopHandler:
                 operation,
                 f"SUPPORT_TOP_FAILED: {error}",
                 evidence,
-                terminal=not motion_sent,
+                terminal=terminal_safe,
                 motion_sent=motion_sent,
             )
 
 
 def _passed(record: Mapping[str, JSONValue]) -> bool:
-    """Return whether a phase record proves passed terminal safety."""
+    """Check a phase record's strict terminal safety.
+
+    Returns:
+        Whether execution passed and physically terminated safely.
+    """
     runtime = record.get("runtime")
     execution = runtime.get("execution") if isinstance(runtime, Mapping) else None
     return bool(
@@ -388,7 +471,11 @@ def _failed(
     terminal: bool,
     motion_sent: bool,
 ) -> OperationExecution:
-    """Build one fail-closed support result."""
+    """Build one fail-closed support result.
+
+    Returns:
+        Failure evidence without inventing support or stopped motion.
+    """
     return OperationExecution(
         operation_id=operation.operation_id,
         robot_id=operation.executor_robot_id,

@@ -195,10 +195,16 @@ def test_pick_planning_scene_includes_protected_ground_box() -> None:
     assert ground["frame_id"] == "dual_world"
     assert ground["minimum_m"] == (-1.0, -1.2, -0.021)
     assert ground["maximum_m"] == (1.0, 0.8, -0.001)
-    assert set(map(tuple, payload["allowed_collision_pairs"])) == {
+    assert payload["allowed_collision_pairs"] == ()
+    assert set(map(tuple, payload["forbidden_collision_pairs"])) == {
         ("brick-a", "piper_0_gripper_link1"),
         ("brick-a", "piper_0_gripper_link2"),
     }
+    contact = handler._planning_payload(admission, context, allow_contact=True)
+    assert contact["forbidden_collision_pairs"] == ()
+    assert set(map(tuple, contact["allowed_collision_pairs"])) == set(
+        map(tuple, payload["forbidden_collision_pairs"])
+    )
 
 
 def test_dispatch_preserves_nested_motion_evidence() -> None:
@@ -229,3 +235,116 @@ def test_dispatch_preserves_nested_motion_evidence() -> None:
     result = asyncio.run(handler._dispatch(operation(), "approach", request))
     assert result.passed is True
     assert result.motion_sent is True
+
+
+@pytest.mark.parametrize("span", [0.02, 0.079])
+def test_pick_wider_opening_keeps_one_unified_approach(span) -> None:
+    """Approach opens 10 mm wider, within travel, with no side waypoint."""
+    from rocobrick.skills.targets import RobotBaseFrame, SkillParams, TcpProvenance
+    from rocobrick.tcp_contract import EXPECTED_RUNTIME_MODEL_SHA256
+
+    scene = document()
+    scene["bricks"]["brick-a"]["aabb_max"] = [span, span, 0.02]
+    ledger = OperationStateLedger(("piper_0",))
+    ledger.confirm("piper_0", "robot_at_pick_region", {
+        "physical_instance_id": "brick-a",
+    })
+
+    class FreeSpace:
+        robot_ids = ("piper_0",)
+
+        async def free_space_context(self, participants):
+            return {}, 1, {}
+
+    handler = PickHandler(
+        Observer(scene), ledger, session_id="session-1",
+        manifest_sha256="a" * 64, motion_transport=Motion(),
+        free_space_transport=FreeSpace(),
+        context=SimpleNamespace(
+            base=RobotBaseFrame((0.0, 0.0, 0.0), (0.0, 0.0, 0.0, 1.0)),
+            provenance=TcpProvenance(EXPECTED_RUNTIME_MODEL_SHA256, "b" * 64),
+            params=SkillParams(), ground=None,
+        ),
+    )
+    sent = []
+    phases = []
+
+    async def dispatch(operation, phase, request):
+        sent.append((phase, request))
+        return SimpleNamespace(
+            passed=True, terminal=True, safe=True, motion_sent=False,
+            evidence={}, reason=None,
+        )
+
+    async def approach(operation, **kwargs):
+        phases.append(kwargs["phase_id"])
+        raise RuntimeError("stop before executing approach")
+
+    handler._dispatch = dispatch
+    handler.execute_free_space_phase = approach
+    result = asyncio.run(handler.execute(operation()))
+    assert result.passed is False
+    assert [phase for phase, _ in sent] == ["plan_grasp", "open_gripper"], result.reason
+    opening = sent[-1][1].payload
+    expected = min(0.1, span + 0.03)
+    assert opening["opening_m"] == pytest.approx(expected)
+    assert opening["expected_opening_m"] == pytest.approx((
+        expected - 0.01, min(0.1, expected + 0.01),
+    ))
+    assert phases == ["precontact_boundary"]
+    assert "approach_corridor" not in result.evidence
+
+
+def test_pick_enables_contact_only_after_unified_arrival():
+    from rocobrick.skills.targets import RobotBaseFrame, SkillParams, TcpProvenance
+    from rocobrick.tcp_contract import EXPECTED_RUNTIME_MODEL_SHA256
+
+    ledger = OperationStateLedger(("piper_0",))
+    ledger.confirm("piper_0", "robot_at_pick_region", {"physical_instance_id": "brick-a"})
+
+    class FreeSpace:
+        robot_ids = ("piper_0",)
+
+        async def free_space_context(self, participants):
+            return {}, 1, {}
+
+    handler = PickHandler(
+        Observer(document()), ledger, session_id="session-1", manifest_sha256="a" * 64,
+        motion_transport=Motion(), free_space_transport=FreeSpace(),
+        context=SimpleNamespace(
+            base=RobotBaseFrame((0.0, 0.0, 0.0), (0.0, 0.0, 0.0, 1.0)),
+            provenance=TcpProvenance(EXPECTED_RUNTIME_MODEL_SHA256, "b" * 64),
+            params=SkillParams(), ground=None,
+        ),
+    )
+    phases = []
+    scenes = {}
+
+    async def dispatch(operation, phase, request):
+        phases.append(phase)
+        if phase in ("plan_grasp", "allow_grasp_contact"):
+            scenes[phase] = request.payload
+        return SimpleNamespace(
+            passed=phase != "close_gripper", terminal=True, safe=True,
+            motion_sent=False, evidence={}, reason="stop at closure",
+        )
+
+    async def approach(operation, **kwargs):
+        phases.append(kwargs["phase_id"])
+        return SimpleNamespace(
+            planned=True, prepared=True, started=True, arrival_confirmed=True,
+            terminal=True, safe_to_release=True, evidence={},
+            motion_id="pick-1:precontact_boundary", participants=("piper_0",),
+            reason=None,
+        )
+
+    handler._dispatch = dispatch
+    handler.execute_free_space_phase = approach
+    result = asyncio.run(handler.execute(operation()))
+    assert phases == ["plan_grasp", "open_gripper", "precontact_boundary",
+                      "allow_grasp_contact", "close_gripper"]
+    assert scenes["plan_grasp"]["allowed_collision_pairs"] == ()
+    assert len(scenes["plan_grasp"]["forbidden_collision_pairs"]) == 2
+    assert scenes["allow_grasp_contact"]["forbidden_collision_pairs"] == ()
+    assert len(scenes["allow_grasp_contact"]["allowed_collision_pairs"]) == 2
+    assert "preclose_observation" in result.evidence

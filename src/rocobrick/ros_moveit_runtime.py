@@ -760,10 +760,34 @@ def _attached_object_matches(item: object, *, object_id: str, link_name: str) ->
         return False
 
 
+def _collision_pair_allowed(matrix: Any, first: str, second: str) -> bool:
+    """Read effective ACM permission, including MoveIt's default entries.
+
+    MoveIt omits explicit false pairs equal to its default when rebuilding an
+    ACM message. An absent row is therefore not an unknown permission: consult
+    endpoint defaults, or NEVER when neither endpoint has a default.
+    """
+    names = list(matrix.entry_names)
+    if first in names and second in names:
+        forward = bool(matrix.entry_values[names.index(first)].enabled[names.index(second)])
+        reverse = bool(matrix.entry_values[names.index(second)].enabled[names.index(first)])
+        if forward != reverse:
+            raise ValueError("collision permission readback is not symmetric")
+        return forward
+    default_names = list(matrix.default_entry_names)
+    default_values = list(matrix.default_entry_values)
+    if len(default_names) != len(default_values) or len(set(default_names)) != len(default_names):
+        raise ValueError("collision permission defaults are malformed")
+    defaults = dict(zip(default_names, map(bool, default_values)))
+    values = [defaults[name] for name in (first, second) if name in defaults]
+    return bool(values) and all(values)
+
+
 def _merge_allowed_collision_pairs(
     matrix: Any,
     pairs: tuple[tuple[str, str], ...],
     entry_factory: Callable[[], Any],
+    forbidden_pairs: tuple[tuple[str, str], ...] = (),
 ) -> Any:
     """Append allowed pairs without discarding MoveIt's existing ACM.
 
@@ -788,7 +812,9 @@ def _merge_allowed_collision_pairs(
             f"entries={len(names)} rows={len(source_rows)}"
         )
     rows = [[bool(value) for value in row] for row in source_rows]
-    for first, second in pairs:
+    if set(pairs) & set(forbidden_pairs):
+        raise ValueError("collision pair permissions conflict")
+    for first, second in (*pairs, *forbidden_pairs):
         for name in (first, second):
             if name in names:
                 continue
@@ -798,8 +824,9 @@ def _merge_allowed_collision_pairs(
             rows.append([False] * len(names))
         first_index = names.index(first)
         second_index = names.index(second)
-        rows[first_index][second_index] = True
-        rows[second_index][first_index] = True
+        allowed = (first, second) not in forbidden_pairs
+        rows[first_index][second_index] = allowed
+        rows[second_index][first_index] = allowed
     matrix.entry_names = list(names)
     matrix.entry_values = []
     for row in rows:
@@ -2358,7 +2385,7 @@ class RosMoveItRuntime:
             )
         request = factories.apply_planning_scene_request_factory()
         request.scene.is_diff = True
-        if update.allowed_collision_pairs:
+        if update.allowed_collision_pairs or update.forbidden_collision_pairs:
             entry_factory = factories.allowed_collision_entry_factory
             if entry_factory is None:
                 return PlanningSceneResult(
@@ -2381,7 +2408,8 @@ class RosMoveItRuntime:
                 )
             try:
                 request.scene.allowed_collision_matrix = _merge_allowed_collision_pairs(
-                    matrix, update.allowed_collision_pairs, entry_factory
+                    matrix, update.allowed_collision_pairs, entry_factory,
+                    forbidden_pairs=update.forbidden_collision_pairs,
                 )
             except ValueError as error:
                 return PlanningSceneResult(
@@ -2492,7 +2520,7 @@ class RosMoveItRuntime:
             return PlanningSceneResult(
                 passed=False, applied_object_ids=applied, details=details
             )
-        if update.allowed_collision_pairs:
+        if update.allowed_collision_pairs or update.forbidden_collision_pairs:
             matrix, matrix_error = self._read_current_allowed_collision_matrix(
                 timeout_s, factories
             )
@@ -2503,20 +2531,35 @@ class RosMoveItRuntime:
                 )
             names = list(matrix.entry_names)
             rows = list(matrix.entry_values)
-            for first, second in update.allowed_collision_pairs:
-                if (
-                    first not in names
-                    or second not in names
-                    or rows[names.index(first)].enabled[names.index(second)] is not True
-                    or rows[names.index(second)].enabled[names.index(first)] is not True
-                ):
+            for first, second in (*update.allowed_collision_pairs,
+                                  *update.forbidden_collision_pairs):
+                expected_allowed = (first, second) not in update.forbidden_collision_pairs
+                try:
+                    observed_allowed = _collision_pair_allowed(matrix, first, second)
+                except (ValueError, AttributeError, IndexError) as error:
+                    details["error"] = f"collision permission readback failed: {error}"
+                    return PlanningSceneResult(
+                        passed=False, applied_object_ids=applied, details=details
+                    )
+                if observed_allowed != expected_allowed:
                     details["error"] = (
                         f"GetPlanningScene did not confirm contact {first!r}/{second!r}"
                     )
+                    details["collision_permission_expected"] = expected_allowed
+                    details["collision_permission_entries_present"] = [
+                        first in names, second in names,
+                    ]
+                    if first in names and second in names:
+                        details["collision_permission_observed"] = [
+                            bool(rows[names.index(first)].enabled[names.index(second)]),
+                            bool(rows[names.index(second)].enabled[names.index(first)]),
+                        ]
                     return PlanningSceneResult(
                         passed=False, applied_object_ids=applied, details=details
                     )
             details["allowed_collision_pairs_confirmed"] = True
+            if update.forbidden_collision_pairs:
+                details["forbidden_collision_pairs_confirmed"] = True
         details["readback_confirmed"] = True
         return PlanningSceneResult(
             passed=True,
@@ -3152,6 +3195,11 @@ class RosMoveItRuntime:
         goal.request.start_state.joint_state.position = [
             float(initial[name]) for name in JOINT_NAMES
         ]
+        combined_reader = getattr(self, "_combined_start_state_reader", None)
+        if callable(combined_reader):
+            combined = combined_reader()
+            goal.request.start_state.joint_state.name = list(combined)
+            goal.request.start_state.joint_state.position = list(combined.values())
         goal.request.start_state.joint_state.velocity = []
         decision = strict_action_admission(target)
         if not decision.accepted or not self.readiness_snapshot().passed:
@@ -4476,6 +4524,8 @@ class RosMoveItRobotSession:
         self.runtimes: dict[str, RosMoveItRuntime] = {
             robot_id: create_runtime(robot_id, profiles[robot_id]) for robot_id in ids
         }
+        for runtime in self.runtimes.values():
+            runtime._combined_start_state_reader = self.unified_start_state
         if executor_factory is None:
             from rocobrick.ros_moveit_executor import RosMoveItExecutor
 
@@ -4830,6 +4880,8 @@ class RosMoveItRobotSession:
             require_completion=not (
                 operation.coordination_id.endswith(":direct-handover")
                 or operation.coordination_id.endswith(":giver-reposition")
+                or ":handover-preparation" in operation.coordination_id
+                or ":handover-detail" in operation.coordination_id
                 or os.environ.get("ROCOBRICK_HANDOVER_SIMULATION") == "1"
             ),
         )
@@ -5164,6 +5216,8 @@ class RosMoveItRobotSession:
             os.environ.get("ROCOBRICK_HANDOVER_SIMULATION") == "1"
             or request.coordination_id.endswith(":direct-handover")
             or ":giver-reposition" in request.coordination_id
+            or ":handover-preparation" in request.coordination_id
+            or ":handover-detail" in request.coordination_id
             or ":zone-plan" in request.coordination_id
         )
         for robot_id in self.robot_ids:

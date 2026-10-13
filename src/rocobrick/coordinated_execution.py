@@ -88,6 +88,7 @@ class CoordinatedExecutionCoordinator:
         start_at_sim_time_s: float | None = None,
         require_synchronization_feedback: bool = False,
         before_start: Callable[[], None] | None = None,
+        require_completion: bool = True,
     ) -> CoordinatedLifecycleResult:
         """Prepare all, start all at one barrier, and fail closed on any error.
 
@@ -154,8 +155,11 @@ class CoordinatedExecutionCoordinator:
                         }
                     started[robot_id] = dict(evidence)
                     if evidence.get("started") is not True or (
-                        evidence.get("terminal") is not True
-                        or evidence.get("safe") is not True
+                        require_completion
+                        and (
+                            evidence.get("terminal") is not True
+                            or evidence.get("safe") is not True
+                        )
                         or require_synchronization_feedback
                         and evidence.get("synchronization_feedback_confirmed")
                         is not True
@@ -169,8 +173,30 @@ class CoordinatedExecutionCoordinator:
                             self.cancel(operation)
                             cancel_sent = True
             if failure is not None:
-                return self._failed_start(
-                    operation, {**prepared, **started}, cancel_evidence, failure
+                if require_completion:
+                    return self._failed_start(
+                        operation, {**prepared, **started}, cancel_evidence, failure
+                    )
+                failure = None
+            if not require_completion:
+                return CoordinatedLifecycleResult(
+                    coordination_id=operation.coordination_id,
+                    prepared=True,
+                    started=all(
+                        evidence.get("started") is True
+                        for evidence in started.values()
+                    ),
+                    terminal=all(
+                        evidence.get("terminal") is True
+                        for evidence in started.values()
+                    ),
+                    safe_to_release=all(
+                        evidence.get("safe") is True
+                        for evidence in started.values()
+                    ),
+                    participants={**prepared, **started},
+                    cancel_evidence=cancel_evidence,
+                    error=None,
                 )
             terminal = all(
                 evidence.get("terminal") is True and evidence.get("safe") is True

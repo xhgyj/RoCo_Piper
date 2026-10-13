@@ -22,10 +22,10 @@ from rocobrick.coordinated_session import (
 from rocobrick.execution.operation_state_ledger import OperationStateLedger
 from rocobrick.isaac_backend import (
     RuntimeOperation,
+    detached_planning_scene_operation,
     gripper_operation,
     guarded_tcp_operation,
     planning_scene_operation,
-    tcp_pose_operation,
 )
 from rocobrick.moveit_contract import GripperTarget
 from rocobrick.multi_robot_scheduler import (
@@ -42,9 +42,15 @@ from rocobrick.skills.observation import (
     parse_place_observation,
     verify_place_bricks,
 )
-from rocobrick.skills.placement_geometry import interface_place_up_targets
-from rocobrick.skills.targets import world_position_to_base
+from rocobrick.skills.placement_geometry import (
+    compose,
+    interface_place_up_targets,
+    inverse,
+)
+from rocobrick.skills.successor_motion import move_boundary
+from rocobrick.skills.support_evidence import verify_support_contact
 from rocobrick.transit_adapter import TransitContext
+from rocobrick.unified_dual_arm_runtime import SuccessorPrePhaseEvidence
 
 
 class PlaceUpObservationTransport(Protocol):
@@ -73,24 +79,6 @@ class PlaceUpMotionTransport(Protocol):
 
     def cancel_motion_operation(self, operation_id: str) -> Mapping[str, object]:
         """Cancel one currently active runtime request."""
-
-    def run_coordinated_pre_place(
-        self,
-        operation: RobotOperation,
-        placement_robot_id: str,
-        support_robot_id: str,
-        preplace_target: object,
-    ) -> Mapping[str, object]:
-        """Plan and execute collision-proven dual-arm pre-place motion."""
-
-    def run_coordinated_retreat(
-        self,
-        operation: RobotOperation,
-        placement_robot_id: str,
-        support_robot_id: str,
-        retreat_target: object,
-    ) -> Mapping[str, object]:
-        """Plan and execute a collision-proven post-place retreat."""
 
 
 @dataclass(frozen=True)
@@ -144,6 +132,20 @@ class PlaceUpHandler:
         self._poll_interval_s = float(poll_interval_s)
         self._active_requests: dict[str, str] = {}
         self._cancelled_operations: set[str] = set()
+        self._pre_phases: dict[str, SuccessorPrePhaseEvidence] = {}
+        self._active_boundaries: dict[str, str] = {}
+
+    def bind_pre_phase(
+        self, operation_id: str, evidence: SuccessorPrePhaseEvidence
+    ) -> None:
+        """Bind validated successor arrival without rewriting the input plan."""
+        if (
+            not isinstance(evidence, SuccessorPrePhaseEvidence)
+            or not evidence.passed
+            or operation_id not in evidence.successor_operation_ids
+        ):
+            raise ValueError("PLACE_UP pre-phase receipt is not bound")
+        self._pre_phases[operation_id] = evidence
 
     async def execute_free_space_phase(
         self,
@@ -155,7 +157,11 @@ class PlaceUpHandler:
         start_state: Mapping[str, float],
         session_robots: tuple[str, ...] | None = None,
     ) -> FreeSpaceMotionEvidence:
-        """Execute pre-contact dual-arm approach, never insertion or release."""
+        """Execute pre-contact dual-arm approach, never insertion or release.
+
+        Returns:
+            Bound physical free-space completion evidence.
+        """
         if self._free_space is None:
             raise RuntimeError("PLACE_UP free-space transport is unavailable")
         session_ids = session_robots or tuple(
@@ -239,7 +245,11 @@ class PlaceUpHandler:
     async def _dispatch(
         self, operation: RobotOperation, phase: str, runtime_operation: RuntimeOperation
     ) -> _MotionEvidence:
-        """Dispatch one phase and normalize strict lifecycle evidence."""
+        """Dispatch one phase and normalize strict lifecycle evidence.
+
+        Returns:
+            The action's independently observed lifecycle proof.
+        """
         if operation.operation_id in self._cancelled_operations:
             return _MotionEvidence(False, True, True, False, {}, "operation cancelled")
         if self._motion is None:
@@ -265,6 +275,7 @@ class PlaceUpHandler:
         ) in {
             "APPLY_PLANNING_SCENE",
             "ATTACH_PLANNING_SCENE",
+            "DETACH_PLANNING_SCENE",
         }
         terminal = (
             isinstance(raw, Mapping)
@@ -313,51 +324,76 @@ class PlaceUpHandler:
         )
 
     async def cancel(self, operation_id: str) -> Mapping[str, object]:
-        """Cancel the active upward phase request."""
+        """Cancel the active upward phase request.
+
+        Returns:
+            The actual active action or participant group's cancellation.
+        """
         self._cancelled_operations.add(operation_id)
+        motion_id = self._active_boundaries.get(operation_id)
+        if motion_id is not None:
+            return await self._free_space.cancel_free_space(motion_id)
         request_id = self._active_requests.get(operation_id)
         if request_id is None or self._motion is None:
             return {"attempted": False, "terminal": False, "safe": False}
         return await asyncio.to_thread(self._motion.cancel_motion_operation, request_id)
 
     def _world_payload(
-        self, admission: PlaceUpAdmission, sample: PlaceObservation, suffix: str
+        self,
+        admission: PlaceUpAdmission,
+        sample: PlaceObservation,
+        suffix: str,
+        shared: Mapping[str, object],
     ) -> dict[str, object]:
-        """Build a measured world planning scene for the upward pair."""
+        """Build a measured world planning scene for the upward pair.
+
+        Returns:
+            Whole-world geometry and phase-scoped contact permissions.
+        """
         if self._context is None:
             raise ValueError("PLACE_UP context unavailable")
         frame_id = "dual_world"
+        # Applying a contact ACM diff must not delete the baseplate or any
+        # unrelated structure/supply obstacle from the shared MoveIt world.
         boxes = [
             box_from_aabb(
-                object_id=admission.upper_physical_instance_id,
+                object_id=identity,
                 frame_id=frame_id,
-                minimum_m=sample.upper.aabb_min,
-                maximum_m=sample.upper.aabb_max,
+                minimum_m=brick["aabb_min"],
+                maximum_m=brick["aabb_max"],
             )
+            for identity, brick in shared["bricks"].items()
+            if identity != admission.lower_physical_instance_id
         ]
-        ground = self._context.ground
-        if ground is not None:
-            half_x, half_y = (size / 2.0 for size in ground.size_xy_m)
+        environment = shared.get("environment_colliders")
+        if isinstance(environment, Mapping) and environment:
+            boxes.extend(
+                box_from_aabb(
+                    object_id=f"environment:{identity}",
+                    frame_id=frame_id,
+                    minimum_m=brick["aabb_min"],
+                    maximum_m=brick["aabb_max"],
+                )
+                for identity, brick in environment.items()
+            )
+        else:
+            ground = shared["ground"]
             boxes.append(
                 box_from_aabb(
-                    object_id=f"{admission.robot_id}_ground",
+                    object_id="unified_ground",
                     frame_id=frame_id,
-                    minimum_m=(
-                        ground.center_xy_m[0] - half_x,
-                        ground.center_xy_m[1] - half_y,
-                        ground.top_z_m - ground.thickness_m,
-                    ),
-                    maximum_m=(
-                        ground.center_xy_m[0] + half_x,
-                        ground.center_xy_m[1] + half_y,
-                        ground.top_z_m,
-                    ),
+                    minimum_m=ground["aabb_min"],
+                    maximum_m=ground["aabb_max"],
                 )
             )
         pairs = (
-            (
-                admission.lower_physical_instance_id,
-                admission.upper_physical_instance_id,
+            tuple(
+                sorted(
+                    (
+                        admission.lower_physical_instance_id,
+                        admission.upper_physical_instance_id,
+                    )
+                )
             ),
         )
         update = PlanningSceneUpdate(
@@ -383,11 +419,15 @@ class PlaceUpHandler:
             Terminal operation evidence with separate phase records.
         """
         motion_sent = False
+        terminal_safe = True
+        release_attempted = False
         evidence: dict[str, JSONValue] = {}
         try:
             admission = await self.preflight(operation)
             if self._context is None or self._motion is None:
                 raise ValueError("PLACE_UP context or motion transport unavailable")
+            if self._free_space is None:
+                raise ValueError("PLACE_UP unified transport unavailable")
             sample = admission.sample
             pair_key = "|".join(
                 sorted(
@@ -423,14 +463,40 @@ class PlaceUpHandler:
                 "lower_to_tcp": asdict(held),
                 "contact_tcp_world_z_m": targets.contact_world_z_m,
             }
+            receipt = self._pre_phases.pop(operation.operation_id, None)
+            if receipt is not None:
+                evidence["pre_place_up"] = {
+                    "source": "successor_pre_phase",
+                    "transition_id": receipt.transition_id,
+                    **dict(receipt.evidence),
+                }
+            else:
+                approach = await move_boundary(
+                    self._free_space,
+                    operation,
+                    self._context,
+                    targets.preplace,
+                    phase="pre_place_up",
+                    active_requests=self._active_boundaries,
+                )
+                evidence["pre_place_up"] = dict(approach.evidence)
+                motion_sent = approach.started
+                terminal_safe = approach.terminal and approach.safe_to_release
+                if not approach.passed:
+                    raise RuntimeError(approach.reason or "PLACE_UP pre-place failed")
+            # Contact permission is enabled only AFTER collision-proven arrival.
+            contact_scene, _, _ = await self._free_space.free_space_context(
+                tuple(operation.participants)
+            )
             planning = planning_scene_operation(
-                self._world_payload(admission, sample, "plan_place_up"),
+                self._world_payload(admission, sample, "plan_place_up", contact_scene),
                 60.0,
                 f"{operation.operation_id}:plan_place_up",
             )
             result = await self._dispatch(operation, "plan_place_up", planning)
             evidence.update(result.evidence)
             motion_sent = motion_sent or result.motion_sent
+            terminal_safe = result.terminal and result.safe
             if not result.passed:
                 raise RuntimeError(result.reason or "plan_place_up failed")
             aligned = await self._observe(
@@ -438,8 +504,19 @@ class PlaceUpHandler:
                 admission.upper_physical_instance_id,
                 admission.lower_physical_instance_id,
             )
+            # Anchor contact guards to the actual post-transport grasp, not
+            # the old pose that existed before public-space movement.
+            held = compose(inverse(aligned.lower.object_pose), aligned.lower.tcp_pose)
+            verify_support_contact(
+                await self._observations.observe(admission.support_robot_id),
+                robot_id=admission.support_robot_id,
+                upper_id=admission.upper_physical_instance_id,
+                session_id=self._session_id,
+                manifest_sha256=self._manifest_sha256,
+            )
             guard = {
                 "robot_id": admission.robot_id,
+                "support_robot_id": admission.support_robot_id,
                 "session_id": self._session_id,
                 "manifest_sha256": self._manifest_sha256,
                 "upper_id": admission.upper_physical_instance_id,
@@ -455,27 +532,6 @@ class PlaceUpHandler:
                 "mode": "insert_up",
             }
             evidence["contact_guard"] = guard
-            preplace_dispatch = getattr(self._motion, "run_coordinated_pre_place", None)
-            if not callable(preplace_dispatch):
-                raise RuntimeError(
-                    "PLACE_UP pre-place requires collision-proven coordinated transport"
-                )
-            raw_preplace = await asyncio.to_thread(
-                preplace_dispatch,
-                operation,
-                admission.robot_id,
-                admission.support_robot_id,
-                targets.preplace,
-            )
-            if not isinstance(raw_preplace, Mapping):
-                raise RuntimeError("coordinated pre-place returned invalid evidence")
-            evidence["pre_place_up"] = dict(raw_preplace)
-            if not (
-                raw_preplace.get("passed") is True
-                and raw_preplace.get("terminal") is True
-                and raw_preplace.get("safe_to_release") is True
-            ):
-                raise RuntimeError("collision-proven coordinated pre-place failed")
             reason, measured = inspect_contact(
                 await self._observations.observe(admission.robot_id), guard
             )
@@ -490,12 +546,13 @@ class PlaceUpHandler:
                     guarded_tcp_operation(
                         targets.contact,
                         guard,
-                        20.0,
+                        120.0,
                         f"{operation.operation_id}:insert_up",
                     ),
                 )
                 evidence["insertion_up"] = dict(result.evidence)
                 motion_sent = motion_sent or result.motion_sent
+                terminal_safe = result.terminal and result.safe
                 if not result.terminal or not result.safe:
                     raise RuntimeError(
                         "upward insertion action has unknown terminal safety"
@@ -511,6 +568,37 @@ class PlaceUpHandler:
                     )
                     connected = settle_reason == "connection_confirmed"
                 if not connected:
+                    # No press retries or release under an unconnected load.
+                    # Withdraw once only after the insertion actually stopped.
+                    unload_guard = {**guard, "mode": "unload_up"}
+                    withdrawn = await self._dispatch(
+                        operation,
+                        "unload_up",
+                        guarded_tcp_operation(
+                            targets.preplace,
+                            unload_guard,
+                            120.0,
+                            f"{operation.operation_id}:unload_up",
+                        ),
+                    )
+                    evidence["failure_withdrawal"] = dict(withdrawn.evidence)
+                    motion_sent = motion_sent or withdrawn.motion_sent
+                    terminal_safe = withdrawn.terminal and withdrawn.safe
+                    if not withdrawn.passed:
+                        raise RuntimeError(
+                            withdrawn.reason or "upward contact withdrawal failed"
+                        )
+                    withdrawal_scene = await self._observations.observe(
+                        admission.robot_id
+                    )
+                    withdrawal_reason, withdrawal_sample = inspect_contact(
+                        withdrawal_scene, unload_guard
+                    )
+                    if withdrawal_reason is not None:
+                        raise ValueError(
+                            f"withdrawal proof failed: {withdrawal_reason}"
+                        )
+                    evidence["withdrawal_confirmed"] = withdrawal_sample
                     raise ValueError(
                         f"upward insertion did not confirm connection: {stop}"
                     )
@@ -546,9 +634,11 @@ class PlaceUpHandler:
                 60.0,
                 f"{operation.operation_id}:release",
             )
+            release_attempted = True
             result = await self._dispatch(operation, "release", release)
             evidence.update(result.evidence)
             motion_sent = motion_sent or result.motion_sent
+            terminal_safe = result.terminal and result.safe
             if not result.passed:
                 raise RuntimeError(result.reason or "release failed")
             release_samples = [
@@ -573,11 +663,87 @@ class PlaceUpHandler:
                 orientation_tolerance_rad=self._context.params.follow_orientation_tolerance_rad,
                 require_connected=True,
             )
-            evidence["handoff_required"] = True
-            evidence["retreat_deferred"] = {
-                "reason": "next transport owns departure from the placement interface",
-                "anchor": "last_release_observation",
-            }
+            if not all(
+                targets.release_expected_window_m[0]
+                <= item.lower.opening_m
+                <= targets.release_expected_window_m[1]
+                for item in release_samples
+            ):
+                raise ValueError("PLACE_UP release opening not physically confirmed")
+            detach = await self._dispatch(
+                operation,
+                "detach",
+                detached_planning_scene_operation(
+                    {
+                        "scene_id": f"{operation.operation_id}-detach",
+                        "object_id": admission.lower_physical_instance_id,
+                        "link_name": f"{admission.robot_id}_rocobrick_tcp",
+                        "operation": "detach",
+                    },
+                    60.0,
+                    f"{operation.operation_id}:detach",
+                ),
+            )
+            evidence["detach"] = dict(detach.evidence)
+            if not detach.passed:
+                raise RuntimeError(detach.reason or "detach failed")
+            self._ledger.revoke(
+                admission.robot_id,
+                f"holding:{admission.lower_physical_instance_id}",
+                "measured release after exact connection",
+            )
+            retreat = await move_boundary(
+                self._free_space,
+                operation,
+                self._context,
+                targets.retreat,
+                phase="retreat_up",
+                active_requests=self._active_boundaries,
+            )
+            evidence["retreat_motion"] = dict(retreat.evidence)
+            motion_sent = motion_sent or retreat.started
+            terminal_safe = retreat.terminal and retreat.safe_to_release
+            if not retreat.passed:
+                raise RuntimeError(retreat.reason or "PLACE_UP retreat failed")
+            final_samples = []
+            for index in range(3):
+                if index:
+                    await asyncio.sleep(self._poll_interval_s)
+                final_samples.append(
+                    await self._observe(
+                        admission.robot_id,
+                        admission.upper_physical_instance_id,
+                        admission.lower_physical_instance_id,
+                    )
+                )
+                verify_support_contact(
+                    await self._observations.observe(admission.support_robot_id),
+                    robot_id=admission.support_robot_id,
+                    upper_id=admission.upper_physical_instance_id,
+                    session_id=self._session_id,
+                    manifest_sha256=self._manifest_sha256,
+                )
+            evidence["retreat_confirmed"] = verify_place_bricks(
+                final_samples,
+                position_tolerance_m=self._context.params.still_tolerance_m,
+                orientation_tolerance_rad=self._context.params.follow_orientation_tolerance_rad,
+                require_connected=True,
+            )
+            departure = (
+                release_samples[-1].lower.tcp_pose.position_xyz[2]
+                - final_samples[-1].lower.tcp_pose.position_xyz[2]
+            )
+            if departure < self._context.params.place_retreat_height_m * 0.5:
+                raise ValueError("PLACE_UP actual downward retreat not confirmed")
+            evidence["retreat_confirmed"]["actual_downward_tcp_distance_m"] = departure
+            evidence["terminal_safe"] = True
+            # Support remained constrained through release and departure; its
+            # role can end now without adding a fabricated robot movement.
+            self._ledger.revoke(
+                admission.support_robot_id,
+                f"supporting:{admission.upper_physical_instance_id}",
+                "PLACE_UP retreat physically complete",
+            )
             self._ledger.confirm(
                 admission.robot_id,
                 f"placed:{admission.lower_physical_instance_id}",
@@ -587,7 +753,7 @@ class PlaceUpHandler:
                     "lower_physical_instance_id": admission.lower_physical_instance_id,
                     "connection_confirmed": dict(evidence["connection_confirmed"]),
                     "release_confirmed": dict(evidence["release_confirmed"]),
-                    "handoff_required": True,
+                    "retreat_confirmed": dict(evidence["retreat_confirmed"]),
                 },
             )
             return OperationExecution(
@@ -601,12 +767,25 @@ class PlaceUpHandler:
                 reason="PLACE_UP_CONFIRMED",
             )
         except (ValueError, RuntimeError) as error:
+            if (
+                release_attempted
+                and self._ledger.observe(
+                    operation.executor_robot_id,
+                    f"holding:{admission.lower_physical_instance_id}",
+                )
+                is not None
+            ):
+                self._ledger.invalidate_if_stale(
+                    operation.executor_robot_id,
+                    admission.lower_physical_instance_id,
+                    "PLACE_UP release evidence incomplete",
+                )
             return OperationExecution(
                 operation_id=operation.operation_id,
                 robot_id=operation.executor_robot_id,
                 status=OperationStatus.FAILED,
                 passed=False,
-                terminal=not motion_sent,
+                terminal=terminal_safe,
                 motion_sent=motion_sent,
                 evidence=evidence,
                 reason=f"PLACE_UP_FAILED: {error}",

@@ -8,15 +8,15 @@
   ],
   "operations": [
     {
-      "operation_id": "type1-c-scaled2-piper1-pick",
+      "operation_id": "type1-c-scaled2-piper0-pick",
       "source_task_id": "type1-c-place-up",
       "skill": "PICK",
-      "executor_robot_id": "piper_1",
+      "executor_robot_id": "piper_0",
       "participants": [
-        "piper_1"
+        "piper_0"
       ],
       "role_bindings": {
-        "executor": "piper_1"
+        "executor": "piper_0"
       },
       "target": {
         "physical_instance_id": "brick-b9c3d6923e8be595153b"
@@ -32,7 +32,7 @@
         "holding:brick-b9c3d6923e8be595153b"
       ],
       "resources": [
-        "robot:piper_1",
+        "robot:piper_0",
         "part:brick-b9c3d6923e8be595153b"
       ],
       "evidence_requirements": [
@@ -41,21 +41,21 @@
       ]
     },
     {
-      "operation_id": "type1-c-scaled2-piper0-support",
+      "operation_id": "type1-c-scaled2-piper1-support",
       "source_task_id": "type1-c-place-up",
       "skill": "SUPPORT_TOP",
-      "executor_robot_id": "piper_0",
+      "executor_robot_id": "piper_1",
       "participants": [
-        "piper_0"
+        "piper_1"
       ],
       "role_bindings": {
-        "executor": "piper_0"
+        "executor": "piper_1"
       },
       "target": {
         "connection_id": "conn-type1-c-lower-upper",
         "upper_physical_instance_id": "brick-794d4435d29a64b5dd3e",
         "lower_physical_instance_id": "brick-b9c3d6923e8be595153b",
-        "placement_robot_id": "piper_1"
+        "placement_robot_id": "piper_0"
       },
       "parameters": {},
       "preconditions": [
@@ -65,7 +65,7 @@
         "supporting:brick-794d4435d29a64b5dd3e"
       ],
       "resources": [
-        "robot:piper_0",
+        "robot:piper_1",
         "connection:conn-type1-c-lower-upper",
         "part:brick-794d4435d29a64b5dd3e"
       ],
@@ -75,23 +75,23 @@
       ]
     },
     {
-      "operation_id": "type1-c-scaled2-piper1-place-up",
+      "operation_id": "type1-c-scaled2-piper0-place-up",
       "source_task_id": "type1-c-place-up",
       "skill": "PLACE_UP",
-      "executor_robot_id": "piper_1",
+      "executor_robot_id": "piper_0",
       "participants": [
-        "piper_1",
-        "piper_0"
+        "piper_0",
+        "piper_1"
       ],
       "role_bindings": {
-        "executor": "piper_1",
-        "support": "piper_0"
+        "executor": "piper_0",
+        "support": "piper_1"
       },
       "target": {
         "connection_id": "conn-type1-c-lower-upper",
         "upper_physical_instance_id": "brick-794d4435d29a64b5dd3e",
         "lower_physical_instance_id": "brick-b9c3d6923e8be595153b",
-        "support_robot_id": "piper_0"
+        "support_robot_id": "piper_1"
       },
       "parameters": {
         "preserve_stud_axis": true
@@ -104,8 +104,8 @@
         "assembled:brick-b9c3d6923e8be595153b"
       ],
       "resources": [
-        "robot:piper_1",
         "robot:piper_0",
+        "robot:piper_1",
         "connection:conn-type1-c-lower-upper",
         "part:brick-794d4435d29a64b5dd3e",
         "part:brick-b9c3d6923e8be595153b"
@@ -119,44 +119,44 @@
   ],
   "dependencies": [
     {
-      "predecessor_operation_id": "type1-c-scaled2-piper1-pick",
-      "successor_operation_id": "type1-c-scaled2-piper0-support",
+      "predecessor_operation_id": "type1-c-scaled2-piper0-pick",
+      "successor_operation_id": "type1-c-scaled2-piper1-support",
       "reason": "support after holding"
     },
     {
-      "predecessor_operation_id": "type1-c-scaled2-piper0-support",
-      "successor_operation_id": "type1-c-scaled2-piper1-place-up",
+      "predecessor_operation_id": "type1-c-scaled2-piper1-support",
+      "successor_operation_id": "type1-c-scaled2-piper0-place-up",
       "reason": "place-up after stable support"
     }
   ],
   "execution_layers": [
     [
-      "type1-c-scaled2-piper1-pick"
+      "type1-c-scaled2-piper0-pick"
     ],
     [
-      "type1-c-scaled2-piper0-support"
+      "type1-c-scaled2-piper1-support"
     ],
     [
-      "type1-c-scaled2-piper1-place-up"
+      "type1-c-scaled2-piper0-place-up"
     ]
   ],
   "planned_schedule": [
     [
       {
-        "operation_id": "type1-c-scaled2-piper1-pick",
-        "robot_id": "piper_1"
-      }
-    ],
-    [
-      {
-        "operation_id": "type1-c-scaled2-piper0-support",
+        "operation_id": "type1-c-scaled2-piper0-pick",
         "robot_id": "piper_0"
       }
     ],
     [
       {
-        "operation_id": "type1-c-scaled2-piper1-place-up",
+        "operation_id": "type1-c-scaled2-piper1-support",
         "robot_id": "piper_1"
+      }
+    ],
+    [
+      {
+        "operation_id": "type1-c-scaled2-piper0-place-up",
+        "robot_id": "piper_0"
       }
     ]
   ],

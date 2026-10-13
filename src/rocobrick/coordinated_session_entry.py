@@ -69,6 +69,11 @@ def perform_coordinated_plan(
             )
         if not request.scene_snapshot:
             raise ValueError("combined plan requires a bound shared scene snapshot")
+        for target in request.targets.values():
+            if "grasp_region" in target:
+                from rocobrick.skills.grasp_region import validate_grasp_scene
+
+                validate_grasp_scene(target["grasp_region"], request.scene_snapshot)
         if not request.physical_facts or set(request.physical_facts) != set(
             request.participants
         ):
@@ -103,7 +108,19 @@ def perform_coordinated_plan(
             and scene_proof.get("scene_version") < request.scene_version
         ):
             raise ValueError("requested planning scene version is stale")
-        if any(
+        has_grasp_region = any(
+            "grasp_region" in target for target in request.targets.values()
+        )
+        if has_grasp_region:
+            # Keep the Cartesian region through the MoveIt goal sampler. In a
+            # mixed request exact peers also remain Cartesian, not pre-solved.
+            start_state_fn = getattr(session, "unified_start_state", None)
+            if not callable(start_state_fn):
+                raise ValueError(
+                    "grasp region requires a measured combined start state"
+                )
+            request = replace(request, start_state=start_state_fn())
+        elif any(
             isinstance(target.get("tcp_pose"), Mapping)
             for target in request.targets.values()
         ):
@@ -160,6 +177,12 @@ def perform_coordinated_plan(
             "scene_digest": operation.scene_digest,
             "planning_scene": dict(scene_proof),
         }
+        if has_grasp_region:
+            from rocobrick.skills.grasp_region import planned_grasp_endpoints
+
+            trajectory["grasp_endpoints"] = planned_grasp_endpoints(
+                session, request, raw["joint_names"], raw["points"]
+            )
         if callable(participants_executor):
             # Crossing this boundary may prepare or start physical actions.
             # Exceptions after it cannot prove that the participants stopped.
@@ -197,6 +220,7 @@ def perform_coordinated_plan(
         return CoordinatedSessionResult(
             coordination_id=request.coordination_id,
             robots=request.robots,
+            participants=request.participants,
             readiness=readiness.__dict__,
             trajectory=trajectory,
             lifecycle=lifecycle,

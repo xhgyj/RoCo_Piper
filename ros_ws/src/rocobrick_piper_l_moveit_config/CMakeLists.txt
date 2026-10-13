@@ -19,6 +19,7 @@ install(
 
 install(
   PROGRAMS scripts/dual_joint_state_aggregator.py
+             scripts/stage4_fake_arm_controller.py
   DESTINATION lib/${PROJECT_NAME}
 )
 

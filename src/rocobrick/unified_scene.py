@@ -70,6 +70,7 @@ class UnifiedSceneBinding:
                 "attached/support scene admission requires explicit physical facts"
             )
         attachments = {}
+        contact_pairs = set()
         for robot, facts in request.physical_facts.items():
             for key, proof in facts.items():
                 if key.startswith("holding:"):
@@ -105,6 +106,11 @@ class UnifiedSceneBinding:
                         raise ValueError(
                             "supporting participant requires proven support "
                             "and continuous pose constraint"
+                        )
+                    identity = key.removeprefix("supporting:")
+                    for index in (1, 2):
+                        contact_pairs.add(
+                            tuple(sorted((identity, f"{robot}_gripper_link{index}")))
                         )
         boxes = []
         for identity, brick in bricks.items():
@@ -149,6 +155,7 @@ class UnifiedSceneBinding:
             scene_id=request.coordination_id,
             boxes=tuple(boxes),
             expected_scene_digest="0" * 64,
+            allowed_collision_pairs=tuple(sorted(contact_pairs)),
         )
         update = replace(update, expected_scene_digest=scene_digest(update))
         result = self.transport.apply_planning_scene(update, request.timeout_s)
@@ -175,7 +182,11 @@ class UnifiedSceneBinding:
         }
 
     def refresh_version(self, timeout_s: float = 5.0) -> int:
-        """Refresh the monotonic scene version from current MoveIt readback."""
+        """Refresh the monotonic scene version from current MoveIt readback.
+
+        Returns:
+            The current version, advanced only by a changed actual readback.
+        """
         digest = self.transport.unified_scene_fingerprint(timeout_s)
         if digest != self.digest:
             self.version += 1

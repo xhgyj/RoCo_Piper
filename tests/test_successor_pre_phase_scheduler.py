@@ -281,3 +281,51 @@ def test_multiple_predecessors_are_adopted_by_one_successor():
     assert executor.requests[0].predecessor_operation_ids == ("a", "support")
     assert executor.requests[0].participants == ("piper_0", "piper_1")
     assert result.operations["support"].resources_released
+
+
+def test_same_layer_successors_share_one_pre_phase_and_keep_support_leases():
+    """PICK and SUPPORT_TOP successors use one combined transition."""
+    a = _raw_operation("a", "piper_0", ("robot:piper_0", "part:brick"))
+    support = _raw_operation(
+        "support", "piper_1", ("robot:piper_1", "part:upper")
+    )
+    pick = replace(
+        _raw_operation("pick", "piper_0", ("robot:piper_0", "part:brick")),
+        skill="PICK",
+        participants=("piper_0", "piper_1"),
+    )
+    support_top = replace(
+        _raw_operation(
+            "support-top", "piper_1", ("robot:piper_1", "part:upper")
+        ),
+        skill="SUPPORT_TOP",
+        participants=("piper_0", "piper_1"),
+    )
+    executor = TransitionExecutor()
+    executor.outcomes.update(
+        {
+            "pick": lambda operation: _execution(
+                operation, evidence={"terminal_safe": True}
+            ),
+            "support-top": lambda operation: _execution(
+                operation, evidence={"terminal_safe": True}
+            ),
+        }
+    )
+    result = asyncio.run(
+        schedule(
+            _raw_plan(
+                [a, support, pick, support_top],
+                (("a", "support"), ("pick", "support-top")),
+            ),
+            executor,
+            allow_legacy_results=False,
+        )
+    )
+    assert result.passed
+    assert len(executor.requests) == 1
+    request = executor.requests[0]
+    assert request.successor_operation_ids == ("pick", "support-top")
+    assert request.participants == ("piper_0", "piper_1")
+    assert request.lease_targets["part:brick"] == "pick"
+    assert request.lease_targets["part:upper"] == "support-top"

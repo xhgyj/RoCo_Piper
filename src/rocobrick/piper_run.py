@@ -1826,6 +1826,19 @@ def _robot_operation_plan_phase(
                                 )
                                 for robot_id in operation_plan.robots
                             }
+                    # Candidate planning and continuous upward insertion need
+                    # their actual phase budgets, not the legacy 60 s layer
+                    # deadline. Geometry/contact safety checks stay unchanged.
+                    for index, layer in enumerate(operation_plan.execution_layers):
+                        for oid in layer:
+                            item = operation_plan.operations[oid]
+                            budget = 0.0
+                            if item.skill == "PICK" and item.parameters.get("successor_skill") == "PLACE_UP":
+                                budget = 300.0
+                            elif item.skill == "PLACE_UP":
+                                budget = 360.0
+                            if budget:
+                                layer_timeout_overrides[index] = max(layer_timeout_overrides.get(index, 0.0), budget)
                     if handover_profiles:
                         from rocobrick.skills.direct_handover import (
                             DirectSimulationHandover,
@@ -1848,14 +1861,14 @@ def _robot_operation_plan_phase(
                         # MoveIt path; the formal backend continues from its
                         # measured arrival through contact and transfer.
                         handover_backend = live_handover.backend
-                        layer_timeout_overrides = {
+                        layer_timeout_overrides.update({
                             index: 1200.0
                             for index, layer in enumerate(operation_plan.execution_layers)
                             if any(
                                 operation_plan.operations[oid].skill == "HANDOVER"
                                 for oid in layer
                             )
-                        }
+                        })
                         handover_simulation_evidence = {
                             "explicit_opt_in": True,
                             "hardware_qualified": False,
