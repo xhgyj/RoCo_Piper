@@ -177,12 +177,6 @@ def perform_coordinated_plan(
             "scene_digest": operation.scene_digest,
             "planning_scene": dict(scene_proof),
         }
-        if has_grasp_region:
-            from rocobrick.skills.grasp_region import planned_grasp_endpoints
-
-            trajectory["grasp_endpoints"] = planned_grasp_endpoints(
-                session, request, raw["joint_names"], raw["points"]
-            )
         if callable(participants_executor):
             # Crossing this boundary may prepare or start physical actions.
             # Exceptions after it cannot prove that the participants stopped.

@@ -121,17 +121,20 @@ def query(targets, participants=("piper_0",)):
     )
 
 
-def test_session_entry_preserves_region_and_moving_peer_without_outer_ik():
-    """Verify session entry preserves region and moving peer without outer ik."""
+@pytest.mark.parametrize("plan_only", [True, False])
+def test_session_entry_preserves_region_without_outer_ik_or_endpoint_fk(plan_only):
+    """Leave grasp verification to measured arrival, not planned endpoint FK."""
     from rocobrick.coordinated_session_entry import perform_coordinated_plan
 
     captured = []
+    executed = []
     item = replace(
         query(
             {"piper_0": {"grasp_region": region()}, "piper_1": pose("piper_1", 0.1)},
             participants=("piper_0", "piper_1"),
         ),
         physical_facts={"piper_0": {}, "piper_1": {}},
+        plan_only=plan_only,
     )
 
     def plan(value, timeout_s):
@@ -168,19 +171,30 @@ def test_session_entry_preserves_region_and_moving_peer_without_outer_ik():
         ),
         runtime_for=lambda robot: SimpleNamespace(
             arm_joint_names=(f"{robot}_joint1",),
-            compute_tcp_fk=lambda state, timeout_s: (
-                endpoint().tcp_pose.position_xyz,
-                endpoint().tcp_pose.orientation_xyzw,
+            compute_tcp_fk=lambda state, timeout_s: pytest.fail(
+                "planned endpoint FK must not gate grasp execution"
             ),
         ),
     )
-    result = perform_coordinated_plan(session, item)
+
+    def execute(value):
+        executed.append(value)
+        return {
+            "prepared": True,
+            "started": True,
+            "terminal": True,
+            "safe_to_release": True,
+        }
+
+    result = perform_coordinated_plan(
+        session, item, participants_executor=None if plan_only else execute
+    )
     assert result.passed, result.error
     assert captured[0].targets == item.targets
-    assert result.lifecycle["physical_execution"] is False
-    assert result.trajectory["grasp_endpoints"]["piper_0"]["span_m"] == pytest.approx(
-        0.02
-    )
+    assert result.lifecycle["physical_execution"] is (not plan_only)
+    assert len(executed) == (0 if plan_only else 1)
+    assert "grasp_endpoints" not in result.trajectory
+    assert result.trajectory["points"][-1]["positions"] == [0.15, 0.3]
 
 
 def test_region_has_no_locked_quaternion_or_host_candidate_list():
