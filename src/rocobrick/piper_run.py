@@ -1759,6 +1759,32 @@ def _robot_operation_plan_phase(
                             item.skill == "PICK"
                             for item in operation_plan.operations.values()
                         ):
+                            top_grasps = {}
+                            if os.environ.get("ROCOBRICK_TOP_OFFSET_PICK") == "1":
+                                from rocobrick.plan.structure_scene import (
+                                    build_structure_scene_plan_from_files,
+                                )
+                                from rocobrick.skills.top_offset_grasp import (
+                                    top_offset_bindings,
+                                )
+
+                                structure = stap_plan
+                                if structure is None:
+                                    structure, _ = (
+                                        build_structure_scene_plan_from_files(
+                                            recorder.directory / "structure_start.json"
+                                            if args.structure_start is not None
+                                            else None,
+                                            recorder.directory / "structure_goal.json",
+                                            payload,
+                                        )
+                                    )
+                                library = json.loads(
+                                    (REPO_ROOT / "config/lego_library.json").read_text()
+                                )
+                                top_grasps = top_offset_bindings(
+                                    structure, operation_plan, library
+                                )
                             pick_backends = {
                                 robot_id: PickHandler(
                                     session,
@@ -1768,6 +1794,7 @@ def _robot_operation_plan_phase(
                                     motion_transport=session,
                                     free_space_transport=unified_runtime,
                                     context=transit_contexts[robot_id],
+                                    top_offset_grasps=top_grasps,
                                 )
                                 for robot_id in operation_plan.robots
                             }

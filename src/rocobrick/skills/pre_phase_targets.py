@@ -48,6 +48,10 @@ def serialize_target(target, robot):
 def derive_wire_targets(operation_document, shared, context_documents):
     """Decode calibrated execution context separately from immutable operations.
 
+    The operation document is the asdict serialization of RobotOperation;
+    a target therefore arrives as the single-field values mapping. A wire
+    target carrying any other shape is rejected before derivation.
+
     A wire document may carry cohort_operations. Their executor targets
     are unioned into one combined request; non-executors retain the shared
     hold-pose target from the primary operation.
@@ -80,6 +84,19 @@ def derive_wire_targets(operation_document, shared, context_documents):
     from rocobrick.robot_operation_plan import OperationTarget
     from rocobrick.skills.targets import RobotBaseFrame, SkillParams, TcpProvenance
 
+    wire_target = operation_document["target"]
+    if not wire_target:
+        operation_target = None
+    else:
+        # The wire document is dataclasses.asdict(RobotOperation), so a target
+        # arrives only as the single-field {"values": {...}} mapping.
+        if (
+            not isinstance(wire_target, Mapping)
+            or set(wire_target) != {"values"}
+            or not isinstance(wire_target["values"], Mapping)
+        ):
+            raise ValueError("wire operation target must be the values mapping")
+        operation_target = OperationTarget(wire_target["values"])
     operation = RobotOperation(
         operation_id=operation_document["operation_id"],
         source_task_id=operation_document["source_task_id"],
@@ -87,9 +104,7 @@ def derive_wire_targets(operation_document, shared, context_documents):
         executor_robot_id=operation_document["executor_robot_id"],
         participants=tuple(operation_document["participants"]),
         role_bindings=operation_document["role_bindings"],
-        target=OperationTarget(operation_document["target"])
-        if operation_document["target"]
-        else None,
+        target=operation_target,
         parameters=operation_document["parameters"],
         preconditions=tuple(operation_document["preconditions"]),
         effects=tuple(operation_document["effects"]),
@@ -240,6 +255,10 @@ def derive_pre_phase_targets(
     else:
         raise ValueError(f"{operation.skill} does not define a motion pre-phase")
     result = {robot: serialize_target(target, robot)}
+    if operation.skill == "SUPPORT_TOP":
+        # The support approach is an empty-gripper Cartesian goal; MoveIt's
+        # own sampler solves it instead of the host's fixed-seed KDL pass.
+        result[robot] = {**result[robot], "moveit_pose_goal": True}
     if (
         operation.skill == "SUPPORT_TOP"
         and values.get("placement_robot_id") in contexts
@@ -270,7 +289,14 @@ def derive_pre_phase_targets(
             carrier_context.params,
             tuple(interface.get("allowed_upper_yaw_quarter_turns", (0,))),
         )
-        result[carrier] = serialize_target(placement.preplace, carrier)
+        # The carrier holds a brick OFF the tool axis, so the 180-degree
+        # jaw-equivalent roll would seat it 2x the grasp offset away; the
+        # pose goal must stay a single orientation branch.
+        result[carrier] = {
+            **serialize_target(placement.preplace, carrier),
+            "moveit_pose_goal": True,
+            "roll_flip_equivalent": False,
+        }
     for participant, participant_context in contexts.items():
         if participant in result:
             continue

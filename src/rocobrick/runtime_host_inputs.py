@@ -2,15 +2,18 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass
-from math import isfinite
-from math import pi
-from types import MappingProxyType
+from math import isfinite, pi
 from pathlib import Path
-from typing import Any
+from types import MappingProxyType
 
-from rocobrick.bricksim_topology import BaseplateSpec, BrickSimTopologyBundle, build_bricksim_topologies
-from rocobrick.isaac_scene import IsaacSceneConfig
+from rocobrick.bricksim_topology import (
+    BaseplateSpec,
+    BrickSimTopologyBundle,
+    build_bricksim_topologies,
+)
+from rocobrick.feeding_platforms import allocate_feeding_slots, parse_feeding_platforms
 from rocobrick.initial_part_allocator import allocate_initial_slots
+from rocobrick.isaac_scene import IsaacSceneConfig
 from rocobrick.models import Pose
 from rocobrick.scene_bootstrap import RobotSpawnSpec
 from rocobrick.stap_contract import StapPlan
@@ -39,7 +42,7 @@ def _seq(value: object, name: str, length: int) -> tuple[float, ...]:
     return result
 
 
-def _mapping(value: object, name: str) -> Mapping[str, Any]:
+def _mapping(value: object, name: str) -> Mapping[str, object]:
     if not isinstance(value, Mapping):
         raise RuntimeHostInputError(f"{name} must be an object")
     return value
@@ -179,18 +182,58 @@ def build_runtime_host_inputs(
                     robot,
                 ),
             )
-    allocations = allocate_initial_slots(
-        loose_instance_ids,
-        preferred_robots=preferred_robots,
-        robot_base_xy=robot_base_xy,
-        board_center_xy=(baseplate_position[0], baseplate_position[1]),
-        board_half_extent_xy=(
-            max(0.08, size[0] * 0.008 / 2),
-            max(0.08, size[1] * 0.008 / 2),
-        ),
-    )
-
     env = _mapping(config.get("Env_Config"), "Env_Config")
+    support_heights: dict[str, float] = {}
+    try:
+        platforms = parse_feeding_platforms(env.get("Feeding_Platforms"), tuple(robots))
+        feeding_slots = {}
+        if platforms:
+            footprints = {}
+            for part in loose_parts:
+                identity = topology_instances[int(part["id"])]
+                payload = _mapping(part.get("payload"), "loose brick payload")
+                width, length = _seq(
+                    (payload.get("W"), payload.get("L")), "brick footprint", 2
+                )
+                footprint = (width * 0.008, length * 0.008)
+                if plan.goal_parts[identity].orientation_quarter_turns % 2:
+                    footprint = footprint[::-1]
+                footprints[identity] = footprint
+            feeding_slots = allocate_feeding_slots(
+                loose_instance_ids,
+                platforms=platforms,
+                footprints_xy_m=footprints,
+                preferred_robots=preferred_robots,
+                robot_base_xy=robot_base_xy,
+                board_center_xy=(baseplate_position[0], baseplate_position[1]),
+                board_half_extent_xy=(size[0] * 0.008 / 2, size[1] * 0.008 / 2),
+            )
+            support_heights = {
+                identity: slot.platform.top_z_m
+                for identity, slot in feeding_slots.items()
+            }
+    except ValueError as error:
+        raise RuntimeHostInputError(f"invalid feeding platforms: {error}") from error
+    allocations = {}
+    if not platforms:
+        allocations = allocate_initial_slots(
+            loose_instance_ids,
+            preferred_robots=preferred_robots,
+            robot_base_xy=robot_base_xy,
+            board_center_xy=(baseplate_position[0], baseplate_position[1]),
+            board_half_extent_xy=(
+                max(0.08, size[0] * 0.008 / 2),
+                max(0.08, size[1] * 0.008 / 2),
+            ),
+        )
+    positions = {
+        item: allocation.position_xy_m for item, allocation in allocations.items()
+    }
+    reasons = {
+        item: dict(allocation.reason) for item, allocation in allocations.items()
+    }
+    positions.update({item: slot.position_xy_m for item, slot in feeding_slots.items()})
+    reasons.update({item: slot.evidence() for item, slot in feeding_slots.items()})
     storage = _mapping(env.get("Storage_Config"), "Env_Config.Storage_Config")
     workspace_path = storage.get("Prim_Path", "/World/LegoWorkspace")
     if type(workspace_path) is not str or not workspace_path.startswith("/"):
@@ -205,11 +248,13 @@ def build_runtime_host_inputs(
         60,
         collision_filter_robot_id,
         tuple(collision_filter_instance_ids),
-        {item: allocation.position_xy_m for item, allocation in allocations.items()},
+        positions,
         {
             item: float(plan.goal_parts[item].orientation_quarter_turns) * pi / 2.0
-            for item in allocations
+            for item in positions
         },
-        {item: dict(allocation.reason) for item, allocation in allocations.items()},
+        reasons,
+        platforms,
+        support_heights,
     )
     return RuntimeHostInputs(topology, MappingProxyType(dict(robots)), scene_config)

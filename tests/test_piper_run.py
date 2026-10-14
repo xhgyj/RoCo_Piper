@@ -88,6 +88,7 @@ ALLOWED_ROCOBRICK = {
     "rocobrick.skills.observation",
     "rocobrick.skills.targets",
     "rocobrick.skills.pick",
+    "rocobrick.skills.top_offset_grasp",
     "rocobrick.skills.place_down",
     "rocobrick.skills.place_up",
     "rocobrick.skills.support_top",

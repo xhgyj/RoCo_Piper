@@ -8,6 +8,7 @@ from rocobrick.skills.observation import Pose
 from rocobrick.skills.placement_geometry import (
     compose,
     interface_place_targets,
+    interface_place_up_targets,
     inverse,
     pose_error,
 )
@@ -102,6 +103,87 @@ def test_only_explicit_asset_symmetry_can_change_nominal_yaw(
         1
     ] == pytest.approx(expected_angle)
     assert desired.position_xyz == pytest.approx((0.092, 0.224, 0.0196))
+
+
+def test_place_up_yaw_symmetry_keeps_tool_off_the_mated_upper_half():
+    """Task C gantry: only the free-side yaw candidate may be seated."""
+    upper = Pose((-0.048, -0.034, 0.1184), (0.0, 0.0, 1.0, 0.0))
+    lower_to_upper = Pose(
+        (0.0, 0.032, 0.0192),
+        (0.0, 0.0, math.sin(math.pi / 4), math.cos(math.pi / 4)),
+    )
+    measured_lower = Pose((0.352, 0.062, 0.110), (0.0, 0.0, 0.0, 1.0))
+    held = Pose((0.0, -0.0072, 0.0148), (1.0, 0.0, 0.0, 0.0))
+    measured_tcp = compose(measured_lower, held)
+    targets, desired_lower, measured_held = interface_place_up_targets(
+        upper,
+        lower_to_upper,
+        measured_lower,
+        measured_tcp,
+        0.0318,
+        RobotBaseFrame((0.0, 0.0, 0.0), (0.0, 0.0, 0.0, 1.0)),
+        TcpProvenance(EXPECTED_RUNTIME_MODEL_SHA256, "c" * 64),
+        SkillParams(),
+        (0, 2),
+    )
+    assert pose_error(measured_held, held)[0] < 1e-10
+    assert desired_lower.position_xyz == pytest.approx(
+        (-0.016, -0.034, 0.0992), abs=1e-6
+    )
+    desired_tcp = compose(desired_lower, held)
+    # The beam footprint ends at world x = -0.016; the tool must stay clear
+    # of it, which only the free-side candidate realizes.
+    assert desired_tcp.position_xyz[0] == pytest.approx(-0.0088, abs=1e-3)
+    assert desired_tcp.position_xyz[0] > -0.016
+    assert targets.preplace.position[2] == pytest.approx(0.034, abs=1e-3)
+    assert targets.contact_world_z_m == pytest.approx(0.114, abs=1e-3)
+
+
+def test_place_up_fails_closed_when_every_symmetry_faces_the_upper():
+    """A grasp offset on the mated side with no clearing rotation is fatal."""
+    upper = Pose((-0.048, -0.034, 0.1184), (0.0, 0.0, 1.0, 0.0))
+    lower_to_upper = Pose(
+        (0.0, 0.032, 0.0192),
+        (0.0, 0.0, math.sin(math.pi / 4), math.cos(math.pi / 4)),
+    )
+    measured_lower = Pose((0.352, 0.062, 0.110), (0.0, 0.0, 0.0, 1.0))
+    toward_upper = Pose((0.0, 0.0072, 0.0148), (1.0, 0.0, 0.0, 0.0))
+    with pytest.raises(ValueError, match="no verified yaw symmetry"):
+        interface_place_up_targets(
+            upper,
+            lower_to_upper,
+            measured_lower,
+            compose(measured_lower, toward_upper),
+            0.0318,
+            RobotBaseFrame((0.0, 0.0, 0.0), (0.0, 0.0, 0.0, 1.0)),
+            TcpProvenance(EXPECTED_RUNTIME_MODEL_SHA256, "c" * 64),
+            SkillParams(),
+            (0,),
+        )
+
+
+def test_place_up_vertical_overlap_keeps_orientation_tiebreak():
+    """A fully stacked connection has no free side, so ordering is unchanged."""
+    upper = Pose((-0.048, -0.034, 0.1184), (0.0, 0.0, 1.0, 0.0))
+    lower_to_upper = Pose(
+        (0.0, 0.0, 0.0192),
+        (0.0, 0.0, math.sin(math.pi / 4), math.cos(math.pi / 4)),
+    )
+    measured_lower = Pose((0.352, 0.062, 0.110), (0.0, 0.0, 0.0, 1.0))
+    held = Pose((0.0, -0.0072, 0.0148), (1.0, 0.0, 0.0, 0.0))
+    targets, desired_lower, _ = interface_place_up_targets(
+        upper,
+        lower_to_upper,
+        measured_lower,
+        compose(measured_lower, held),
+        0.0318,
+        RobotBaseFrame((0.0, 0.0, 0.0), (0.0, 0.0, 0.0, 1.0)),
+        TcpProvenance(EXPECTED_RUNTIME_MODEL_SHA256, "c" * 64),
+        SkillParams(),
+        (0, 2),
+    )
+    assert desired_lower.position_xyz[:2] == pytest.approx((-0.048, -0.034))
+    assert targets.contact_world_z_m == pytest.approx(0.1184 - 0.0192 + 0.0148)
 
 
 @pytest.mark.parametrize(

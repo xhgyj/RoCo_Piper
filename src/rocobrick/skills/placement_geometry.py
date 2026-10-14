@@ -202,6 +202,12 @@ def interface_place_up_targets(
     ascent bound sits ABOVE the seated depth by ``place_press_m`` (a bound
     the live monitor cancels, not a press to hold).
 
+    A yaw-symmetric brick seats under several rotations, but the measured
+    grasp offset from the brick centre must stay on the side AWAY from the
+    mated upper part: only such candidates are eligible, and the
+    minimum-tool-rotation ordering picks within that set. A fully vertical
+    overlap has no preferred side, so every candidate stays eligible.
+
     Returns:
         Tool targets, desired lower pose and measured lower-to-TCP transform.
     """
@@ -221,8 +227,26 @@ def interface_place_up_targets(
         )
         for k in yaw_symmetries
     ]
+    toward_upper = (
+        upper_world.position_xyz[0] - nominal_lower.position_xyz[0],
+        upper_world.position_xyz[1] - nominal_lower.position_xyz[1],
+    )
+
+    def keeps_tool_clear(candidate: Pose) -> bool:
+        tcp = compose(candidate, held)
+        offset = (
+            tcp.position_xyz[0] - candidate.position_xyz[0],
+            tcp.position_xyz[1] - candidate.position_xyz[1],
+        )
+        return offset[0] * toward_upper[0] + offset[1] * toward_upper[1] <= 1e-4
+
+    clearing = [candidate for candidate in candidates if keeps_tool_clear(candidate)]
+    if not clearing:
+        raise ValueError(
+            "no verified yaw symmetry keeps the tool clear of the upper part"
+        )
     desired_lower = min(
-        candidates,
+        clearing,
         key=lambda candidate: pose_error(compose(candidate, held), measured_tcp)[1],
     )
     desired_tcp = compose(desired_lower, held)

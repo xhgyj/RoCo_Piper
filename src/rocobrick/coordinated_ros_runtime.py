@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import math
 from collections.abc import Callable, Mapping, Sequence
 
@@ -225,6 +226,7 @@ class CoordinatedMoveItPlanRuntime:
             return goal
         planning_targets = self._planning_targets(request)
         grasp_regions = []
+        roll_links: set[str] = set()
         for robot_id, target in planning_targets.items():
             if "grasp_region" in target:
                 if set(target) != {"grasp_region"}:
@@ -246,6 +248,22 @@ class CoordinatedMoveItPlanRuntime:
                     raise ValueError(
                         "TCP target calibration does not match runtime provenance"
                     )
+            if target.get("moveit_pose_goal") is True:
+                self._append_pose_constraints(
+                    constraints, raw_pose, robot_id, factories
+                )
+                # The jaws are symmetric about the tool axis, so the pinned
+                # roll and its 180-degree flip are the same axis-aligned
+                # grasp. Either single branch can be IK-unreachable at a
+                # station, while a fully free roll let the planner tilt the
+                # closing axis off the brick faces and shear the brick
+                # (live evidence, task-c-top-offset3). Both equivalent
+                # branches are submitted below as OR'd goal sets. A target
+                # carrying a brick off the tool axis opts out: the flip
+                # would displace the brick by twice the grasp offset.
+                if target.get("roll_flip_equivalent") is not False:
+                    roll_links.add(f"{robot_id}_rocobrick_tcp")
+                continue
             raw_positions = target.get("joint_positions")
             expected = self.joint_binding[robot_id]
             joint_space = isinstance(raw_positions, Mapping) and set(
@@ -321,6 +339,25 @@ class CoordinatedMoveItPlanRuntime:
         if grasp_regions:
             constraints.name = self._grasp_sampler_binding(grasp_regions)
         motion.goal_constraints.append(constraints)
+        if roll_links:
+            branch = copy.deepcopy(constraints)
+            for orientation in branch.orientation_constraints:
+                if orientation.link_name not in roll_links:
+                    continue
+                x, y, z, w = (
+                    orientation.orientation.x,
+                    orientation.orientation.y,
+                    orientation.orientation.z,
+                    orientation.orientation.w,
+                )
+                # q (x) qz(180): the same closing axis with the mirrored wrist.
+                (
+                    orientation.orientation.x,
+                    orientation.orientation.y,
+                    orientation.orientation.z,
+                    orientation.orientation.w,
+                ) = (y, -x, w, -z)
+            motion.goal_constraints.append(branch)
         motion.path_constraints = path_constraints
         goal.request = motion
         goal.planning_options.plan_only = True
@@ -335,7 +372,10 @@ class CoordinatedMoveItPlanRuntime:
             Actual participants plus measured whole-path stationary peers.
         """
         targets = dict(request.targets)
-        if any("grasp_region" in target for target in targets.values()):
+        if any(
+            "grasp_region" in target or target.get("hold_session_peers") is True
+            for target in targets.values()
+        ):
             for robot in request.robots:
                 targets.setdefault(robot, {"maintain_pose": True})
         return targets

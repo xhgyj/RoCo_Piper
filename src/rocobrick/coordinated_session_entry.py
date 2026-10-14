@@ -111,9 +111,13 @@ def perform_coordinated_plan(
         has_grasp_region = any(
             "grasp_region" in target for target in request.targets.values()
         )
-        if has_grasp_region:
-            # Keep the Cartesian region through the MoveIt goal sampler. In a
-            # mixed request exact peers also remain Cartesian, not pre-solved.
+        defer_pose_ik = any(
+            target.get("moveit_pose_goal") is True
+            for target in request.targets.values()
+        )
+        if has_grasp_region or defer_pose_ik:
+            # These Cartesian goals belong to MoveIt's internal sampling;
+            # the host must not replace them with pre-solved joint targets.
             start_state_fn = getattr(session, "unified_start_state", None)
             if not callable(start_state_fn):
                 raise ValueError(

@@ -9,6 +9,7 @@ from math import cos, sin
 from pathlib import Path
 
 from rocobrick.bricksim_topology import BrickSimTopologyBundle
+from rocobrick.feeding_platforms import FeedingPlatform
 from rocobrick.models import Pose
 from rocobrick.scene_bootstrap import (
     LoadedPart,
@@ -30,8 +31,7 @@ class IsaacSceneConfig:
     physics_hz: int
     collision_filter_robot_id: str | None = None
     collision_filter_instance_ids: tuple[str, ...] = ()
-    # Optional allocator output. Z and orientation remain those measured from
-    # the imported BrickSim part; only the initial XY slot is selected here.
+    # Allocated XY positions keep the imported BrickSim shape and stud orientation.
     initial_part_positions_xy: Mapping[str, tuple[float, float]] = field(
         default_factory=dict
     )
@@ -39,6 +39,31 @@ class IsaacSceneConfig:
     initial_part_allocation: Mapping[str, Mapping[str, object]] = field(
         default_factory=dict
     )
+    feeding_platforms: tuple[FeedingPlatform, ...] = ()
+    initial_part_support_top_z_m: Mapping[str, float] = field(default_factory=dict)
+
+
+def _create_feeding_platforms(
+    stage: object, platforms: tuple[FeedingPlatform, ...]
+) -> None:
+    """Author whole static support boxes that the host measures as colliders."""
+    from pxr import Gf, UsdGeom, UsdPhysics
+
+    for platform in platforms:
+        if stage.GetPrimAtPath(platform.prim_path).IsValid():
+            raise SceneBootstrapError(
+                f"feeding platform prim already exists: {platform.prim_path}"
+            )
+        cube = UsdGeom.Cube.Define(stage, platform.prim_path)
+        cube.CreateSizeAttr(1.0)
+        cube.AddTranslateOp().Set(
+            Gf.Vec3d(*platform.center_xy_m, platform.top_z_m - platform.thickness_m / 2)
+        )
+        cube.AddScaleOp().Set(
+            Gf.Vec3d(*platform.size_xy_m, platform.thickness_m)
+        )
+        cube.CreateDisplayColorAttr([Gf.Vec3f(0.35, 0.45, 0.38)])
+        UsdPhysics.CollisionAPI.Apply(cube.GetPrim()).CreateCollisionEnabledAttr(True)
 
 
 @dataclass(frozen=True)
@@ -208,6 +233,7 @@ async def load_verified_scene(
     if set(initial_connections) != expected_connection_ids:
         raise SceneBootstrapError("BrickSim did not import every initial connection")
 
+    _create_feeding_platforms(stage, config.feeding_platforms)
     loose_paths, loose_connections = import_lego(json=dict(topology.loose), env_id=-1)
     if loose_connections:
         raise SceneBootstrapError("loose-part import unexpectedly created a connection")
@@ -248,18 +274,18 @@ async def load_verified_scene(
             height_units = part_payload.get("H", 3)
             if isinstance(height_units, bool) or not isinstance(height_units, (int, float)):
                 height_units = 3
-            # BrickSim's H units are 3.2 mm plate layers plus the 1.7 mm
-            # stud/top surface. Loose parts are outside the baseplate, so
-            # place the bottom on the ground plane instead of preserving
-            # arrange_parts_in_workspace's random Z/tilt.
+            # BrickSim H counts 3.2 mm layers; the stud adds 1.7 mm.
             height_m = float(height_units) * 0.0032 + 0.0017
+            support_z = config.initial_part_support_top_z_m.get(
+                instance_id, float(config.baseplate_position_m[2])
+            )
             yaw = float(config.initial_part_yaws_rad.get(instance_id, 0.0))
             prim.set_world_pose(
                 position=np.asarray(
                     (
                         float(position_xy[0]),
                         float(position_xy[1]),
-                        float(config.baseplate_position_m[2]) + height_m / 2.0,
+                        support_z + height_m / 2.0,
                     )
                 ),
                 orientation=np.asarray(

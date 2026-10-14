@@ -39,7 +39,16 @@ from rocobrick.skills.observation import (
     parse_pick_observation,
     verify_pick_following,
 )
-from rocobrick.skills.targets import pick_targets, world_position_to_base
+from rocobrick.skills.targets import (
+    pick_targets,
+    world_orientation_to_base,
+    world_position_to_base,
+)
+from rocobrick.skills.top_offset_grasp import (
+    TopOffsetBinding,
+    top_offset_targets,
+    verify_top_offset_arrival,
+)
 from rocobrick.transit_adapter import TransitContext
 
 # The project TCP calibration defines rocobrick_tcp as the midpoint of the
@@ -165,6 +174,7 @@ class PickHandler:
         free_space_transport: PickFreeSpaceTransport | None = None,
         context: TransitContext | None = None,
         poll_interval_s: float = 0.2,
+        top_offset_grasps: Mapping[str, TopOffsetBinding] | None = None,
     ) -> None:
         """Bind one session identity, ledger, motion transport and calibration."""
         self._observations = observation_transport
@@ -174,6 +184,7 @@ class PickHandler:
         self._motion = motion_transport
         self._free_space = free_space_transport
         self._context = context
+        self._top_offset_grasps = dict(top_offset_grasps or {})
         self._poll_interval_s = float(poll_interval_s)
         self._active_requests: dict[str, str] = {}
         self._active_free_space: dict[str, str] = {}
@@ -221,6 +232,18 @@ class PickHandler:
         session_ids = session_robots or tuple(
             getattr(self._free_space, "robot_ids", operation.participants)
         )
+        if (
+            operation.operation_id in self._top_offset_grasps
+            and phase_id == "precontact_boundary"
+        ):
+            targets = {
+                robot: {
+                    **target,
+                    "moveit_pose_goal": True,
+                    "hold_session_peers": True,
+                }
+                for robot, target in targets.items()
+            }
         request = FreeSpaceMotionRequest(
             motion_id=f"{operation.operation_id}:{phase_id}",
             session_robots=tuple(session_ids),
@@ -593,6 +616,8 @@ class PickHandler:
         try:
             context = self._context
             grasp_region = None
+            top_binding = self._top_offset_grasps.get(operation.operation_id)
+            top_contact = None
             targets = pick_targets(
                 admission.sample.aabb_min,
                 admission.sample.aabb_max,
@@ -605,7 +630,8 @@ class PickHandler:
                     raise ValueError(
                         "PLACE_UP PICK requires the combined grasp-region lane"
                     )
-                grasp_region = place_up_grasp_region(admission.sample, context)
+                if top_binding is None:
+                    grasp_region = place_up_grasp_region(admission.sample, context)
             # Extra clearance only while approaching: keep grasp compression
             # and placement/release openings unchanged. Respect finger travel.
             original_reach_opening = targets.reach_opening_m
@@ -712,6 +738,14 @@ class PickHandler:
                     }
                 }
             )
+            if top_binding is not None:
+                targets, top_contact, top_proof = top_offset_targets(
+                    top_binding, admission.sample, context, targets
+                )
+                evidence["successor_grasp"] = top_proof
+                evidence["approach_gripper_opening"]["selected_opening_m"] = (
+                    targets.reach_opening_m
+                )
             planning_sample = admission.sample
             planning = planning_scene_operation(
                 self._planning_payload(admission, context, planning_sample),
@@ -788,6 +822,10 @@ class PickHandler:
                         manifest_sha256=self._manifest_sha256,
                     )
                     evidence["preclose_observation"] = asdict(preclose)
+                    if top_contact is not None:
+                        verify_top_offset_arrival(
+                            admission.sample, preclose, top_contact
+                        )
                     if grasp_region is not None:
                         admit_grasp_endpoint(grasp_region, preclose)
                     contact_scene = planning_scene_operation(
@@ -809,6 +847,7 @@ class PickHandler:
                             terminal=contact_result.terminal,
                             motion_sent=motion_sent,
                         )
+                dispatched_free_space = False
                 if phase == "precontact_boundary" and self._free_space is not None:
                     try:
                         (
@@ -822,9 +861,21 @@ class PickHandler:
                         target = self._free_space_target(
                             operation.executor_robot_id, target_pose
                         )
+                        if top_contact is not None:
+                            target[admission.robot_id]["moveit_pose_goal"] = True
+                            target[admission.robot_id]["hold_session_peers"] = True
+                            sample = parse_pick_observation(
+                                scene,
+                                robot_id=admission.robot_id,
+                                physical_instance_id=admission.physical_instance_id,
+                                session_id=self._session_id,
+                                manifest_sha256=self._manifest_sha256,
+                            )
+                            evidence[f"{phase}_observation"] = asdict(sample)
                         if grasp_region is not None:
                             sample = parse_pick_observation(
-                                scene, robot_id=admission.robot_id,
+                                scene,
+                                robot_id=admission.robot_id,
                                 physical_instance_id=admission.physical_instance_id,
                                 session_id=self._session_id,
                                 manifest_sha256=self._manifest_sha256,
@@ -885,41 +936,7 @@ class PickHandler:
                         # From here onward errors cannot be labelled no-motion:
                         # the region trajectory has physically reached its end.
                         motion_sent = motion_sent or free_result.started
-                        if grasp_region is not None:
-                            arrived = parse_pick_observation(
-                                await self._observations.observe(admission.robot_id),
-                                robot_id=admission.robot_id,
-                                physical_instance_id=admission.physical_instance_id,
-                                session_id=self._session_id,
-                                manifest_sha256=self._manifest_sha256,
-                            )
-                            targets = targets_from_grasp_endpoint(
-                                grasp_region, arrived, context, targets
-                            )
-                            evidence["successor_grasp"]["actual_tcp_pose"] = asdict(
-                                arrived.tcp_pose
-                            )
-                            evidence["successor_grasp"]["actual_span_m"] = (
-                                targets.brick_span_m
-                            )
-                            evidence["lift_geometry"] = {
-                                "source": "actual_selected_grasp_endpoint",
-                                "selected_lift_base_position": list(
-                                    targets.lift.position
-                                ),
-                                "selected_orientation_xyzw": list(
-                                    targets.lift.orientation_xyzw
-                                ),
-                                "lift_height_m": context.params.lift_height_m,
-                            }
-                        result = _MotionEvidence(
-                            True,
-                            free_result.terminal,
-                            free_result.safe_to_release,
-                            free_result.started,
-                            phase_evidence,
-                            None,
-                        )
+                        dispatched_free_space = True
                     except Exception as error:
                         return self._failed(
                             operation,
@@ -928,7 +945,95 @@ class PickHandler:
                             terminal=False,
                             motion_sent=motion_sent,
                         )
-                else:
+                if (
+                    grasp_region is not None
+                    and phase == "precontact_boundary"
+                    and dispatched_free_space
+                ):
+                    try:
+                        arrived = parse_pick_observation(
+                            await self._observations.observe(admission.robot_id),
+                            robot_id=admission.robot_id,
+                            physical_instance_id=admission.physical_instance_id,
+                            session_id=self._session_id,
+                            manifest_sha256=self._manifest_sha256,
+                        )
+                        targets = targets_from_grasp_endpoint(
+                            grasp_region, arrived, context, targets
+                        )
+                        evidence["successor_grasp"]["actual_tcp_pose"] = asdict(
+                            arrived.tcp_pose
+                        )
+                        evidence["successor_grasp"]["actual_span_m"] = (
+                            targets.brick_span_m
+                        )
+                        evidence["lift_geometry"] = {
+                            "source": "actual_selected_grasp_endpoint",
+                            "selected_lift_base_position": list(targets.lift.position),
+                            "selected_orientation_xyzw": list(
+                                targets.lift.orientation_xyzw
+                            ),
+                            "lift_height_m": context.params.lift_height_m,
+                        }
+                    except Exception as error:
+                        return self._failed(
+                            operation,
+                            f"PICK_FREE_SPACE_FAILED: {error}",
+                            evidence,
+                            terminal=False,
+                            motion_sent=motion_sent,
+                        )
+                if (
+                    top_contact is not None
+                    and phase == "precontact_boundary"
+                    and dispatched_free_space
+                ):
+                    try:
+                        arrived = parse_pick_observation(
+                            await self._observations.observe(admission.robot_id),
+                            robot_id=admission.robot_id,
+                            physical_instance_id=admission.physical_instance_id,
+                            session_id=self._session_id,
+                            manifest_sha256=self._manifest_sha256,
+                        )
+                        evidence["vertical_arrival_observation"] = asdict(arrived)
+                        verify_top_offset_arrival(
+                            admission.sample, arrived, top_contact
+                        )
+                        lift_world = (
+                            *arrived.tcp_pose.position_xyz[:2],
+                            arrived.tcp_pose.position_xyz[2]
+                            + context.params.lift_height_m,
+                        )
+                        targets = replace(
+                            targets,
+                            lift=replace(
+                                targets.lift,
+                                position=world_position_to_base(
+                                    lift_world, context.base
+                                ),
+                                orientation_xyzw=world_orientation_to_base(
+                                    arrived.tcp_pose.orientation_xyzw, context.base
+                                ),
+                            ),
+                        )
+                        evidence["lift_geometry"] = {
+                            "source": "measured_vertical_offset_grasp",
+                            "selected_lift_base_position": list(targets.lift.position),
+                            "selected_orientation_xyzw": list(
+                                targets.lift.orientation_xyzw
+                            ),
+                            "lift_height_m": context.params.lift_height_m,
+                        }
+                    except Exception as error:
+                        return self._failed(
+                            operation,
+                            f"PICK_FREE_SPACE_FAILED: {error}",
+                            evidence,
+                            terminal=False,
+                            motion_sent=motion_sent,
+                        )
+                elif not dispatched_free_space:
                     result = await self._dispatch(operation, phase, runtime_operation)
                     evidence.update(result.evidence)
                 motion_sent = motion_sent or result.motion_sent
