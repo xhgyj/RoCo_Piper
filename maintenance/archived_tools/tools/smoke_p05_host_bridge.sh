@@ -235,7 +235,7 @@ timeout --signal=INT --kill-after=15 "$PROBE_TIMEOUT" \
     -e RMW_IMPLEMENTATION=rmw_fastrtps_cpp \
     -e FASTRTPS_DEFAULT_PROFILES_FILE=/dds/fastdds-container.xml \
     -v "$RUNTIME/fastdds-container.xml:/dds/fastdds-container.xml:ro" \
-    -v "$ROOT/tools/p05_integration_probe.py:/probe.py:ro" \
+    -v "$ROOT/maintenance/archived_tools/tools/p05_integration_probe.py:/probe.py:ro" \
     "$IMAGE" python3 /probe.py \
     --timeout "$PROBE_READY_TIMEOUT" --drive-timeout "$PROBE_DRIVE_TIMEOUT" \
     >"$PROBE_LOG" 2>&1

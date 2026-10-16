@@ -25,13 +25,13 @@ run_round() {
     -e RMW_IMPLEMENTATION=rmw_fastrtps_cpp \
     -e FASTRTPS_DEFAULT_PROFILES_FILE=/dds/fastdds-container.xml \
     -v "$RUNTIME/fastdds-container.xml:/dds/fastdds-container.xml:ro" \
-    -v "$ROOT/tools/container_dds_probe.py:/probe.py:ro" \
+    -v "$ROOT/maintenance/archived_tools/tools/container_dds_probe.py:/probe.py:ro" \
     "$IMAGE" python3 /probe.py --publish "$container_payload" --expect "$host_payload" --timeout 60 >/dev/null
   docker start "$container_name" >/dev/null
   sleep 2
   ROS_DOMAIN_ID="$DOMAIN" FASTRTPS_DEFAULT_PROFILES_FILE="$RUNTIME/fastdds-host.xml" \
     timeout 90 bash "$ROOT/tools/isaac-ros-env.sh" "$ROOT/.venv/bin/python" \
-    "$ROOT/tools/isaac_host_dds_probe.py" --publish "$host_payload" \
+    "$ROOT/maintenance/archived_tools/tools/isaac_host_dds_probe.py" --publish "$host_payload" \
     --expect "$container_payload" --timeout 60 >"$work/host-$round.log" 2>&1
   for _ in $(seq 1 20); do
     [[ "$(docker inspect "$container_name" --format '{{.State.Running}}')" == false ]] && break

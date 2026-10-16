@@ -35,8 +35,6 @@ ROOT = Path(__file__).parents[1]
 PACKAGE_DIR = ROOT / "ros_ws/src/rocobrick_piper_l_moveit_config"
 LAUNCH_DIR = PACKAGE_DIR / "launch"
 HELPER_PATH = LAUNCH_DIR / "dual_robot_config.py"
-DUAL_LAUNCH_PATH = LAUNCH_DIR / "dual_move_group.launch.py"
-SINGLE_LAUNCH_PATH = LAUNCH_DIR / "move_group.launch.py"
 ARTIFACT_PATH = ROOT / "artifacts/model-audit/piper_l_tcp_binding_contract.json"
 
 _ROBOT_IDS = ("piper_0", "piper_1")

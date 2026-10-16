@@ -31,8 +31,8 @@ import pytest
 
 ROOT = Path(__file__).parents[1]
 BRIDGE_PATH = ROOT / "isaac" / "p05_host_bridge.py"
-PROBE_PATH = ROOT / "tools" / "p05_integration_probe.py"
-RUNNER_PATH = ROOT / "tools" / "smoke_p05_host_bridge.sh"
+PROBE_PATH = ROOT / "maintenance" / "archived_tools" / "tools" / "p05_integration_probe.py"
+RUNNER_PATH = ROOT / "maintenance" / "archived_tools" / "tools" / "smoke_p05_host_bridge.sh"
 ENV_SCRIPT_PATH = ROOT / "tools" / "isaac-ros-env.sh"
 USD_PATH = ROOT / "robot_assets" / "piper_l" / "USD" / "piper_l_gripper_d435.usd"
 
@@ -597,7 +597,7 @@ def test_runner_waits_for_marker_then_runs_container_probe(runner_source: str) -
     assert "docker run --rm --name" in runner_source
     assert '-p "$CONTAINER_PORT:$CONTAINER_PORT/tcp"' in runner_source
     assert "FASTRTPS_DEFAULT_PROFILES_FILE=/dds/fastdds-container.xml" in runner_source
-    assert "tools/p05_integration_probe.py" in runner_source
+    assert "maintenance/archived_tools/tools/p05_integration_probe.py" in runner_source
     assert "probe.py" in runner_source
 
 

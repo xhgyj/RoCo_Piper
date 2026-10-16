@@ -89,5 +89,4 @@ convention = "google"
 packages = ["src/rocobrick"]
 
 [project.scripts]
-rocobrick-validate = "rocobrick.cli:main"
 piper-run = "rocobrick.piper_run:main"

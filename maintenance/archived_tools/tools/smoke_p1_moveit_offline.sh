@@ -69,8 +69,8 @@ timeout --signal=INT --kill-after=20 "$TOTAL_TIMEOUT" \
     -e P1_CONTROLLER_WAIT="$CONTROLLER_WAIT" \
     -e P1_FEEDER_DURATION="$FEEDER_DURATION" \
     -v "$WS_DIR:/workspace/ros_ws" \
-    -v "$ROOT/tools/p1_fake_joint_states.py:/workspace/tools/p1_fake_joint_states.py:ro" \
-    -v "$ROOT/tools/p1_moveit_offline_probe.py:/workspace/tools/p1_moveit_offline_probe.py:ro" \
+    -v "$ROOT/maintenance/archived_tools/tools/p1_fake_joint_states.py:/workspace/tools/p1_fake_joint_states.py:ro" \
+    -v "$ROOT/maintenance/archived_tools/tools/p1_moveit_offline_probe.py:/workspace/tools/p1_moveit_offline_probe.py:ro" \
     -v "$OUT_DIR:/artifacts" \
     "$IMAGE" bash -s <<'INNER' >"$CONTAINER_LOG" 2>&1
 set -euo pipefail

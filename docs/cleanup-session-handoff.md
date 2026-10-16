@@ -81,7 +81,7 @@ test_scene_manifest_artifact.py、test_robot_operation_plan_binding.py分段Path
 ## 8. 新会话建议执行顺序
 
 1. 读取最新完整分析和AGENTS，复核Git现状/运行中进程/磁盘，别重复做纯盘点。
-2. 与用户确认退役范围：旧gRPC、validate/demo比赛入口、single-session/旧launch、诊断工具是否全部退出生产仓库；明确正式全技能或仅特定任务。
+2. B5 已确认并实施：validate/demo 入口退役，旧 launch 探针与诊断工具归档到 maintenance/archived_tools/；正式全技能 operation-plan 链保持不变。
 3. 生成逐文件keep/remove/migrate manifest，附静态调用证据、关联测试/构建/文档调整。
 4. 先在隔离副本分组执行裁剪（需获授权），迁兼容调用和固定测试输入；不要在原树试错，也不靠ignore隐藏死代码。
 5. 清洁ROS构建验证C++plugin/launch/xacro及子进程导入，不借用陈旧install遮掩源码缺失。

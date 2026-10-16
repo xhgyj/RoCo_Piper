@@ -402,7 +402,7 @@ def test_isaac_bridge_topics_match_official_xacro(artifact: dict) -> None:
     bridge = (ROOT / "isaac" / "p05_host_bridge.py").read_text(encoding="utf-8")
     assert 'TOPIC_JOINT_STATES = "/isaac_joint_states"' in bridge
     assert 'TOPIC_JOINT_COMMANDS = "/isaac_joint_command"' in bridge
-    probe = (ROOT / "tools" / "p05_integration_probe.py").read_text(encoding="utf-8")
+    probe = (ROOT / "maintenance" / "archived_tools" / "tools" / "p05_integration_probe.py").read_text(encoding="utf-8")
     assert 'TOPIC_JOINT_STATES = "/isaac_joint_states"' in probe
     assert 'TOPIC_JOINT_COMMANDS = "/isaac_joint_command"' in probe
 

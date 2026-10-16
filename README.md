@@ -13,7 +13,7 @@ context, not as the current deployment or evaluation interface.
 - The old gRPC planner, pregrasp/playback, phase backend, single-session and isolated/fake launch paths have been retired from this candidate. Import classified package owners directly rather than old compatibility forwarding modules.
 - Historical runs are outputs, not deployed startup inputs. Offline fixtures carry exact historical plan bytes; TCP provenance byte objects are test-only audit inputs. The production DDS prerequisite report remains required.
 - Original uncommitted functional changes and immutable model/calibration/plan bytes must be preserved. See `AGENTS.md` for safety and test rules.
-- The old standalone validate/demo entries and maintenance tools have not yet been retired in this batch. Some old diagnostic tools reference retired launch interfaces and are not supported deployment commands. Their migration is a separate batch.
+- The old standalone validate/demo entries are retired. Non-production maintenance and diagnostic tools are preserved under maintenance/archived_tools/ and are not supported deployment commands.
 
 ## Historical upstream challenge README (not the current launch contract)
 
@@ -43,7 +43,7 @@ curl -LsSf [https://astral.sh/uv/install.sh](https://astral.sh/uv/install.sh) | 
 uv sync --locked
 
 # 3. Execute Example Demo
-uv run bricksim ./run/demo.py
+# Historical demo command retired; use piper-run for the supported runtime.
 ```
 
 ## 📂 Repository Structure
@@ -85,7 +85,7 @@ Your objective is to build an intelligent robot policy capable of successfully c
 * **Implementation:** Your custom policy code must be written in `RoCo-BrickAssembly/src/rocobrick/policy/Policy.py`. 
   * **Input**: Observations, including camera and robot feedback.
   * **Output**: robot joint positions, a 23-dimensional array. *Format*: [Lift, torso_flip, L_arm_j1 to L_arm_j7, L_gripper_joint, Unused, R_arm_j1 to R_arm_j7, R_gripper_joint, Unused, head_j1, head_j2, head_j3].
-* **Evaluation:** We will evaluate your policy by running `uv run bricksim ./run/main.py`.
+* **Evaluation:** The historical standalone policy entry was retired; production uses the operation-plan interface above.
 
 ### Example Policy
 We have provided a naive example policy in `src/rocobrick/policy/NaivePolicy.py` to demonstrate how to interact with BrickSim. You can test it by running the `demo.py` script.

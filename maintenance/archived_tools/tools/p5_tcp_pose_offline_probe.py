@@ -26,7 +26,7 @@ re-checks every planned waypoint against the narrowed execution limits, and
 writes the artifact JSON.
 
 Usage:
-    uv run python tools/p5_tcp_pose_offline_probe.py \
+    uv run python maintenance/archived_tools/tools/p5_tcp_pose_offline_probe.py \
         --output artifacts/phase5/tcp-pose-planning-offline.json
 """
 

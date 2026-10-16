@@ -16,7 +16,6 @@ services:
     volumes:
       - ./ros_ws:/workspace/ros_ws
       - ./.runtime/dds/fastdds-container.xml:/etc/rocobrick/dds/fastdds-container.xml:ro
-      - ./tools/container_dds_probe.py:/usr/local/lib/rocobrick/container_dds_probe.py:ro
     networks:
       - ros_runtime
     healthcheck:

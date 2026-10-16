@@ -755,6 +755,8 @@ def _artifact_source_path(original: str, artifact: dict) -> Path:
         if sha256(path.read_bytes()).hexdigest() != entry["sha256"]:
             raise ValueError("provenance object digest mismatch")
         return path
+    if original == "run/user_config.json":
+        return ROOT / "tests/fixtures/run-config-older-copy.json"
     if original.startswith("runs/") or original == "run/pregrasp_v2.py":
         raise ValueError("historical provenance mapping missing")
     return ROOT / original
@@ -883,7 +885,7 @@ def test_artifact_local_config_values_match_files(artifact: dict):
     offsets = by_id["local-config-grasp-offsets"]["values"]["Grasp_TCP_Top_Offset"]
     assert offsets == config["Manipulation_Config"]["Grasp_TCP_Top_Offset"]
     assert offsets == -0.0053
-    run_config = json.loads((ROOT / "run/user_config.json").read_text(encoding="utf-8"))
+    run_config = json.loads((ROOT / "tests/fixtures/run-config-older-copy.json").read_text(encoding="utf-8"))
     assert "Grasp_TCP_Top_Offset" not in run_config.get("Manipulation_Config", {})
     assert by_id["run-config-older-copy"]["values"]["has_grasp_tcp_top_offset"] is False
 

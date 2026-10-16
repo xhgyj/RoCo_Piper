@@ -59,7 +59,7 @@ src/rocobrick 有 137 个物理 Python 文件：135 个规范模块，加被同�
 | planner_client.py | pregrasp_v2.py:21；test_planner_contract.py:6 | B 旧 gRPC 客户端 |
 | planner_contract.py | planner_client.py:12、旧脚本和测试 | B 旧协议 |
 | generated/__init__.py、planner_pb2.py、planner_pb2_grpc.py | 旧 client、proto 工具/测试 | B 旧 gRPC 生成代码组 |
-| cli.py | rocobrick-validate entrypoint、run/validate_plan.py | B 仍有独立公开预检入口，不是无人使用；退役入口才删 |
+| cli.py | rocobrick-validate entrypoint、run/validate_plan.py | B5 已退役；piper-run 保留为唯一正式入口 |
 | scheduling/__init__.py | 空/兼容包命名空间，未见正式闭包消费者 | C 需核对外部 API |
 | session_phase_backend.py | test_session_phase_backend.py:27；转发下项 | B 旧 phase backend 兼容链 |
 | skills/phase_backend.py | 兼容转发及测试，内部导 skill_execution | B 旧 phase backend |
@@ -109,7 +109,7 @@ Isaac Kit ROS2 extension虽禁用，环境脚本仍从其 humble/lib、humble/rc
 | docker/planner.Dockerfile、planner-entrypoint.sh | B 高置信旧独立 planner；只构建/启动 planner_ws；正式 ROS 契约 test_ros_runtime_contract.py:101-107 明确禁止 grpc/planner_ws/50051 混入 | 宣告退役旧 gRPC 接口并检查外部部署 |
 | planner_ws、proto、planner generated/client、replay_planning_request、generate_python_proto | B 旧服务闭环；正式闭包不需要 | 退役相关协议/资产/模型生成测试；避免误删共享运行资产 |
 | run/pregrasp_v2.py、smoke_scene_v2.py、audit_piper_usd.py | B 历史实验/审计入口非正式根 | pregrasp还被TCP历史证据哈希测试读取；先处理旧溯源测试和保留原始归档 |
-| run/demo.py、main.py | B 上游示例，导入目前不存在的 env/utils/policy 路径，正式链不用 | README仍宣称main为比赛评估入口，需决定放弃此接口并修说明 |
+| run/demo.py、main.py | B5 已删除；导入不存在的 env/utils/policy 路径，正式链不用 | README 历史段已标记为退役 |
 | run/validate_plan.py、cli.py | B 独立预检入口，非死而是可退役功能 | 同步project.scripts/文档/测试 |
 | 旧dual_move_group、move_group、stage4_fake launch/controller | B 条件候选，非当前组合双臂链；旧single session仍引用move_group，CMake仍安装fake | 先删/拆single旧会话分支并更改CMake、测试，再clean colcon build |
 | tools/*probe*、smoke*、dds_type_matrix*、ogn_api_probe | B 诊断开发工具，而非正式每次启动必需 | 不能拿“测试import”认定生产必留；决定是否保留诊断工具集及对应测试 |

@@ -90,9 +90,7 @@ package and skills package no longer eagerly re-export legacy APIs.
 
 The old gRPC planner, pregrasp/playback, phase backend, isolated single-session
 and legacy launch/fake-controller paths are retired. The sole dispatch entry
-remains piper-run with an external robot operation plan. Standalone validate/demo
-and maintenance tools remain pending separate retirement; do not mistake their
-continued presence for a production dispatch dependency.
+remains piper-run with an external robot operation plan. Standalone validate/demo entries are retired; archived maintenance tools under maintenance/archived_tools/ are not production dispatch dependencies.
 
 Current capability boundary:
 

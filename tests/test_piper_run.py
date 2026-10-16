@@ -319,7 +319,7 @@ def test_project_script_registered_exactly():
     assert "[project.scripts]" in text
     section = text.split("[project.scripts]", 1)[1].split("[", 1)[0]
     assert 'piper-run = "rocobrick.piper_run:main"' in section
-    assert 'rocobrick-validate = "rocobrick.cli:main"' in section
+    assert 'rocobrick-validate = "rocobrick.cli:main"' not in section
 
 
 # ---------------------------------------------------------------------------

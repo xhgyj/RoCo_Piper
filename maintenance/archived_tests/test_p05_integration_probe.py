@@ -1,6 +1,6 @@
 """Offline structural tests for the P0.5 ROS container integration probe.
 
-The probe (tools/p05_integration_probe.py) runs inside the rootless ROS
+The archived probe (maintenance/archived_tools/tools/p05_integration_probe.py) runs inside the rootless ROS
 container, where rclpy exists; the offline suite here therefore only parses
 its source and AST (never imports it). Pinned contract: subscribe /clock and
 /isaac_joint_states, verify the complete 8-DOF names and an increasing clock,
@@ -19,7 +19,7 @@ from pathlib import Path
 import pytest
 
 ROOT = Path(__file__).parents[1]
-PROBE_PATH = ROOT / "tools" / "p05_integration_probe.py"
+PROBE_PATH = ROOT / "maintenance" / "archived_tools" / "tools" / "p05_integration_probe.py"
 
 EXPECTED_DOF_NAMES = [
     "joint1",
