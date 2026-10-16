@@ -27,9 +27,13 @@
   <xacro:include filename="$(find rocobrick_piper_l_moveit_config)/urdf/piper_l.ros2_control.xacro"/>
   <!-- Generated project TCP calibration overlay (single artifact authority). -->
   <xacro:include filename="$(find rocobrick_piper_l_moveit_config)/urdf/piper_l.tcp_calibration.xacro"/>
+  <!-- Wrist camera overlay: d435 stand + camera collision bodies, copied
+       verbatim from the runtime d435 description (see the overlay header). -->
+  <xacro:include filename="$(find rocobrick_piper_l_moveit_config)/urdf/piper_l.camera_stand.xacro"/>
 
   <xacro:piper_l_ros2_control
     name="PiperLIsaacTopicBasedSystem"
     initial_positions_file="$(arg initial_positions_file)"/>
   <xacro:piper_l_tcp_calibration/>
+  <xacro:piper_l_camera_stand/>
 </robot>

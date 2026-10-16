@@ -2,7 +2,7 @@
   "schema": "rocobrick-piper-l-model-contract/v1",
   "phase": "P0.4",
   "model": "agilex_piper_l",
-  "collected_date_utc": "2026-09-20",
+  "collected_date_utc": "2026-10-02",
   "offline": true,
   "provenance": {
     "pinned_repositories": {

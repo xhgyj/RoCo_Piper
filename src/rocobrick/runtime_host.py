@@ -35,6 +35,16 @@ class LoadedRuntimeHost:
     @property
     def collision_filter_pairs(self): return self.scene.collision_filter_pairs
 
+    @property
+    def disabled_camera_collisions(self):
+        """Return the wrist-camera collision prims this session disabled."""
+        return self.scene.disabled_camera_collisions
+
+    @property
+    def hidden_camera_visuals(self):
+        """Return the wrist-camera link prims whose visuals this session hid."""
+        return self.scene.hidden_camera_visuals
+
     def close(self) -> None:
         if getattr(self.app, "_rocobrick_runtime_host_closed", False):
             return

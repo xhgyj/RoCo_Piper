@@ -116,6 +116,26 @@ def _synthetic_model(tcp_xyz: str) -> str:
         '<origin xyz="0 0 0.138" rpy="1.5707963 0 -3.1415926"/>'
         '<limit lower="-0.05" upper="0" effort="10" velocity="3"/>'
         '<mimic joint="gripper" multiplier="-0.5" offset="0.0"/></joint>'
+        # Wrist-camera chain mirrored from urdf/piper_l.camera_stand.xacro:
+        # the SRDF collision entries reference these links.
+        '<link name="camera_stand_link"/>'
+        '<joint name="camera_stand_joint" type="fixed"><parent link="gripper_base"/>'
+        '<child link="camera_stand_link"/>'
+        '<origin xyz="-0.034 -0.001 0.022" rpy="0 0 0"/></joint>'
+        '<link name="d435_camera_link"/>'
+        '<joint name="d435_camera_joint" type="fixed">'
+        '<parent link="camera_stand_link"/>'
+        '<child link="d435_camera_link"/>'
+        '<origin xyz="-0.031 -0.028 0.0018" rpy="0 -1.22 0"/></joint>'
+        '<link name="camera_bottom_screw_frame"/>'
+        '<joint name="camera_link_joint" type="fixed">'
+        '<parent link="d435_camera_link"/>'
+        '<child link="camera_bottom_screw_frame"/>'
+        '<origin xyz="0.010600000000000002 0.0175 0.0125" rpy="0 0 0"/></joint>'
+        '<link name="camera_link"/>'
+        '<joint name="camera_joint" type="fixed">'
+        '<parent link="camera_bottom_screw_frame"/>'
+        '<child link="camera_link"/><origin xyz="0 0 0" rpy="0 0 0"/></joint>'
         '<ros2_control name="PiperLIsaacTopicBasedSystem" type="system"><hardware>'
         "<plugin>topic_based_ros2_control/TopicBasedSystem</plugin>"
         '<param name="joint_commands_topic">/isaac_joint_command</param>'
@@ -539,47 +559,5 @@ def test_real_pinned_sources_generate_disjoint_models(helper, tmp_path) -> None:
 # ---------------------------------------------------------------- launch
 
 
-def test_dual_launch_declares_ids_namespace_and_the_named_stack() -> None:
-    text = DUAL_LAUNCH_PATH.read_text(encoding="utf-8")
-    assert '"robot_ids"' in text
-    assert 'default_value=",".join(("piper_0", "piper_1"))' in text
-    assert '"use_sim_time"' in text and 'default_value="true"' in text
-    assert '"config_output_dir"' in text
-    for parameter in (
-        "robot_description",
-        "robot_description_semantic",
-        "robot_description_kinematics",
-        "joint_limits",
-        "trajectory_execution",
-    ):
-        assert f".{parameter}(" in text
-    assert 'MoveItConfigsBuilder("piper_l", package_name=PACKAGE_NAME)' in text
-    for package, executable in (
-        ("robot_state_publisher", "robot_state_publisher"),
-        ("controller_manager", "ros2_control_node"),
-        ("moveit_ros_move_group", "move_group"),
-    ):
-        assert f'package="{package}"' in text
-        assert f'executable="{executable}"' in text
-    assert "namespace=namespace" in text
-    assert 'f"{namespace}/controller_manager"' in text
-    assert "EXECUTION_DURATION_SCALING" in text
-    assert "generate_dual_robot_configs" in text
-    assert "dual_robot_config.py" in text
-    assert "/clock" in text
-    assert "tf_remappings" in text
-    assert '("/tf", f"{namespace}/tf")' in text
-    assert '("/tf_static", f"{namespace}/tf_static")' in text
-    assert "remappings=tf_remappings" in text
-    assert text.count("remappings=tf_remappings") == 2
-    # The robot ids must only come from the launch argument, never hardcoded
-    # to a stack that would shadow piper_1 with canonical piper_0 endpoints.
-    assert "/piper_0/" not in text
-    assert "/piper_1/" not in text
 
 
-def test_pinned_single_robot_launch_is_untouched_by_the_dual_addition() -> None:
-    text = SINGLE_LAUNCH_PATH.read_text(encoding="utf-8")
-    assert "dual_robot_config" not in text
-    assert "dual_move_group" not in text
-    assert 'MoveItConfigsBuilder("piper_l", package_name=PACKAGE_NAME)' in text

@@ -580,6 +580,13 @@ def test_coordinated_entry_composes_joint_goals_end_to_end():
             "scene_version": 1,
         },
         validate_unified_scene=lambda proof: True,
+        # The sim-arbiter clearance gate reads the combined robot description
+        # the planner used.  This double declares no collidable bodies, so the
+        # gate has nothing to measure; the real session serves the latched
+        # /dual_arm/robot_description.
+        unified_robot_description=lambda: '<robot name="dual_stub"><link name="dual_world"/><link name="stub_link"/>'
+        '<joint name="stub_joint" type="fixed"><parent link="dual_world"/>'
+        '<child link="stub_link"/></joint></robot>',
         coordinated_plan_runtime=lambda: SimpleNamespace(
             plan=lambda item, timeout_s=None: plan_calls.append(1) or planned,
         ),

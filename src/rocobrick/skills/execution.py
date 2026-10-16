@@ -6,8 +6,8 @@ from dataclasses import dataclass
 from typing import Awaitable, Callable, Protocol, runtime_checkable
 from uuid import uuid4
 
-from rocobrick.models import FailureReason, TaskDefinition
-from rocobrick.skills import PhaseResult, PhaseStatus, SkillPhase, SkillType, program_for
+from rocobrick.models import FailureReason, SkillType, TaskDefinition
+from rocobrick.skills.programs import PhaseResult, PhaseStatus, SkillPhase, program_for
 from rocobrick.task_facts import EventType, ExecutionEvent
 
 

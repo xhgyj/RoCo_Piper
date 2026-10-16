@@ -35,7 +35,7 @@ from rocobrick.piper_run import (
 ROOT = Path(__file__).parents[1]
 PYPROJECT = ROOT / "pyproject.toml"
 PIPER_RUN_SOURCE = ROOT / "src/rocobrick/piper_run.py"
-PLAN = ROOT / "runs/example1-compound-pick-20260915T130000Z/generated-plan.json"
+PLAN = ROOT / "tests/fixtures/assembly_plans/example1-compound-pick.json"
 TASK_DIR = ROOT / "tasks/type1/example1"
 TASK_START = TASK_DIR / "structure_start.json"
 TASK_GOAL = TASK_DIR / "structure_goal.json"
@@ -93,7 +93,7 @@ ALLOWED_ROCOBRICK = {
     "rocobrick.skills.place_up",
     "rocobrick.skills.support_top",
     "rocobrick.plan.structure_scene",
-    "rocobrick.robot_operation_executor",
+    "rocobrick.execution.robot_operation_executor",
     "rocobrick.robot_operation_runner",
     "rocobrick.unified_runtime_facade",
 }
@@ -978,7 +978,7 @@ def test_operation_phase_imports_its_owned_dependencies():
         "OperationStateLedger": "rocobrick.execution.operation_state_ledger",
         "SessionTcpMotionAdapter": "rocobrick.adapters.moveit.transit",
         "load_transit_contexts": "rocobrick.adapters.moveit.transit",
-        "SkillOperationExecutor": "rocobrick.robot_operation_executor",
+        "SkillOperationExecutor": "rocobrick.execution.robot_operation_executor",
         "PickHandler": "rocobrick.skills.pick",
     }
     for name, module in expected.items():
@@ -1004,7 +1004,8 @@ def test_operation_phase_imports_its_owned_dependencies():
             "SessionTcpMotionAdapter, load_transit_contexts; "
             "from rocobrick.execution.operation_state_ledger import "
             "OperationStateLedger; "
-            "from rocobrick.robot_operation_executor import SkillOperationExecutor; "
+            "from rocobrick.execution.robot_operation_executor import "
+            "SkillOperationExecutor; "
             "from rocobrick.skills.coordinated_handover import "
             "CoordinatedHandoverBackend; "
             "from rocobrick.adapters.moveit.handover_program import "
@@ -1074,7 +1075,7 @@ def test_piper_run_writes_only_through_the_evidence_recorder():
 
 from dataclasses import dataclass  # noqa: E402
 
-import rocobrick.robot_operation_executor as executor_module  # noqa: E402
+import rocobrick.execution.robot_operation_executor as executor_module  # noqa: E402
 from rocobrick.multi_robot_scheduler import (  # noqa: E402
     CancelEvidence,
     OperationExecution,

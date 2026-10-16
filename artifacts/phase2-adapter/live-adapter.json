@@ -1,0 +1,519 @@
+{
+  "checks": {
+    "adapter_probe_passed": true,
+    "bounded_and_no_leftovers": true,
+    "command_observed": true,
+    "container_profile_client_only_no_listener": true,
+    "final_return_passed": true,
+    "host_cleanup_orderly": true,
+    "host_commands_applied": true,
+    "host_marker": true,
+    "joint_outbound_passed": true,
+    "joint_return_passed": true,
+    "link6_pose_passed": true,
+    "log_scan_clean": true,
+    "p1a_prerequisite": true,
+    "readiness": true
+  },
+  "collected_at_utc": "2026-09-21T08:55:05.964730+00:00",
+  "container": {
+    "exit_status": "0",
+    "image": "sha256:659623efed210acf91ea1bc76e6aac2d360ed62882bc536693a4afc0fb113e98",
+    "name": "rocobrick-r2-live-adapter-2604421"
+  },
+  "container_log_tail": "[r2-adapter-inner] move_group precondition ready=1\n[r2-adapter-inner] probe_status=0\n",
+  "controllers_listing": "\u001b[92marm_controller         \u001b[0m joint_trajectory_controller/JointTrajectoryController  \u001b[92mactive\u001b[0m\n\u001b[92mgripper_controller     \u001b[0m joint_trajectory_controller/JointTrajectoryController  \u001b[92mactive\u001b[0m\n\u001b[92mjoint_state_broadcaster\u001b[0m joint_state_broadcaster/JointStateBroadcaster          \u001b[92mactive\u001b[0m\n",
+  "gpu_diagnostic": [
+    "GPU 0: NVIDIA GeForce RTX 4090 D (UUID: GPU-9707ae73-9aea-5c4a-841c-f322933ac495)"
+  ],
+  "host_bridge": {
+    "articulation_prim_path": "/World/Robot_0/root_joint",
+    "bounded": {
+      "hold_seconds_s": 420.0,
+      "hold_steps": 220000,
+      "max_steps": 1000000,
+      "ready_timeout_s": 120.0,
+      "render_steps": false,
+      "time_limit_s": 700.0
+    },
+    "bridge_extension_enabled": false,
+    "cleanup": {
+      "app_close_initiated": true,
+      "rclpy_shutdown": true,
+      "timeline_stopped": true,
+      "world_stopped": true
+    },
+    "clock_published_at_ready": 1,
+    "commands": {
+      "applied": 735,
+      "clamped_to_limits": 0,
+      "received": 735,
+      "unknown_joint_names_ignored": []
+    },
+    "dds_profile": "/home/mzictt/RoCo_Piper/.runtime/dds/fastdds-host.xml",
+    "dof_limits_source": "robot.dof_properties",
+    "elapsed_s": 426.529,
+    "headless": true,
+    "hold": {
+      "seconds_wall": 420.001,
+      "sim_time_final_s": 4471.500233,
+      "steps": 268283
+    },
+    "hold_completed": true,
+    "hold_samples": [
+      {
+        "playing": true,
+        "sim_time_s": 2.117,
+        "step": 125,
+        "wall_s": 0.1
+      },
+      {
+        "playing": true,
+        "sim_time_s": 4.117,
+        "step": 245,
+        "wall_s": 0.212
+      },
+      {
+        "playing": true,
+        "sim_time_s": 6.117,
+        "step": 365,
+        "wall_s": 0.318
+      },
+      {
+        "playing": true,
+        "sim_time_s": 8.117,
+        "step": 485,
+        "wall_s": 0.414
+      },
+      {
+        "playing": true,
+        "sim_time_s": 10.117,
+        "step": 605,
+        "wall_s": 0.51
+      },
+      {
+        "playing": true,
+        "sim_time_s": 12.117,
+        "step": 725,
+        "wall_s": 0.604
+      },
+      {
+        "playing": true,
+        "sim_time_s": 14.117,
+        "step": 845,
+        "wall_s": 0.678
+      },
+      {
+        "playing": true,
+        "sim_time_s": 16.117,
+        "step": 965,
+        "wall_s": 0.767
+      },
+      {
+        "playing": true,
+        "sim_time_s": 18.117,
+        "step": 1085,
+        "wall_s": 0.865
+      },
+      {
+        "playing": true,
+        "sim_time_s": 20.117,
+        "step": 1205,
+        "wall_s": 1.011
+      }
+    ],
+    "in_process_rclpy": true,
+    "joint_command_message_type": "sensor_msgs/JointState",
+    "joint_dofs": [
+      "joint1",
+      "joint2",
+      "joint3",
+      "joint4",
+      "joint5",
+      "joint6",
+      "gripper_joint1",
+      "gripper_joint2"
+    ],
+    "joint_states_published_at_ready": 1,
+    "omnigraph_created": false,
+    "passed": true,
+    "phase": "P0.5",
+    "publish_totals": {
+      "clock": 12210,
+      "joint_states": 12210,
+      "joint_states_diag": 12210,
+      "positions_nan": 0
+    },
+    "rclpy_bundled_humble": true,
+    "rclpy_module": "/home/mzictt/RoCo_Piper/.venv/lib/python3.11/site-packages/isaacsim/exts/isaacsim.ros2.bridge/humble/rclpy/rclpy/__init__.py",
+    "rclpy_node_count": 1,
+    "rclpy_node_name": "piper_l0_host_bridge",
+    "rclpy_source": "bundled humble rclpy via tools/isaac-ros-env.sh",
+    "rclpy_started": true,
+    "readiness_marker": "p0.5_host_bridge_ready",
+    "ready": true,
+    "robot_prim_path": "/World/Robot_0",
+    "ros_domain_id": 73,
+    "schema": "rocobrick-host-bridge-smoke/v1",
+    "sim_time_at_ready_s": 0.116667,
+    "steps_to_ready": 5,
+    "steps_total": 268288,
+    "timeline_playing": true,
+    "topics": {
+      "clock": "/clock",
+      "joint_commands": "/isaac_joint_command",
+      "joint_states": "/isaac_joint_states"
+    },
+    "usd": {
+      "path": "/home/mzictt/RoCo_Piper/robot_assets/piper_l/USD/piper_l_gripper_d435.usd",
+      "sha256": "a781d52f9d55291fca9c8f2695abf9e311640d996314d272f47639d5323e2375"
+    }
+  },
+  "host_exit_status": "0",
+  "host_log_tail": "nu] omni.isaac.menu has been deprecated in favor of isaacsim.gui.menu. Please update your code accordingly.\n[3.396s] [ext: omni.isaac.motion_generation-8.0.7] startup\n2026-09-21T08:48:00Z [3,385ms] [Warning] [omni.isaac.motion_generation] omni.isaac.motion_generation has been deprecated in favor of isaacsim.robot_motion.motion_generation. Please update your code accordingly.\n2026-09-21T08:48:00Z [3,385ms] [Warning] [omni.isaac.motion_generation.articulation_kinematics_solver] omni.isaac.motion_generation has been deprecated in favor of isaacsim.robot_motion.motion_generation. Please update your code accordingly.\n2026-09-21T08:48:00Z [3,385ms] [Warning] [omni.isaac.motion_generation.articulation_motion_policy] omni.isaac.motion_generation has been deprecated in favor of isaacsim.robot_motion.motion_generation. Please update your code accordingly.\n2026-09-21T08:48:00Z [3,386ms] [Warning] [omni.isaac.motion_generation.articulation_trajectory] omni.isaac.motion_generation has been deprecated in favor of isaacsim.robot_motion.motion_generation. Please update your code accordingly.\n2026-09-21T08:48:00Z [3,386ms] [Warning] [omni.isaac.motion_generation.kinematics_interface] omni.isaac.motion_generation has been deprecated in favor of isaacsim.robot_motion.motion_generation. Please update your code accordingly.\n2026-09-21T08:48:00Z [3,386ms] [Warning] [omni.isaac.motion_generation.lula] omni.isaac.motion_generation has been deprecated in favor of isaacsim.robot_motion.motion_generation. Please update your code accordingly.\n2026-09-21T08:48:00Z [3,386ms] [Warning] [omni.isaac.motion_generation.lula.kinematics] omni.isaac.motion_generation has been deprecated in favor of isaacsim.robot_motion.motion_generation. Please update your code accordingly.\n2026-09-21T08:48:00Z [3,386ms] [Warning] [omni.isaac.motion_generation.lula.motion_policies] omni.isaac.motion_generation has been deprecated in favor of isaacsim.robot_motion.motion_generation. Please update your code accordingly.\n2026-09-21T08:48:00Z [3,386ms] [Warning] [omni.isaac.motion_generation.lula.path_planners] omni.isaac.motion_generation has been deprecated in favor of isaacsim.robot_motion.motion_generation. Please update your code accordingly.\n2026-09-21T08:48:00Z [3,386ms] [Warning] [omni.isaac.motion_generation.lula.trajectory_generator] omni.isaac.motion_generation has been deprecated in favor of isaacsim.robot_motion.motion_generation. Please update your code accordingly.\n2026-09-21T08:48:00Z [3,386ms] [Warning] [omni.isaac.motion_generation.motion_policy_controller] omni.isaac.motion_generation has been deprecated in favor of isaacsim.robot_motion.motion_generation. Please update your code accordingly.\n2026-09-21T08:48:00Z [3,386ms] [Warning] [omni.isaac.motion_generation.motion_policy_interface] omni.isaac.motion_generation has been deprecated in favor of isaacsim.robot_motion.motion_generation. Please update your code accordingly.\n2026-09-21T08:48:00Z [3,386ms] [Warning] [omni.isaac.motion_generation.path_planner_visualizer] omni.isaac.motion_generation has been deprecated in favor of isaacsim.robot_motion.motion_generation. Please update your code accordingly.\n2026-09-21T08:48:00Z [3,386ms] [Warning] [omni.isaac.motion_generation.path_planning_interface] omni.isaac.motion_generation has been deprecated in favor of isaacsim.robot_motion.motion_generation. Please update your code accordingly.\n2026-09-21T08:48:00Z [3,387ms] [Warning] [omni.isaac.motion_generation.trajectory] omni.isaac.motion_generation has been deprecated in favor of isaacsim.robot_motion.motion_generation. Please update your code accordingly.\n2026-09-21T08:48:00Z [3,387ms] [Warning] [omni.isaac.motion_generation.world_interface] omni.isaac.motion_generation has been deprecated in favor of isaacsim.robot_motion.motion_generation. Please update your code accordingly.\n[3.399s] [ext: omni.isaac.assets_check-0.3.13] startup\n2026-09-21T08:48:00Z [3,390ms] [Warning] [omni.isaac.assets_check] omni.isaac.assets_check has been deprecated in favor of isaacsim.asset.browser. Please update your code accordingly.\n[3.402s] [ext: isaacsim.gui.sensors.icon-2.0.3] startup\n[3.410s] [ext: isaacsim.asset.importer.mjcf-2.5.13] startup\n[3.413s] [ext: omni.sensors.nv.common-3.0.0] startup\n[3.419s] [ext: isaacsim.sensors.physics-0.4.3] startup\n[3.422s] [ext: omni.sensors.net-1.0.0] startup\n[3.424s] [ext: omni.isaac.nucleus-1.0.6] startup\n2026-09-21T08:48:00Z [3,413ms] [Warning] [omni.isaac.nucleus] omni.isaac.nucleus has been deprecated in favor of isaacsim.storage.native. Please update your code accordingly.\n2026-09-21T08:48:00Z [3,413ms] [Warning] [omni.isaac.nucleus.nucleus] omni.isaac.nucleus.nucleus has been deprecated in favor of isaacsim.storage.native. Please update your code accordingly.\n[3.425s] [ext: omni.sensors.nv.materials-2.0.0] startup\n[3.428s] [ext: isaacsim.robot.policy.examples-4.1.11] startup\n[3.429s] [ext: omni.sensors.nv.wpm-3.0.0] startup\n[3.431s] [ext: omni.sensors.nv.lidar-3.0.0] startup\n[3.435s] [ext: isaacsim.util.debug_draw-3.1.0] startup\n[3.437s] [ext: omni.sensors.nv.radar-3.0.0] startup\n[3.439s] [ext: omni.sensors.nv.ids-2.0.0] startup\n[3.440s] [ext: isaacsim.core.cloner-1.4.10] startup\n[3.441s] [ext: isaacsim.sensors.physx-2.3.2] startup\n[3.444s] [ext: isaacsim.sensors.rtx-15.8.4] startup\n[3.449s] [ext: isaacsim.sensors.camera-1.3.6] startup\n[3.456s] [ext: omni.isaac.quadruped-3.0.7] startup\n2026-09-21T08:48:00Z [3,445ms] [Warning] [omni.isaac.quadruped] omni.isaac.quadruped has been deprecated in favor of isaacsim.robot.policy.examples. Please update your code accordingly.\n[3.458s] [ext: omni.isaac.cloner-1.0.7] startup\n2026-09-21T08:48:00Z [3,448ms] [Warning] [omni.isaac.cloner] omni.isaac.cloner has been deprecated in favor of isaacsim.core.cloner. Please update your code accordingly.\n[3.460s] [ext: omni.isaac.range_sensor-4.0.6] startup\n2026-09-21T08:48:00Z [3,451ms] [Warning] [omni.isaac.range_sensor] omni.isaac.range_sensor has been deprecated in favor of isaacsim.sensors.physx. Please update your code accordingly.\n2026-09-21T08:48:00Z [3,451ms] [Warning] [omni.isaac.range_sensor.commands] omni.isaac.range_sensor.commands has been deprecated in favor of isaacsim.sensors.physx.commands. Please update your code accordingly.\n[3.463s] [ext: omni.isaac.sensor-13.0.7] startup\n2026-09-21T08:48:00Z [3,453ms] [Warning] [omni.isaac.sensor] omni.isaac.sensor has been deprecated in favor of isaacsim.sensors.camera, isaacsim.sensors.physics, isaacsim.sensors.physx, and isaacsim.sensors.rtx. Please update your code accordingly.\n2026-09-21T08:48:00Z [3,454ms] [Warning] [omni.isaac.sensor.camera] omni.isaac.sensor.camera has been deprecated in favor of isaacsim.sensors.camera.camera. Please update your code accordingly.\n2026-09-21T08:48:00Z [3,454ms] [Warning] [omni.isaac.sensor.camera_view] omni.isaac.sensor.camera_view has been deprecated in favor of isaacsim.sensors.camera.camera_view. Please update your code accordingly.\n2026-09-21T08:48:00Z [3,454ms] [Warning] [omni.isaac.sensor.commands] omni.isaac.sensor.commands has been deprecated in favor of isaacsim.sensors.physics.commands, isaacsim.sensors.physx.commands, and isaacsim.sensors.rtx.commands. Please update your code accordingly.\n2026-09-21T08:48:00Z [3,454ms] [Warning] [omni.isaac.sensor.contact_sensor] omni.isaac.sensor.contact_sensor has been deprecated in favor of isaacsim.sensors.physics.contact_sensor. Please update your code accordingly.\n2026-09-21T08:48:00Z [3,454ms] [Warning] [omni.isaac.sensor.imu_sensor] omni.isaac.sensor.imu_sensor has been deprecated in favor of isaacsim.sensors.physics.imu_sensor. Please update your code accordingly.\n2026-09-21T08:48:00Z [3,454ms] [Warning] [omni.isaac.sensor.lidar_rtx] omni.isaac.sensor.lidar_rtx has been deprecated in favor of isaacsim.sensors.rtx.lidar_rtx. Please update your code accordingly.\n2026-09-21T08:48:00Z [3,454ms] [Warning] [omni.isaac.sensor.rotating_lidar_physX] omni.isaac.sensor.imu_sensor has been deprecated in favor of isaacsim.sensors.physix.rotating_lidar_physX. Please update your code accordingly.\n2026-09-21T08:48:00Z [3,455ms] [Warning] [omni.isaac.sensor.scripts.samples.contact_sensor] omni.isaac.sensor.scripts.samples.contact_sensor has been deprecated in favor of isaacsim.sensors.physics.scripts.samples.contact_sensor. Please update your code accordingly.\n2026-09-21T08:48:00Z [3,455ms] [Warning] [omni.isaac.sensor.scripts.samples.imu_sensor] omni.isaac.sensor.scripts.samples.imu_sensor has been deprecated in favor of isaacsim.sensors.physics.scripts.samples.imu_sensor. Please update your code accordingly.\n2026-09-21T08:48:00Z [3,455ms] [Warning] [omni.isaac.sensor.scripts.samples.lightbeam_sensor] omni.isaac.sensor.scripts.samples.lightbeam_sensor has been deprecated in favor of isaacsim.sensors.physx.scripts.samples.lightbeam_sensor. Please update your code accordingly.\n[3.467s] [ext: omni.kit.menu.create-2.0.1] startup\n[3.469s] [ext: omni.kit.widget.toolbar-2.0.1] startup\n[3.481s] [ext: omni.kit.manipulator.transform-107.0.0] startup\n[3.488s] [ext: omni.isaac.core-4.0.7] startup\n2026-09-21T08:48:00Z [3,478ms] [Warning] [omni.isaac.core.physics_context.physics_context] omni.isaac.core.physics_context.physics_context has been deprecated in favor of isaacsim.core.api.physics_context.physics_context. Please update your code accordingly.\n2026-09-21T08:48:00Z [3,478ms] [Warning] [omni.isaac.core.simulation_context.simulation_context] omni.isaac.core.simulation_context.simulation_context has been deprecated in favor of isaacsim.core.api.simulation_context.simulation_context. Please update your code accordingly.\n2026-09-21T08:48:00Z [3,478ms] [Warning] [omni.isaac.core.world.world] omni.isaac.core.world.world has been deprecated in favor of isaacsim.core.api.world.world. Please update your code accordingly.\n2026-09-21T08:48:00Z [3,478ms] [Warning] [omni.isaac.core] omni.isaac.core has been deprecated in favor of isaacsim.core.api. Please update your code accordingly.\n[3.491s] [ext: omni.kit.scripting-107.3.2] startup\n[3.500s] [ext: omni.kit.manipulator.tool.snap-1.5.13] startup\n[3.505s] [ext: omni.kit.manipulator.selector-1.1.3] startup\n[3.507s] [ext: isaacsim.app.about-2.0.11] startup\n[3.511s] [ext: isaacsim.replicator.behavior-1.1.16] startup\n[3.511s] [ext: omni.kit.viewport.manipulator.transform-107.0.4] startup\n[3.513s] [ext: omni.isaac.window.about-2.0.7] startup\n2026-09-21T08:48:00Z [3,502ms] [Warning] [omni.isaac.window.about] omni.isaac.window.about has been deprecated in favor of isaacsim.app.about. Please update your code accordingly.\n2026-09-21T08:48:00Z [3,502ms] [Warning] [omni.isaac.window.about.about] omni.isaac.window.about.about has been deprecated in favor of isaacsim.app.about.about. Please update your code accordingly.\n[3.514s] [ext: omni.fabric.commands-1.1.6] startup\n[3.516s] [ext: omni.kit.manipulator.prim.core-107.0.8] startup\n[3.520s] [ext: omni.kit.property.audio-1.0.16] startup\n[3.522s] [ext: omni.kit.property.camera-1.0.10] startup\n[3.523s] [ext: omni.kit.property.geometry-2.0.4] startup\n[3.525s] [ext: omni.hydra.scene_api-0.1.2] startup\n[3.529s] [ext: omni.kit.property.light-1.0.12] startup\n[3.545s] [ext: omni.kit.manipulator.prim.fabric-107.0.4] startup\n[3.546s] [ext: omni.kit.manipulator.prim.usd-107.0.3] startup\n[3.547s] [ext: omni.kit.property.material-1.11.9] startup\n[3.551s] [ext: omni.kit.property.render-1.2.1] startup\n[3.552s] [ext: omni.kit.property.transform-1.5.13] startup\n[3.554s] [ext: isaacsim.gui.property-1.1.3] startup\n[3.556s] [ext: omni.kit.manipulator.camera-106.0.4] startup\n[3.558s] [ext: omni.kit.manipulator.prim-107.0.0] startup\n[3.559s] [ext: omni.isaac.surface_gripper-2.0.6] startup\n2026-09-21T08:48:00Z [3,547ms] [Warning] [omni.isaac.surface_gripper] omni.isaac.surface_gripper has been deprecated in favor of isaacsim.robot.surface_gripper. Please update your code accordingly.\n[3.559s] [ext: omni.kit.manipulator.selection-106.0.1] startup\n[3.562s] [ext: omni.kit.property.bundle-1.4.1] startup\n[3.562s] [ext: omni.kit.property.isaac-1.0.6] startup\n2026-09-21T08:48:00Z [3,551ms] [Warning] [omni.kit.property.isaac] omni.kit.property.isaac has been deprecated in favor of isaacsim.gui.property. Please update your code accordingly.\n2026-09-21T08:48:00Z [3,551ms] [Warning] [omni.kit.property.isaac.widgets] omni.kit.property.isaac.widgets has been deprecated in favor of isaacsim.gui.property.widgets. Please update your code accordingly.\n[3.563s] [ext: omni.isaac.universal_robots-1.0.6] startup\n2026-09-21T08:48:00Z [3,551ms] [Warning] [omni.isaac.universal_robots] omni.isaac.universal_robots has been deprecated in favor of isaacsim.robot.manipulators.examples.universal_robots. Please update your code accordingly.\n2026-09-21T08:48:00Z [3,551ms] [Warning] [omni.isaac.universal_robots.kinematics_solver] omni.isaac.franka has been deprecated in favor of isaacsim.robot.manipulators.examples.universal_robots. Please update your code accordingly.\n2026-09-21T08:48:00Z [3,552ms] [Warning] [omni.isaac.universal_robots.ur10] omni.isaac.franka has been deprecated in favor of isaacsim.robot.manipulators.examples.universal_robots. Please update your code accordingly.\n[3.564s] [ext: omni.isaac.core_nodes-2.0.6] startup\n2026-09-21T08:48:00Z [3,553ms] [Warning] [omni.isaac.core_nodes] omni.isaac.core_nodes has been deprecated in favor of isaacsim.core.nodes. Please update your code accordingly.\n[3.566s] [ext: omni.kit.viewport.menubar.camera-107.0.6] startup\n[3.570s] [ext: omni.kit.viewport.menubar.lighting-107.3.1] startup\n[3.572s] [ext: isaacsim.replicator.writers-1.0.17] startup\n[3.580s] [ext: omni.kit.viewport.menubar.render-107.0.10] startup\n[3.583s] [ext: omni.kit.viewport.menubar.settings-107.0.3] startup\n[3.587s] [ext: omni.kit.window.console-1.1.4] startup\n[3.591s] [ext: isaacsim.replicator.domain_randomization-1.0.16] startup\n[3.593s] [ext: isaacsim.replicator.examples-1.3.6] startup\n[3.594s] [ext: omni.ocio-0.1.1] startup\n[3.596s] [ext: omni.rtx.window.settings-0.6.19] startup\n[3.602s] [ext: omni.kit.window.status_bar-0.1.9] startup\n[3.604s] [ext: omni.kit.window.toolbar-2.0.0] startup\n[3.612s] [ext: omni.replicator.isaac-2.0.8] startup\n2026-09-21T08:48:01Z [3,601ms] [Warning] [omni.replicator.isaac] omni.replicator.isaac has been deprecated in favor of isaacsim.replicator.domain_randomization, isaacsim.replicator.examples, isaacsim.replicator.writers. Please update your code accordingly.\n[3.613s] [ext: omni.replicator.replicator_yaml-2.0.11] startup\n[3.626s] [ext: omni.rtx.settings.core-0.6.5] startup\n[3.629s] [ext: omni.usd.metrics.assembler.ui-107.3.1] startup\n[3.636s] [ext: omni.isaac.utils-2.0.6] startup\n[3.637s] [ext: semantics.schema.editor-2.0.2] startup\n[3.640s] [ext: omni.kit.ui.actions-1.0.5] startup\n[3.641s] [ext: semantics.schema.property-2.0.1] startup\n[3.642s] [ext: omni.isaac.version-2.0.7] startup\n2026-09-21T08:48:01Z [3,630ms] [Warning] [omni.isaac.version] omni.isaac.version has been deprecated in favor of isaacsim.core.version. Please update your code accordingly.\n[3.643s] [ext: omni.isaac.cortex-1.0.5] startup\n[3.643s] [ext: omni.anim.curve.core-1.3.1] startup\n[3.649s] [ext: isaacsim.core.throttling-2.2.2] startup\n[3.651s] [ext: omni.kit.menu.common-2.0.1] startup\n[3.652s] [ext: isaacsim.exp.base-5.1.0] startup\n[3.652s] [ext: isaacsim.exp.base.python-5.1.0] startup\n[3.653s] Simulation App Starting\n2026-09-21T08:48:01Z [3,916ms] [Warning] [omni.fabric.plugin] Warning: attribute viewportHandle not found for bucket id 9\n\n2026-09-21T08:48:01Z [3,935ms] [Warning] [usdrt.population.plugin] [UsdNoticeHandler] Unhandled attribute type VtArray<std::string> (prim attribute: omni:rtx:material:db:flattener:transmittance_color)\n2026-09-21T08:48:01Z [3,935ms] [Warning] [usdrt.population.plugin] [UsdNoticeHandler] Unhandled attribute type VtArray<std::string> (prim attribute: omni:rtx:material:db:flattener:reflection_roughness_constant)\n2026-09-21T08:48:01Z [3,935ms] [Warning] [usdrt.population.plugin] [UsdNoticeHandler] Unhandled attribute type VtArray<std::string> (prim attribute: omni:rtx:material:db:flattener:ior_constant)\n[3.956s] app ready\nStarting kit application with the following args:  ['/home/mzictt/RoCo_Piper/.venv/lib/python3.11/site-packages/isaacsim/exts/isaacsim.simulation_app/isaacsim/simulation_app/simulation_app.py', '/home/mzictt/RoCo_Piper/.venv/lib/python3.11/site-packages/isaacsim/apps/isaacsim.exp.base.python.kit', '--/app/tokens/exe-path=/home/mzictt/RoCo_Piper/.venv/lib/python3.11/site-packages/isaacsim/kit', '--/persistent/app/viewport/displayOptions=3094', '--/rtx/materialDb/syncLoads=True', '--/rtx/hydra/materialSyncLoads=True', '--/omni.kit.plugin/syncUsdLoads=True', '--/app/renderer/resolution/width=1280', '--/app/renderer/resolution/height=720', '--/app/window/width=1440', '--/app/window/height=900', '--/renderer/multiGpu/enabled=True', '--/app/fastShutdown=True', '--/app/installSignalHandlers=0', '--ext-folder', '/home/mzictt/RoCo_Piper/.venv/lib/python3.11/site-packages/isaacsim/exts', '--ext-folder', '/home/mzictt/RoCo_Piper/.venv/lib/python3.11/site-packages/isaacsim/apps', '--/physics/cudaDevice=0', '--/plugins/carb.tasking.plugin/threadCount=32', '--/plugins/omni.tbb.globalcontrol/maxThreadCount=32', '--portable', '--no-window', '--/app/window/hideUi=1']\nPassing the following args to the base kit application:  []\nWarp 1.8.2 initialized:\n   CUDA Toolkit 12.8, Driver 13.0\n   Devices:\n     \"cpu\"      : \"x86_64\"\n     \"cuda:0\"   : \"NVIDIA GeForce RTX 4090 D\" (23 GiB, sm_89, mempool enabled)\n   Kernel cache:\n     /home/mzictt/.cache/warp/1.8.2\nWarp DeprecationWarning: The `warp.sim` module is deprecated and will be removed in v1.10. Please transition to using the forthcoming Newton library instead.\n{\"elapsed_s\": 0.007, \"joint_dofs\": [\"joint1\", \"joint2\", \"joint3\", \"joint4\", \"joint5\", \"joint6\", \"gripper_joint1\", \"gripper_joint2\"], \"marker\": \"p0.5_host_bridge_ready\", \"schema\": \"rocobrick-host-bridge-smoke/v1\", \"stage\": \"ready\", \"steps\": 5}\n[5.563s] Simulation App Startup Complete\n2026-09-21T08:48:03Z [5,573ms] [Warning] [omni.usd] Warning: in _ReportErrors at line 3172 of /builds/omniverse/usd-ci/USD/pxr/usd/usd/stage.cpp -- In </World/Robot_0/world/visuals>: Unresolved reference prim path @/home/mzictt/RoCo_Piper/robot_assets/piper_l/USD/configuration/piper_l_gripper_d435_physics.usd@</visuals/world> introduced by @/home/mzictt/RoCo_Piper/robot_assets/piper_l/USD/configuration/piper_l_gripper_d435_base.usd@</agx_arm/world/visuals> (recomposing stage on stage @anon:0x579c85ae2ed0:World0.usd@ <0x579c85c531e0>)\n\n2026-09-21T08:48:03Z [5,631ms] [Warning] [omni.graph.core.plugin] Could not find node type interface for 'isaacsim.ros2.bridge.ROS2Context'\n2026-09-21T08:48:03Z [5,631ms] [Warning] [omni.graph.core.plugin] Could not find node type interface for 'isaacsim.ros2.bridge.ROS2CameraHelper'\n2026-09-21T08:48:03Z [5,632ms] [Warning] [omni.graph.core.plugin] Could not find node type interface for 'isaacsim.ros2.bridge.ROS2Context'\n2026-09-21T08:48:03Z [5,632ms] [Warning] [omni.graph.core.plugin] Could not find node type interface for 'isaacsim.ros2.bridge.ROS2PublishClock'\n2026-09-21T08:48:03Z [5,632ms] [Warning] [omni.graph.core.plugin] Could not find node type interface for 'isaacsim.ros2.bridge.ROS2PublishJointState'\n2026-09-21T08:48:03Z [5,632ms] [Warning] [omni.graph.core.plugin] Could not find node type interface for 'isaacsim.ros2.bridge.ROS2SubscribeJointState'\n2026-09-21T08:48:03Z [5,649ms] [Warning] [omni.fabric.plugin] getAttributeCount called on non-existent path /World/Robot_0/camera_link/collisions/mesh_0\n2026-09-21T08:48:03Z [5,649ms] [Warning] [omni.fabric.plugin] getTypes called on non-existent path /World/Robot_0/camera_link/collisions/mesh_0\n2026-09-21T08:48:03Z [6,227ms] [Warning] [omni.timeline.plugin] Deprecated: direct use of ITimeline callbacks is deprecated. Use ITimeline::getTimeline (Python: omni.timeline.get_timeline_interface) instead.\n[426.575s] Simulation App Shutting Down\n",
+  "leftovers": {
+    "container": null,
+    "host_process": null
+  },
+  "log_scan": {
+    "files": [
+      "host-adapter-bridge.log",
+      "container-r2.log",
+      "adapter-probe.log",
+      "move_group-r2.log.tail"
+    ],
+    "findings": [],
+    "passed": true,
+    "patterns": [
+      "address already in use",
+      "error binding",
+      "binding at port",
+      "shared memory",
+      "udpv4",
+      "udpv6",
+      "multicast",
+      "hardware init",
+      "failed to activate",
+      "activation failed",
+      "stale",
+      "SHM",
+      "nan"
+    ]
+  },
+  "move_group_log_tail": "-3] [INFO] [1789980488.260622258] [moveit.plugins.moveit_simple_controller_manager]: Returned 2 controllers in list\n[move_group-3] [INFO] [1789980488.261033551] [moveit_ros.trajectory_execution_manager]: Trajectory execution is managing controllers\n[move_group-3] [INFO] [1789980488.261042650] [move_group.move_group]: MoveGroup debug mode is ON\n[move_group-3] [INFO] [1789980488.279259630] [move_group.move_group]: \n[move_group-3] \n[move_group-3] ********************************************************\n[move_group-3] * MoveGroup using: \n[move_group-3] *     - ApplyPlanningSceneService\n[move_group-3] *     - ClearOctomapService\n[move_group-3] *     - CartesianPathService\n[move_group-3] *     - ExecuteTrajectoryAction\n[move_group-3] *     - GetPlanningSceneService\n[move_group-3] *     - KinematicsService\n[move_group-3] *     - MoveAction\n[move_group-3] *     - MotionPlanService\n[move_group-3] *     - QueryPlannersService\n[move_group-3] *     - StateValidationService\n[move_group-3] ********************************************************\n[move_group-3] \n[move_group-3] [INFO] [1789980488.279288351] [moveit_move_group_capabilities_base.move_group_context]: MoveGroup context using planning plugin ompl_interface/OMPLPlanner\n[move_group-3] [INFO] [1789980488.279295901] [moveit_move_group_capabilities_base.move_group_context]: MoveGroup context initialization complete\n[move_group-3] \u001b[96mLoading 'move_group/ApplyPlanningSceneService'...\n[move_group-3] \u001b[0m\u001b[96mLoading 'move_group/ClearOctomapService'...\n[move_group-3] \u001b[0m\u001b[96mLoading 'move_group/MoveGroupCartesianPathService'...\n[move_group-3] \u001b[0m\u001b[96mLoading 'move_group/MoveGroupExecuteTrajectoryAction'...\n[move_group-3] \u001b[0m\u001b[96mLoading 'move_group/MoveGroupGetPlanningSceneService'...\n[move_group-3] \u001b[0m\u001b[96mLoading 'move_group/MoveGroupKinematicsService'...\n[move_group-3] \u001b[0m\u001b[96mLoading 'move_group/MoveGroupMoveAction'...\n[move_group-3] \u001b[0m\u001b[96mLoading 'move_group/MoveGroupPlanService'...\n[move_group-3] \u001b[0m\u001b[96mLoading 'move_group/MoveGroupQueryPlannersService'...\n[move_group-3] \u001b[0m\u001b[96mLoading 'move_group/MoveGroupStateValidationService'...\n[move_group-3] \u001b[0m\u001b[92m\n[move_group-3] You can start planning now!\n[move_group-3] \n[move_group-3] [WARN] [1789980488.683358373] [moveit_ros.planning_scene_monitor.planning_scene_monitor]: The complete state of the robot is not yet known.  Missing gripper\n[move_group-3] [WARN] [1789980489.698754696] [moveit_ros.planning_scene_monitor.planning_scene_monitor]: The complete state of the robot is not yet known.  Missing gripper\n[move_group-3] [WARN] [1789980490.711619570] [moveit_ros.planning_scene_monitor.planning_scene_monitor]: The complete state of the robot is not yet known.  Missing gripper\n[move_group-3] [WARN] [1789980491.759383331] [moveit_ros.planning_scene_monitor.planning_scene_monitor]: The complete state of the robot is not yet known.  Missing gripper\n[move_group-3] [INFO] [1789980492.202423922] [moveit_move_group_default_capabilities.move_action_capability]: Received request\n[move_group-3] [INFO] [1789980492.202839992] [moveit_move_group_default_capabilities.move_action_capability]: executing..\n[move_group-3] [INFO] [1789980492.202966323] [moveit_move_group_default_capabilities.move_action_capability]: Combined planning and execution request received for MoveGroup action. Forwarding to planning and execution pipeline.\n[move_group-3] [WARN] [1789980492.202985790] [moveit_move_group_capabilities_base.move_group_capability]: Execution of motions should always start at the robot's current state. Ignoring the state supplied as start state in the motion planning request\n[move_group-3] [WARN] [1789980492.202993041] [moveit_move_group_capabilities_base.move_group_capability]: Execution of motions should always start at the robot's current state. Ignoring the state supplied as difference in the planning scene diff\n[move_group-3] [INFO] [1789980492.203005880] [moveit_ros.plan_execution]: Planning attempt 1 of at most 1\n[move_group-3] [INFO] [1789980492.211393226] [moveit.ompl_planning.model_based_planning_context]: Planner configuration 'arm' will use planner 'geometric::RRTConnect'. Additional configuration parameters will be set when the planner is constructed.\n[move_group-3] [WARN] [1789980492.595492399] [moveit_trajectory_processing.time_optimal_trajectory_generation]: Joint acceleration limits are not defined. Using the default 1 rad/s^2. You can define acceleration limits in the URDF or joint_limits.yaml.\n[move_group-3] [INFO] [1789980492.605488842] [moveit.plugins.moveit_simple_controller_manager]: Returned 2 controllers in list\n[move_group-3] [INFO] [1789980492.605505552] [moveit.plugins.moveit_simple_controller_manager]: Returned 2 controllers in list\n[move_group-3] [INFO] [1789980492.605536220] [moveit_ros.trajectory_execution_manager]: Validating trajectory with allowed_start_tolerance 0.01\n[move_group-3] [INFO] [1789980492.607350692] [moveit_ros.trajectory_execution_manager]: Starting trajectory execution ...\n[move_group-3] [INFO] [1789980492.607373767] [moveit.plugins.moveit_simple_controller_manager]: Returned 2 controllers in list\n[move_group-3] [INFO] [1789980492.607380869] [moveit.plugins.moveit_simple_controller_manager]: Returned 2 controllers in list\n[move_group-3] [INFO] [1789980492.607445201] [moveit.simple_controller_manager.follow_joint_trajectory_controller_handle]: sending trajectory to arm_controller\n[ros2_control_node-1] [INFO] [1789980492.607620479] [arm_controller]: Received new action goal\n[ros2_control_node-1] [INFO] [1789980492.607655814] [arm_controller]: Accepted new action goal\n[move_group-3] [INFO] [1789980492.607770975] [moveit.simple_controller_manager.follow_joint_trajectory_controller_handle]: arm_controller started execution\n[move_group-3] [INFO] [1789980492.607788039] [moveit.simple_controller_manager.follow_joint_trajectory_controller_handle]: Goal request accepted!\n[ros2_control_node-1] [INFO] [1789980492.656364288] [arm_controller]: Goal reached, success!\n[move_group-3] [INFO] [1789980492.658201959] [moveit.simple_controller_manager.follow_joint_trajectory_controller_handle]: Controller 'arm_controller' successfully finished\n[move_group-3] [INFO] [1789980492.658248850] [moveit_ros.trajectory_execution_manager]: Completed trajectory execution with status SUCCEEDED ...\n[move_group-3] [INFO] [1789980492.667451109] [moveit_move_group_default_capabilities.move_action_capability]: Solution was found and executed.\n[move_group-3] [WARN] [1789980492.779405440] [moveit_ros.planning_scene_monitor.planning_scene_monitor]: The complete state of the robot is not yet known.  Missing gripper\n[move_group-3] [WARN] [1789980493.799460984] [moveit_ros.planning_scene_monitor.planning_scene_monitor]: The complete state of the robot is not yet known.  Missing gripper\n[move_group-3] [WARN] [1789980494.838313893] [moveit_ros.planning_scene_monitor.planning_scene_monitor]: The complete state of the robot is not yet known.  Missing gripper\n[move_group-3] [WARN] [1789980495.868471462] [moveit_ros.planning_scene_monitor.planning_scene_monitor]: The complete state of the robot is not yet known.  Missing gripper\n[move_group-3] [INFO] [1789980496.108998549] [moveit_move_group_default_capabilities.move_action_capability]: Received request\n[move_group-3] [INFO] [1789980496.109163015] [moveit_move_group_default_capabilities.move_action_capability]: executing..\n[move_group-3] [INFO] [1789980496.109219705] [moveit_move_group_default_capabilities.move_action_capability]: Combined planning and execution request received for MoveGroup action. Forwarding to planning and execution pipeline.\n[move_group-3] [WARN] [1789980496.109261430] [moveit_move_group_capabilities_base.move_group_capability]: Execution of motions should always start at the robot's current state. Ignoring the state supplied as start state in the motion planning request\n[move_group-3] [WARN] [1789980496.109265555] [moveit_move_group_capabilities_base.move_group_capability]: Execution of motions should always start at the robot's current state. Ignoring the state supplied as difference in the planning scene diff\n[move_group-3] [INFO] [1789980496.109269493] [moveit_ros.plan_execution]: Planning attempt 1 of at most 1\n[move_group-3] [INFO] [1789980496.114714818] [moveit.ompl_planning.model_based_planning_context]: Planner configuration 'arm' will use planner 'geometric::RRTConnect'. Additional configuration parameters will be set when the planner is constructed.\n[move_group-3] [INFO] [1789980496.443166414] [moveit.plugins.moveit_simple_controller_manager]: Returned 2 controllers in list\n[move_group-3] [INFO] [1789980496.443184441] [moveit.plugins.moveit_simple_controller_manager]: Returned 2 controllers in list\n[move_group-3] [INFO] [1789980496.443210201] [moveit_ros.trajectory_execution_manager]: Validating trajectory with allowed_start_tolerance 0.01\n[move_group-3] [INFO] [1789980496.443243907] [moveit_ros.trajectory_execution_manager]: Starting trajectory execution ...\n[move_group-3] [INFO] [1789980496.443271475] [moveit.plugins.moveit_simple_controller_manager]: Returned 2 controllers in list\n[move_group-3] [INFO] [1789980496.443285197] [moveit.plugins.moveit_simple_controller_manager]: Returned 2 controllers in list\n[move_group-3] [INFO] [1789980496.443344123] [moveit.simple_controller_manager.follow_joint_trajectory_controller_handle]: sending trajectory to arm_controller\n[ros2_control_node-1] [INFO] [1789980496.443435647] [arm_controller]: Received new action goal\n[ros2_control_node-1] [INFO] [1789980496.443460671] [arm_controller]: Accepted new action goal\n[move_group-3] [INFO] [1789980496.443520340] [moveit.simple_controller_manager.follow_joint_trajectory_controller_handle]: arm_controller started execution\n[move_group-3] [INFO] [1789980496.443529020] [moveit.simple_controller_manager.follow_joint_trajectory_controller_handle]: Goal request accepted!\n[ros2_control_node-1] [INFO] [1789980496.576174104] [arm_controller]: Goal reached, success!\n[move_group-3] [INFO] [1789980496.594255231] [moveit.simple_controller_manager.follow_joint_trajectory_controller_handle]: Controller 'arm_controller' successfully finished\n[move_group-3] [INFO] [1789980496.594447961] [moveit_ros.trajectory_execution_manager]: Completed trajectory execution with status SUCCEEDED ...\n[move_group-3] [INFO] [1789980496.603362541] [moveit_move_group_default_capabilities.move_action_capability]: Solution was found and executed.\n[move_group-3] [WARN] [1789980496.900318539] [moveit_ros.planning_scene_monitor.planning_scene_monitor]: The complete state of the robot is not yet known.  Missing gripper\n[move_group-3] [WARN] [1789980497.913433929] [moveit_ros.planning_scene_monitor.planning_scene_monitor]: The complete state of the robot is not yet known.  Missing gripper\n[move_group-3] [WARN] [1789980498.928249897] [moveit_ros.planning_scene_monitor.planning_scene_monitor]: The complete state of the robot is not yet known.  Missing gripper\n[move_group-3] [WARN] [1789980499.961272129] [moveit_ros.planning_scene_monitor.planning_scene_monitor]: The complete state of the robot is not yet known.  Missing gripper\n[move_group-3] [INFO] [1789980500.266771062] [moveit_move_group_default_capabilities.move_action_capability]: Received request\n[move_group-3] [INFO] [1789980500.267072435] [moveit_move_group_default_capabilities.move_action_capability]: executing..\n[move_group-3] [INFO] [1789980500.282860353] [moveit_move_group_default_capabilities.move_action_capability]: Combined planning and execution request received for MoveGroup action. Forwarding to planning and execution pipeline.\n[move_group-3] [WARN] [1789980500.282920593] [moveit_move_group_capabilities_base.move_group_capability]: Execution of motions should always start at the robot's current state. Ignoring the state supplied as start state in the motion planning request\n[move_group-3] [WARN] [1789980500.282935465] [moveit_move_group_capabilities_base.move_group_capability]: Execution of motions should always start at the robot's current state. Ignoring the state supplied as difference in the planning scene diff\n[move_group-3] [INFO] [1789980500.282947557] [moveit_ros.plan_execution]: Planning attempt 1 of at most 1\n[move_group-3] [INFO] [1789980500.296447424] [moveit.ompl_planning.model_based_planning_context]: Planner configuration 'arm' will use planner 'geometric::RRTConnect'. Additional configuration parameters will be set when the planner is constructed.\n[move_group-3] [INFO] [1789980500.939414479] [moveit.plugins.moveit_simple_controller_manager]: Returned 2 controllers in list\n[move_group-3] [INFO] [1789980500.939432461] [moveit.plugins.moveit_simple_controller_manager]: Returned 2 controllers in list\n[move_group-3] [INFO] [1789980500.939459952] [moveit_ros.trajectory_execution_manager]: Validating trajectory with allowed_start_tolerance 0.01\n[move_group-3] [WARN] [1789980500.969581835] [moveit_ros.planning_scene_monitor.planning_scene_monitor]: The complete state of the robot is not yet known.  Missing gripper\n[move_group-3] [INFO] [1789980500.969705191] [moveit_ros.trajectory_execution_manager]: Starting trajectory execution ...\n[move_group-3] [INFO] [1789980500.969782811] [moveit.plugins.moveit_simple_controller_manager]: Returned 2 controllers in list\n[move_group-3] [INFO] [1789980500.969831376] [moveit.plugins.moveit_simple_controller_manager]: Returned 2 controllers in list\n[move_group-3] [INFO] [1789980500.969976714] [moveit.simple_controller_manager.follow_joint_trajectory_controller_handle]: sending trajectory to arm_controller\n[ros2_control_node-1] [INFO] [1789980500.970480888] [arm_controller]: Received new action goal\n[ros2_control_node-1] [INFO] [1789980500.970564781] [arm_controller]: Accepted new action goal\n[move_group-3] [INFO] [1789980500.970769561] [moveit.simple_controller_manager.follow_joint_trajectory_controller_handle]: arm_controller started execution\n[move_group-3] [INFO] [1789980500.970800682] [moveit.simple_controller_manager.follow_joint_trajectory_controller_handle]: Goal request accepted!\n[move_group-3] [WARN] [1789980502.000723650] [moveit_ros.planning_scene_monitor.planning_scene_monitor]: The complete state of the robot is not yet known.  Missing gripper\n[ros2_control_node-1] [INFO] [1789980502.139457503] [arm_controller]: Goal reached, success!\n[move_group-3] [INFO] [1789980502.171469501] [moveit.simple_controller_manager.follow_joint_trajectory_controller_handle]: Controller 'arm_controller' successfully finished\n[move_group-3] [INFO] [1789980502.187478027] [moveit_ros.trajectory_execution_manager]: Completed trajectory execution with status SUCCEEDED ...\n[move_group-3] [INFO] [1789980502.189888308] [moveit_move_group_default_capabilities.move_action_capability]: Solution was found and executed.\n[move_group-3] [WARN] [1789980503.044420605] [moveit_ros.planning_scene_monitor.planning_scene_monitor]: The complete state of the robot is not yet known.  Missing gripper\n[move_group-3] [WARN] [1789980504.060519557] [moveit_ros.planning_scene_monitor.planning_scene_monitor]: The complete state of the robot is not yet known.  Missing gripper\n[move_group-3] [WARN] [1789980505.082887089] [moveit_ros.planning_scene_monitor.planning_scene_monitor]: The complete state of the robot is not yet known.  Missing gripper\n[move_group-3] [INFO] [1789980506.082567274] [moveit_move_group_default_capabilities.move_action_capability]: Received request\n[move_group-3] [INFO] [1789980506.083464236] [moveit_move_group_default_capabilities.move_action_capability]: executing..\n[move_group-3] [WARN] [1789980506.094305046] [moveit_ros.planning_scene_monitor.planning_scene_monitor]: The complete state of the robot is not yet known.  Missing gripper\n[move_group-3] [INFO] [1789980506.094439849] [moveit_move_group_default_capabilities.move_action_capability]: Combined planning and execution request received for MoveGroup action. Forwarding to planning and execution pipeline.\n[move_group-3] [WARN] [1789980506.094531634] [moveit_move_group_capabilities_base.move_group_capability]: Execution of motions should always start at the robot's current state. Ignoring the state supplied as start state in the motion planning request\n[move_group-3] [WARN] [1789980506.094559057] [moveit_move_group_capabilities_base.move_group_capability]: Execution of motions should always start at the robot's current state. Ignoring the state supplied as difference in the planning scene diff\n[move_group-3] [INFO] [1789980506.094581083] [moveit_ros.plan_execution]: Planning attempt 1 of at most 1\n[move_group-3] [INFO] [1789980506.112894850] [moveit.ompl_planning.model_based_planning_context]: Planner configuration 'arm' will use planner 'geometric::RRTConnect'. Additional configuration parameters will be set when the planner is constructed.\n[move_group-3] [INFO] [1789980506.563344166] [moveit.plugins.moveit_simple_controller_manager]: Returned 2 controllers in list\n[move_group-3] [INFO] [1789980506.563362638] [moveit.plugins.moveit_simple_controller_manager]: Returned 2 controllers in list\n[move_group-3] [INFO] [1789980506.563387806] [moveit_ros.trajectory_execution_manager]: Validating trajectory with allowed_start_tolerance 0.01\n[move_group-3] [INFO] [1789980506.563424744] [moveit_ros.trajectory_execution_manager]: Starting trajectory execution ...\n[move_group-3] [INFO] [1789980506.563452002] [moveit.plugins.moveit_simple_controller_manager]: Returned 2 controllers in list\n[move_group-3] [INFO] [1789980506.563465809] [moveit.plugins.moveit_simple_controller_manager]: Returned 2 controllers in list\n[move_group-3] [INFO] [1789980506.563526530] [moveit.simple_controller_manager.follow_joint_trajectory_controller_handle]: sending trajectory to arm_controller\n[ros2_control_node-1] [INFO] [1789980506.563644030] [arm_controller]: Received new action goal\n[ros2_control_node-1] [INFO] [1789980506.563667993] [arm_controller]: Accepted new action goal\n[move_group-3] [INFO] [1789980506.563727443] [moveit.simple_controller_manager.follow_joint_trajectory_controller_handle]: arm_controller started execution\n[move_group-3] [INFO] [1789980506.563734414] [moveit.simple_controller_manager.follow_joint_trajectory_controller_handle]: Goal request accepted!\n[ros2_control_node-1] [INFO] [1789980506.918061821] [arm_controller]: Goal reached, success!\n[move_group-3] [INFO] [1789980506.964033562] [moveit.simple_controller_manager.follow_joint_trajectory_controller_handle]: Controller 'arm_controller' successfully finished\n[move_group-3] [INFO] [1789980506.964483052] [moveit_ros.trajectory_execution_manager]: Completed trajectory execution with status SUCCEEDED ...\n[move_group-3] [INFO] [1789980506.973567083] [moveit_move_group_default_capabilities.move_action_capability]: Solution was found and executed.\n[move_group-3] [WARN] [1789980507.104327401] [moveit_ros.planning_scene_monitor.planning_scene_monitor]: The complete state of the robot is not yet known.  Missing gripper\n[move_group-3] [WARN] [1789980508.115543328] [moveit_ros.planning_scene_monitor.planning_scene_monitor]: The complete state of the robot is not yet known.  Missing gripper\n[move_group-3] [WARN] [1789980509.129786994] [moveit_ros.planning_scene_monitor.planning_scene_monitor]: The complete state of the robot is not yet known.  Missing gripper\n[move_group-3] [WARN] [1789980510.150586360] [moveit_ros.planning_scene_monitor.planning_scene_monitor]: The complete state of the robot is not yet known.  Missing gripper\n[move_group-3] [WARN] [1789980511.161497496] [moveit_ros.planning_scene_monitor.planning_scene_monitor]: The complete state of the robot is not yet known.  Missing gripper\n[move_group-3] [WARN] [1789980512.186829433] [moveit_ros.planning_scene_monitor.planning_scene_monitor]: The complete state of the robot is not yet known.  Missing gripper\n[move_group-3] [WARN] [1789980513.209887911] [moveit_ros.planning_scene_monitor.planning_scene_monitor]: The complete state of the robot is not yet known.  Missing gripper\n",
+  "net_tcp_listeners": [],
+  "p1a_prerequisite": {
+    "passed": true,
+    "path": "/home/mzictt/RoCo_Piper/artifacts/phase1/dds-multiprocess-gate.json",
+    "schema": "rocobrick-p1-dds-multiprocess-gate/v1"
+  },
+  "passed": true,
+  "phase": "R2",
+  "probe": {
+    "baseline": {
+      "gripper_joint1": 1.627e-06,
+      "gripper_joint2": -1.2e-08,
+      "joint1": -4.358e-06,
+      "joint2": 0.001759243,
+      "joint3": -2.4306e-05,
+      "joint4": 0.003630005,
+      "joint5": 0.000867926,
+      "joint6": 1.7256e-05
+    },
+    "baseline_settle_streak": 8,
+    "bounds": {
+      "fk_timeout_s": 10.0,
+      "goal_timeout_s": 90.0,
+      "readiness_timeout_s": 120.0,
+      "settle_stable_delta_max": 0.0005,
+      "settle_stable_samples": 8,
+      "settle_timeout_s": 60.0
+    },
+    "command_messages_total": 111,
+    "library": {
+      "contract": "rocobrick.moveit_contract",
+      "execution": "rocobrick.moveit_execution",
+      "executor": "rocobrick.ros_moveit_executor.RosMoveItExecutor",
+      "requests": "rocobrick.moveit_requests",
+      "runtime": "rocobrick.ros_moveit_runtime.RosMoveItRuntime"
+    },
+    "passed": true,
+    "phase": "R2",
+    "readiness": {
+      "passed": true,
+      "snapshot": {
+        "arm_action_ready": true,
+        "broadcaster_match": true,
+        "clock_increasing": true,
+        "compute_fk_ready": true,
+        "controllers_active": true,
+        "isaac_state_complete": true,
+        "joint_state_complete": true,
+        "move_group_action_ready": true
+      },
+      "waited_ok": true
+    },
+    "request": {
+      "compute_fk_service": "/compute_fk",
+      "contract_orientation_tolerance_rad": 0.03,
+      "contract_position_tolerance_m": 0.01,
+      "final_arm_error_max": 0.04,
+      "goal_orientation_tolerance_rad": 0.015,
+      "goal_position_tolerance_m": 0.005,
+      "gripper_drift_max": 0.01,
+      "outbound_deltas": {
+        "joint1": 0.1,
+        "joint4": 0.08
+      }
+    },
+    "schema": "rocobrick-r2-live-adapter-probe/v1",
+    "steps": {
+      "final_return": {
+        "command_messages": 27,
+        "final": {
+          "joint1": 0.005607808,
+          "joint2": 0.004380981,
+          "joint3": 4.54e-07,
+          "joint4": 0.004123086,
+          "joint5": 0.000375148,
+          "joint6": 0.009538079
+        },
+        "final_arm_error_max": 0.04,
+        "gripper_drift": 4.719e-06,
+        "gripper_drift_max": 0.01,
+        "is_success": true,
+        "label": "final_return",
+        "moveit_error_code": 1,
+        "passed": true,
+        "planned_waypoints": 40,
+        "status": "SUCCEEDED",
+        "within_adapter_contract": true
+      },
+      "link6_fk": {
+        "orientation_xyzw": [
+          0.001234071741,
+          0.676548019425,
+          0.001342413455,
+          0.73639626045
+        ],
+        "position": [
+          0.073250263,
+          -3.2e-08,
+          0.227397454
+        ],
+        "service": "/compute_fk",
+        "source_state": {
+          "gripper_joint1": 1.627e-06,
+          "gripper_joint2": -1.2e-08,
+          "joint1": -4.358e-06,
+          "joint2": 0.001759243,
+          "joint3": -2.4306e-05,
+          "joint4": 0.003630005,
+          "joint5": 0.000867926,
+          "joint6": 1.7256e-05
+        }
+      },
+      "link6_pose": {
+        "command_messages": 55,
+        "final": {
+          "orientation_error_rad": 0.009182721,
+          "position_error_m": 0.003966961
+        },
+        "is_success": true,
+        "label": "link6_pose",
+        "moveit_error_code": 1,
+        "orientation_tolerance_rad": 0.03,
+        "passed": true,
+        "planned_waypoints": 40,
+        "position_tolerance_m": 0.01,
+        "status": "SUCCEEDED",
+        "within_adapter_contract": true
+      },
+      "outbound_admission": {
+        "accepted": true,
+        "details": {
+          "chosen_deltas": {
+            "joint1": 0.1,
+            "joint4": 0.08
+          },
+          "margin": 0.03,
+          "target": {
+            "joint1": 0.09999564218751403,
+            "joint2": 0.001759242732077837,
+            "joint3": -2.430612403259147e-05,
+            "joint4": 0.0836300050560385,
+            "joint5": 0.0008679258171468973,
+            "joint6": 1.7256305000046268e-05
+          }
+        },
+        "reason": "ok"
+      },
+      "outbound_joint": {
+        "command_messages": 15,
+        "final": {
+          "joint1": 0.002658322,
+          "joint2": 0.008471928,
+          "joint3": 1.269e-06,
+          "joint4": 0.006902015,
+          "joint5": 0.003140278,
+          "joint6": 0.004195716
+        },
+        "final_arm_error_max": 0.04,
+        "gripper_drift": 1.8656e-05,
+        "gripper_drift_max": 0.01,
+        "is_success": true,
+        "label": "outbound_joint",
+        "moveit_error_code": 1,
+        "passed": true,
+        "planned_waypoints": 8,
+        "status": "SUCCEEDED",
+        "within_adapter_contract": true
+      },
+      "pose_admission": {
+        "accepted": true,
+        "details": {
+          "frame_id": "base_link",
+          "orientation_tolerance_rad": 0.015,
+          "position_tolerance_m": 0.005,
+          "tcp_status": "unresolved",
+          "tip_link": "link6"
+        },
+        "reason": "ok"
+      },
+      "pre_final_settle_streak": 8,
+      "pre_pose_settle_streak": 8,
+      "pre_return_settle_streak": 8,
+      "return_joint": {
+        "command_messages": 14,
+        "final": {
+          "joint1": 0.003701411,
+          "joint2": 0.008831503,
+          "joint3": 3.34e-07,
+          "joint4": 0.006552509,
+          "joint5": 0.000615361,
+          "joint6": 0.008405716
+        },
+        "final_arm_error_max": 0.04,
+        "gripper_drift": 1.8225e-05,
+        "gripper_drift_max": 0.01,
+        "is_success": true,
+        "label": "return_joint",
+        "moveit_error_code": 1,
+        "passed": true,
+        "planned_waypoints": 8,
+        "status": "SUCCEEDED",
+        "within_adapter_contract": true
+      }
+    },
+    "tip_link_frame": "base_link"
+  },
+  "probe_log_tail": "",
+  "profiles": {
+    "host_address": "10.198.61.26",
+    "host_port": 17650,
+    "profiles": {
+      "container": {
+        "initial_peers": [
+          [
+            "10.198.61.26",
+            17650
+          ]
+        ],
+        "listening_ports": [],
+        "participant_id": null,
+        "path": "/home/mzictt/RoCo_Piper/.runtime/dds/fastdds-container.xml",
+        "role": "container-client",
+        "sha256": "758ddfda286de89bcc72f2d85b23222f4c10a26c65683567073de66a7e8270b8"
+      },
+      "container-mesh": {
+        "initial_peers": [
+          [
+            "10.198.61.26",
+            17650
+          ]
+        ],
+        "listening_ports": [],
+        "local_spdp_multicast": [
+          "239.255.0.1",
+          25650
+        ],
+        "participant_id": null,
+        "path": "/home/mzictt/RoCo_Piper/.runtime/dds/fastdds-container-mesh.xml",
+        "role": "container-client-mesh",
+        "sha256": "1e08fdb081edd0f4f22448ee46abb112b4d9aaa92acfba7a29b41097686f3932"
+      },
+      "container-p1": {
+        "initial_peers": [
+          [
+            "10.198.61.26",
+            17650
+          ]
+        ],
+        "listening_ports": [],
+        "participant_id": 1,
+        "path": "/home/mzictt/RoCo_Piper/.runtime/dds/fastdds-container-p1.xml",
+        "role": "container-client",
+        "sha256": "990f7125ac763821cb31f257e35b4b9eeca3ab2a0803bb7b864f9c7f3b8d9f94"
+      },
+      "container-p2": {
+        "initial_peers": [
+          [
+            "10.198.61.26",
+            17650
+          ]
+        ],
+        "listening_ports": [],
+        "participant_id": 2,
+        "path": "/home/mzictt/RoCo_Piper/.runtime/dds/fastdds-container-p2.xml",
+        "role": "container-client",
+        "sha256": "f0e7ccbe9801d940f3b3b897424f441de5efd47b5bd93ab1f5284ab210c4b42d"
+      },
+      "container-p3": {
+        "initial_peers": [
+          [
+            "10.198.61.26",
+            17650
+          ]
+        ],
+        "listening_ports": [],
+        "participant_id": 3,
+        "path": "/home/mzictt/RoCo_Piper/.runtime/dds/fastdds-container-p3.xml",
+        "role": "container-client",
+        "sha256": "6061a6ab90137a4a4f9e103237badae587a010599d496da409066fc060399646"
+      },
+      "container-p4": {
+        "initial_peers": [
+          [
+            "10.198.61.26",
+            17650
+          ]
+        ],
+        "listening_ports": [],
+        "participant_id": 4,
+        "path": "/home/mzictt/RoCo_Piper/.runtime/dds/fastdds-container-p4.xml",
+        "role": "container-client",
+        "sha256": "13635917ed7cc13b877a7e3d80396b50cc6067981becfbb2edcb585d1e228833"
+      },
+      "host": {
+        "initial_peers": [],
+        "listening_ports": [
+          17650
+        ],
+        "participant_id": 0,
+        "path": "/home/mzictt/RoCo_Piper/.runtime/dds/fastdds-host.xml",
+        "role": "host-listener",
+        "sha256": "9cbb704710bd2c80845492cadc259086634a06a3dc50524684588a1cba6c3785"
+      }
+    },
+    "roles": {
+      "container-client": "client-only TCPv4 (no listening_ports); discovers the host via initialPeersList 10.198.61.26:17650",
+      "container-client-mesh": "client-only TCPv4 to the host listener PLUS a netns-local UDPv4 transport and SPDP multicast peer 239.255.0.1:25650 so container-stack processes discover each other inside the container; still no TCP listening port",
+      "host-listener": "owns the only boundary listening endpoint, fixed TCP 17650; accepts container clients"
+    },
+    "schema": "rocobrick-dds-profiles/v2",
+    "topology": "single-host-listener-17650-client-only-containers",
+    "transport": "TCPv4"
+  },
+  "readiness_marker_seen": true,
+  "schema": "rocobrick-r2-live-adapter-smoke/v1"
+}

@@ -22,9 +22,10 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 ARTIFACT_PATH = REPO_ROOT / "artifacts" / "scene" / "example1-scene-manifest.json"
 PLAN_PATH = (
     REPO_ROOT
-    / "runs"
-    / "example1-compound-pick-20260915T130000Z"
-    / "generated-plan.json"
+    / "tests"
+    / "fixtures"
+    / "assembly_plans"
+    / "example1-compound-pick.json"
 )
 
 EXPECTED_OBJECTS = (

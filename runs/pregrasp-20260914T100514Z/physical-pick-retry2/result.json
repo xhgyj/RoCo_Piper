@@ -1,6 +1,0 @@
-{
-  "success": false,
-  "stage": "STARTUP",
-  "reason": "ValueError",
-  "message": "finger measurements do not satisfy the official mimic relation"
-}

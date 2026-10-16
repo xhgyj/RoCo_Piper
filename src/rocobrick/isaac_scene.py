@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 import os
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
-from math import cos, sin
+from math import atan2, cos, hypot, inf, isfinite, sin
 from pathlib import Path
 
 from rocobrick.bricksim_topology import BrickSimTopologyBundle
@@ -59,9 +59,7 @@ def _create_feeding_platforms(
         cube.AddTranslateOp().Set(
             Gf.Vec3d(*platform.center_xy_m, platform.top_z_m - platform.thickness_m / 2)
         )
-        cube.AddScaleOp().Set(
-            Gf.Vec3d(*platform.size_xy_m, platform.thickness_m)
-        )
+        cube.AddScaleOp().Set(Gf.Vec3d(*platform.size_xy_m, platform.thickness_m))
         cube.CreateDisplayColorAttr([Gf.Vec3f(0.35, 0.45, 0.38)])
         UsdPhysics.CollisionAPI.Apply(cube.GetPrim()).CreateCollisionEnabledAttr(True)
 
@@ -75,6 +73,118 @@ class IsaacLoadedScene:
     parts: Mapping[str, LoadedPart]
     topology_paths: Mapping[int, str]
     collision_filter_pairs: tuple[tuple[str, str], ...] = ()
+    disabled_camera_collisions: tuple[str, ...] = ()
+    hidden_camera_visuals: tuple[str, ...] = ()
+
+
+# The vendor wrist-camera assembly (the mid stand and the d435 body) is a
+# safety-margin hazard, not a task sensor: no skill, observation or gate in
+# this repository consumes wrist-camera images, and in the simulator the stand
+# is collided as the convex hull of a 97 x 48 x 74 mm bracket that fills the
+# narrow space over a placement.  Measured on task-c-top-offset12 (2026-10-14):
+# the support pre-phase staged the two wrists with the stand interpenetrating
+# the peer's finger by 1.87 mm, piper_0's arm controller then aborted on goal
+# tolerance, and the collision-free-vs-simulator disagreement came entirely
+# from hulling that bracket; with these colliders disabled the same station
+# clears by more than 25 mm.  The vendor USD stays byte-identical (its SHA-256
+# is bound by the TCP authorization artifact), so the collision is disabled
+# here, in our own scene bootstrap, and recorded in the session evidence.
+WRIST_CAMERA_COLLISION_LINKS = ("camera_stand_link", "camera_link")
+
+
+def _disable_camera_collisions(
+    stage: object, *, robot: RobotSpawnSpec
+) -> tuple[str, ...]:
+    """Disable the wrist-camera colliders of one loaded robot.
+
+    Every collision prim under the configured camera links is switched off
+    through ``UsdPhysics.CollisionAPI.collisionEnabled``.  The visual geometry
+    is hidden as well by :func:`_hide_camera_visuals`, so the headed viewport
+    shows the machine the physics models instead of a camera that can no
+    longer collide.
+
+    The vendor asset instances each link's ``collisions`` subtree, and instance
+    proxies neither report their applied schemas nor accept authoring -- a plain
+    walk finds nothing and the colliders keep colliding.  The subtree is
+    therefore materialized (``SetInstanceable(False)``) first, exactly like
+    ``materialize_robot_visuals`` does for the visuals, and every edit lands in
+    the session layer so the vendor USD stays byte-identical.
+
+    A link that carries no collision prim is a contract inconsistency and fails
+    the bootstrap closed.
+
+    Returns:
+        The disabled collision prim paths, in evidence order.
+    """
+    from pxr import Usd, UsdPhysics
+
+    candidates: list[tuple[str, object]] = []
+    collider_paths: list[str] = []
+    for link in WRIST_CAMERA_COLLISION_LINKS:
+        link_prim = stage.GetPrimAtPath(f"{robot.prim_path}/{link}")
+        if not link_prim.IsValid():
+            # A vendor variant without the wrist camera has nothing to disable.
+            continue
+        link_colliders = [
+            str(prim.GetPath())
+            for prim in Usd.PrimRange(link_prim, Usd.TraverseInstanceProxies())
+            if prim.HasAPI(UsdPhysics.CollisionAPI)
+        ]
+        if not link_colliders:
+            raise SceneBootstrapError(
+                f"wrist camera link {link_prim.GetPath()} carries no collider "
+                "to disable"
+            )
+        collider_paths.extend(link_colliders)
+        collisions = link_prim.GetChild("collisions")
+        if collisions.IsValid() and collisions.IsInstance():
+            candidates.append((str(link_prim.GetPath()), collisions))
+    if not candidates and not collider_paths:
+        return ()
+    with Usd.EditContext(stage, stage.GetSessionLayer()):
+        for link_path, collisions in candidates:
+            collisions.SetInstanceable(False)
+            print(
+                f"[rocobrick] materialized collision instance for {link_path}",
+                flush=True,
+            )
+        for path in collider_paths:
+            prim = stage.GetPrimAtPath(path)
+            if not prim.IsValid() or not prim.HasAPI(UsdPhysics.CollisionAPI):
+                raise SceneBootstrapError(
+                    f"wrist camera collider {path} vanished after materializing "
+                    "its collision subtree"
+                )
+            UsdPhysics.CollisionAPI(prim).CreateCollisionEnabledAttr(False)
+    return tuple(collider_paths)
+
+
+def _hide_camera_visuals(stage: object, *, robot: RobotSpawnSpec) -> tuple[str, ...]:
+    """Hide the wrist-camera visual geometry of one loaded robot.
+
+    The camera colliders are switched off (see :func:`_disable_camera_collisions`),
+    so the camera must not stay drawn either: the headed viewport is the review
+    surface for every run, and a camera that is still rendered reads as a part
+    that still collides.  Visibility is authored on the link prim and inherits
+    down to its visual subtree; the edit lands in the session layer, so the
+    vendor USD stays byte-identical and one visibility reset restores the view.
+
+    Returns:
+        The hidden link prim paths, in evidence order.
+    """
+    from pxr import Usd, UsdGeom
+
+    targets: list[object] = []
+    for link in WRIST_CAMERA_COLLISION_LINKS:
+        prim = stage.GetPrimAtPath(f"{robot.prim_path}/{link}")
+        if prim.IsValid():
+            targets.append(prim)
+    if not targets:
+        return ()
+    with Usd.EditContext(stage, stage.GetSessionLayer()):
+        for prim in targets:
+            UsdGeom.Imageable(prim).MakeInvisible()
+    return tuple(str(prim.GetPath()) for prim in targets)
 
 
 def _apply_collision_filters(
@@ -123,8 +233,133 @@ def _apply_collision_filters(
     return tuple(pairs)
 
 
-def _set_initial_viewport_camera(stage: object) -> None:
-    """Frame the pick and handover workspace in the headed observer viewport."""
+# Observer framing constants. The camera is not a calibrated robot sensor, so
+# the numbers only decide how much of the loaded scene stays in frame.
+_OBSERVER_FOCAL_LENGTH_MM = 18.0
+_OBSERVER_HORIZONTAL_APERTURE_MM = 20.955
+_OBSERVER_ASPECT = 720.0 / 1280.0
+_OBSERVER_DIRECTION = (0.0, 0.83, 0.55)
+_OBSERVER_FRAME_HEIGHT_M = 0.55
+_OBSERVER_FIT_MARGIN = 1.12
+# Zero disables camera-side depth of field, independently of render settings.
+_OBSERVER_FSTOP = 0.0
+# Fallback pose for a stage whose focus prims cannot be measured.
+_OBSERVER_FALLBACK = ((0.0, 0.60, 0.42), (0.0, -0.10, 0.16))
+# Vendor assets embed a large reference plane: the piper USD's ``agx_arm``
+# root measures 50 x 50 m, and framing it would push the observer tens of
+# metres away from the workspace. Bounds wider than this are scene artefacts,
+# so the observer uses the layout's own points for those participants.
+_OBSERVER_MAX_FOCUS_EXTENT_M = 2.0
+
+
+def _observer_focus_bounds(
+    stage: object,
+    paths: Sequence[str],
+    points: Sequence[tuple[float, float, float]] = (),
+) -> (
+    tuple[tuple[float, float, float], tuple[float, float, float], tuple[str, ...]]
+    | None
+):
+    """Measure the world-space bounds of what the observer must frame.
+
+    Args:
+        stage: Open USD stage.
+        paths: Prim paths whose world bounds describe the workspace.
+        points: Explicit world points (robot base poses) that join the box
+            even when no prim of that participant can be measured.
+
+    Returns:
+        Lower corner, upper corner and the skipped artefact prim paths, or
+        None when nothing is measurable.
+    """
+    from pxr import Usd, UsdGeom
+
+    cache = UsdGeom.BBoxCache(Usd.TimeCode.Default(), [UsdGeom.Tokens.default_])
+    lower = [inf, inf, inf]
+    upper = [-inf, -inf, -inf]
+    skipped: list[str] = []
+    for path in paths:
+        prim = stage.GetPrimAtPath(path)
+        if not prim.IsValid():
+            continue
+        aligned = cache.ComputeWorldBound(prim).ComputeAlignedRange()
+        if aligned.IsEmpty():
+            continue
+        minimum = aligned.GetMin()
+        maximum = aligned.GetMax()
+        extent = max(float(maximum[axis]) - float(minimum[axis]) for axis in range(3))
+        if extent > _OBSERVER_MAX_FOCUS_EXTENT_M:
+            skipped.append(path)
+            continue
+        for axis in range(3):
+            lower[axis] = min(lower[axis], float(minimum[axis]))
+            upper[axis] = max(upper[axis], float(maximum[axis]))
+    for point in points:
+        for axis in range(3):
+            lower[axis] = min(lower[axis], float(point[axis]))
+            upper[axis] = max(upper[axis], float(point[axis]))
+    if not all(isfinite(value) for value in (*lower, *upper)):
+        return None
+    return (
+        (lower[0], lower[1], lower[2]),
+        (upper[0], upper[1], upper[2]),
+        tuple(skipped),
+    )
+
+
+def _observer_pose(
+    lower: tuple[float, float, float],
+    upper: tuple[float, float, float],
+    *,
+    full_height: bool = False,
+) -> tuple[tuple[float, float, float], tuple[float, float, float], float]:
+    """Place the observer so the measured bounds fit the viewport.
+
+    The frame is fitted on the scene footprint plus a bounded height band:
+    a robot arm held high may leave the top of the frame, the assembly,
+    feeder and storage area may not.
+
+    Returns:
+        Camera position, camera target and their distance in metres.
+    """
+    width = upper[0] - lower[0]
+    depth = upper[1] - lower[1]
+    height = upper[2] - lower[2]
+    if not full_height:
+        height = min(height, _OBSERVER_FRAME_HEIGHT_M)
+    target = (
+        (lower[0] + upper[0]) / 2.0,
+        (lower[1] + upper[1]) / 2.0,
+        lower[2] + height / 2.0,
+    )
+    tan_horizontal = 0.5 * _OBSERVER_HORIZONTAL_APERTURE_MM / _OBSERVER_FOCAL_LENGTH_MM
+    tan_vertical = tan_horizontal * _OBSERVER_ASPECT
+    elevation = atan2(_OBSERVER_DIRECTION[2], _OBSERVER_DIRECTION[1])
+    horizontal_half = 0.5 * hypot(width, depth)
+    vertical_half = 0.5 * height * cos(elevation) + 0.5 * depth * sin(elevation)
+    distance = _OBSERVER_FIT_MARGIN * max(
+        horizontal_half / tan_horizontal, vertical_half / tan_vertical
+    )
+    norm = hypot(*_OBSERVER_DIRECTION)
+    position = tuple(
+        target[axis] + distance * _OBSERVER_DIRECTION[axis] / norm for axis in range(3)
+    )
+    return position, target, distance
+
+
+def _set_initial_viewport_camera(
+    stage: object,
+    focus_paths: Sequence[str] = (),
+    focus_points: Sequence[tuple[float, float, float]] = (),
+) -> None:
+    """Frame the pick and handover workspace in the headed observer viewport.
+
+    The observer pose is fitted to the measured world bounds of the feeder
+    platforms and loaded parts, plus the robot base points, so a scene layout
+    change moves the observer with it. The previously fixed pose left the
+    scaled2 observer looking at its own foreground geometry (live evidence,
+    task-c-top-offset13s-headed 2026-10-14).
+    """
     import os
 
     if os.environ.get("ROCOBRICK_HEADED") != "1":
@@ -133,15 +368,60 @@ def _set_initial_viewport_camera(stage: object) -> None:
     from omni.kit.viewport.utility.camera_state import ViewportCameraState
     from pxr import Gf, Sdf, UsdGeom
 
+    # The observer records the workspace with a fixed camera on a simulator
+    # that advances faster than real time, so the cinematic post effects only
+    # smear the recording. Suppress them here as well as on the Kit command
+    # line: the renderer writes its own defaults while it initializes, which
+    # overwrote the launch-time values (live evidence,
+    # task-c-top-offset13v-headed 2026-10-14).
+    from carb.settings import get_settings
+
+    settings = get_settings()
+    settings.set_bool("/rtx/post/dof/enabled", False)
+    settings.set_bool("/rtx/post/motionblur/enabled", False)
+
     camera_path = "/World/RoCoBrickInitialCamera"
     camera = UsdGeom.Camera.Define(stage, camera_path)
-    # This is an observer camera, not a calibrated robot sensor. Frame the
-    # table and raised handover area more tightly than the wide overview.
-    position = (0.0, 0.60, 0.42)
-    target = (0.0, -0.10, 0.16)
-    focal_length_mm = 28.0
+    bounds = _observer_focus_bounds(stage, focus_paths, focus_points)
+    if bounds is None:
+        position, target = _OBSERVER_FALLBACK
+        focus_distance_m = float(
+            hypot(
+                position[0] - target[0],
+                position[1] - target[1],
+                position[2] - target[2],
+            )
+        )
+        skipped: tuple[str, ...] = ()
+    else:
+        lower, upper, skipped = bounds
+        overview = os.environ.get("ROCOBRICK_OBSERVER_OVERVIEW") == "1"
+        if overview:
+            # Include a conservative motion envelope about each robot base;
+            # vendor root bounds contain an unrelated 50 m reference plane.
+            for point in focus_points:
+                lower = tuple(
+                    min(lower[i], point[i] - (0.65 if i < 2 else 0.0)) for i in range(3)
+                )
+                upper = tuple(
+                    max(upper[i], point[i] + (0.65 if i < 2 else 0.85))
+                    for i in range(3)
+                )
+        position, target, focus_distance_m = _observer_pose(
+            lower, upper, full_height=overview
+        )
+    # Pull back modestly, without changing the viewing direction or target.
+    # The larger overview mode already carries a conservative motion envelope.
+    if os.environ.get("ROCOBRICK_OBSERVER_PULLBACK") == "1":
+        position = tuple(target[i] + 1.25 * (position[i] - target[i]) for i in range(3))
+        focus_distance_m *= 1.25
+    focal_length_mm = _OBSERVER_FOCAL_LENGTH_MM
     camera.CreateFocalLengthAttr(focal_length_mm)
-    camera.CreateFocusDistanceAttr(0.75)
+    camera.CreateFocusDistanceAttr(focus_distance_m)
+    camera.CreateFStopAttr(_OBSERVER_FSTOP)
+    # USD's default near plane is too distant for a metre-scale workspace.
+    # Keep nearby platforms/tools from being sliced by the view frustum.
+    camera.CreateClippingRangeAttr((0.01, 100.0))
     # A newly defined USD camera has no Kit center-of-interest value.  The
     # Isaac viewport camera-state helper assumes this attribute exists when it
     # rotates/moves the camera; seed it before using that helper.
@@ -153,13 +433,15 @@ def _set_initial_viewport_camera(stage: object) -> None:
     if viewport is None:
         raise RuntimeError("headed Isaac run has no active viewport")
     viewport.camera_path = camera_path
+    viewport.resolution = (1920, 1080)
     camera_state = ViewportCameraState(camera_path=camera_path, viewport=viewport)
     camera_state.set_position_world(Gf.Vec3d(*position), True)
     camera_state.set_target_world(Gf.Vec3d(*target), True)
     print(
         "[rocobrick] initial viewport camera configured "
         f"path={camera_path} position={position} target={target} "
-        f"focal_length_mm={focal_length_mm}",
+        f"focal_length_mm={focal_length_mm} focus_distance_m={focus_distance_m} "
+        f"skipped_focus_prims={list(skipped)}",
         flush=True,
     )
 
@@ -173,7 +455,9 @@ def _pose(prim_path: str, frame_id: str) -> Pose:
     from isaacsim.core.prims import SingleXFormPrim
 
     position, orientation_wxyz = SingleXFormPrim(prim_path=prim_path).get_world_pose()
-    return Pose(frame_id, tuple(float(value) for value in position), _xyzw(orientation_wxyz))
+    return Pose(
+        frame_id, tuple(float(value) for value in position), _xyzw(orientation_wxyz)
+    )
 
 
 async def load_verified_scene(
@@ -216,20 +500,29 @@ async def load_verified_scene(
     stage = get_current_stage()
     workspace = stage.GetPrimAtPath(config.workspace_path)
     if not workspace.IsValid():
-        raise SceneBootstrapError(f"workspace prim does not exist: {config.workspace_path}")
+        raise SceneBootstrapError(
+            f"workspace prim does not exist: {config.workspace_path}"
+        )
     workspace.GetAttribute("xformOp:scale").Set(Gf.Vec3d(*config.workspace_scale))
-    workspace.GetAttribute("xformOp:translate").Set(Gf.Vec3d(*config.workspace_position_m))
-    workspace.GetAttribute("xformOp:orient").Set(Gf.Quatd(*config.workspace_orientation_wxyz))
+    workspace.GetAttribute("xformOp:translate").Set(
+        Gf.Vec3d(*config.workspace_position_m)
+    )
+    workspace.GetAttribute("xformOp:orient").Set(
+        Gf.Quatd(*config.workspace_orientation_wxyz)
+    )
 
     initial_paths, initial_connections = import_lego(
-        json=dict(topology.initial), env_id=-1,
+        json=dict(topology.initial),
+        env_id=-1,
         ref_pos=config.baseplate_position_m,
         ref_rot=config.baseplate_orientation_wxyz,
     )
     expected_initial_ids = {part["id"] for part in topology.initial["parts"]}
     if set(initial_paths) != expected_initial_ids:
         raise SceneBootstrapError("BrickSim did not import every initial topology part")
-    expected_connection_ids = {connection["id"] for connection in topology.initial["connections"]}
+    expected_connection_ids = {
+        connection["id"] for connection in topology.initial["connections"]
+    }
     if set(initial_connections) != expected_connection_ids:
         raise SceneBootstrapError("BrickSim did not import every initial connection")
 
@@ -254,10 +547,7 @@ async def load_verified_scene(
                 raise SceneBootstrapError(
                     f"allocator target is not a loose loaded part: {instance_id}"
                 )
-            if (
-                not isinstance(position_xy, (tuple, list))
-                or len(position_xy) != 2
-            ):
+            if not isinstance(position_xy, (tuple, list)) or len(position_xy) != 2:
                 raise SceneBootstrapError(
                     f"allocator XY position is invalid for {instance_id}"
                 )
@@ -266,13 +556,14 @@ async def load_verified_scene(
                 (
                     item.get("payload", {})
                     for item in topology.goal.get("parts", [])
-                    if isinstance(item, Mapping)
-                    and item.get("id") == topology_id
+                    if isinstance(item, Mapping) and item.get("id") == topology_id
                 ),
                 {},
             )
             height_units = part_payload.get("H", 3)
-            if isinstance(height_units, bool) or not isinstance(height_units, (int, float)):
+            if isinstance(height_units, bool) or not isinstance(
+                height_units, (int, float)
+            ):
                 height_units = 3
             # BrickSim H counts 3.2 mm layers; the stud adds 1.7 mm.
             height_m = float(height_units) * 0.0032 + 0.0017
@@ -288,9 +579,7 @@ async def load_verified_scene(
                         support_z + height_m / 2.0,
                     )
                 ),
-                orientation=np.asarray(
-                    (cos(yaw / 2.0), 0.0, 0.0, sin(yaw / 2.0))
-                ),
+                orientation=np.asarray((cos(yaw / 2.0), 0.0, 0.0, sin(yaw / 2.0))),
             )
 
     articulations: dict[str, object] = {}
@@ -313,16 +602,27 @@ async def load_verified_scene(
 
             repaired = materialize_robot_visuals(stage, spec.prim_path)
             print(
-                f"[rocobrick] materialized robot visual instances: {repaired}", flush=True
+                f"[rocobrick] materialized robot visual instances: {repaired}",
+                flush=True,
             )
         articulation = SingleArticulation(prim_path=spec.prim_path, name=robot_id)
         world.scene.add(articulation)
         articulations[robot_id] = articulation
         for sensor_path in spec.sensor_prim_paths:
             if not sensor_path.startswith(spec.prim_path + "/"):
-                raise SceneBootstrapError(f"sensor for {robot_id} is outside its robot prim")
+                raise SceneBootstrapError(
+                    f"sensor for {robot_id} is outside its robot prim"
+                )
             if not stage.GetPrimAtPath(sensor_path).IsValid():
-                raise SceneBootstrapError(f"configured sensor missing for {robot_id}: {sensor_path}")
+                raise SceneBootstrapError(
+                    f"configured sensor missing for {robot_id}: {sensor_path}"
+                )
+
+    disabled_camera_collisions: list[str] = []
+    hidden_camera_visuals: list[str] = []
+    for robot_id, spec in robots.items():
+        disabled_camera_collisions.extend(_disable_camera_collisions(stage, robot=spec))
+        hidden_camera_visuals.extend(_hide_camera_visuals(stage, robot=spec))
 
     collision_filter_pairs: tuple[tuple[str, str], ...] = ()
     if config.collision_filter_instance_ids:
@@ -350,7 +650,18 @@ async def load_verified_scene(
 
     await world.reset_async()
     await world.play_async()
-    _set_initial_viewport_camera(stage)
+    _set_initial_viewport_camera(
+        stage,
+        (
+            *(platform.prim_path for platform in config.feeding_platforms),
+            *initial_paths.values(),
+            *loose_paths.values(),
+        ),
+        tuple(
+            tuple(float(value) for value in spec.base_pose.position)
+            for spec in robots.values()
+        ),
+    )
     for _ in range(max(2, config.physics_hz // 10)):
         await app.next_update_async()
 
@@ -360,7 +671,9 @@ async def load_verified_scene(
         configured = robots[robot_id].arm_joint_names
         missing = [name for name in configured if name not in actual_names]
         if missing:
-            raise SceneBootstrapError(f"{robot_id} missing joints after initialization: {missing}")
+            raise SceneBootstrapError(
+                f"{robot_id} missing joints after initialization: {missing}"
+            )
         raw = articulation.get_joint_positions()
         values = tuple(float(raw[actual_names.index(name)]) for name in configured)
         if not all(np.isfinite(values)):
@@ -386,6 +699,13 @@ async def load_verified_scene(
                 f"initial connection missing: {connection['stud_id']} -> {connection['hole_id']}"
             )
     return IsaacLoadedScene(
-        app, world, articulations, measured_robots, parts, topology_paths,
+        app,
+        world,
+        articulations,
+        measured_robots,
+        parts,
+        topology_paths,
         collision_filter_pairs,
+        tuple(disabled_camera_collisions),
+        tuple(hidden_camera_visuals),
     )

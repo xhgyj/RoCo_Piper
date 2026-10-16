@@ -1,0 +1,184 @@
+{
+  "artifact": "isaac-sim-5.1-runtime",
+  "phase": "P0.2",
+  "date_collected": "2026-09-20",
+  "image": {
+    "registry": "nvcr.io",
+    "repository": "nvidia/isaac-sim",
+    "tag_verified": "5.1.0",
+    "reference": "nvcr.io/nvidia/isaac-sim:5.1.0",
+    "digest": "not_declared",
+    "digest_reason": "Declaring a content digest requires NGC authentication, and the image was not pulled during P0.2; no digest was verified, so none is fabricated here.",
+    "signed_tag": true,
+    "size_compressed_gb": 9.9,
+    "multiarch": {
+      "supported": true,
+      "platforms": ["amd64", "arm64"],
+      "note": "The Isaac Sim container now supports multi-arch. The same tag can be run on Linux x86_64 and aarch64 systems."
+    },
+    "pulled": false,
+    "release_status": {
+      "supported": false,
+      "banner": "Unsupported release: Isaac Sim 5.1.0 is no longer supported. Bug fixes and new features are delivered only in newer releases.",
+      "newer_release_available": true
+    }
+  },
+  "eula": {
+    "accept_env": "ACCEPT_EULA",
+    "accept_value": "Y",
+    "mandatory": true,
+    "license_name": "NVIDIA Isaac Sim Additional Software and Materials License",
+    "redistribution_allowed": false,
+    "internal_use_allowed": true,
+    "privacy_consent": {
+      "env": "PRIVACY_CONSENT",
+      "required": false,
+      "note": "Shown in the official docker run example but optional; separate from the mandatory EULA acceptance."
+    },
+    "purpose_restriction": "License covers install and use of the Software in systems with NVIDIA GPUs; selling, renting, sublicensing, transferring, distributing, or otherwise making the Software available to others is prohibited."
+  },
+  "host_requirements": {
+    "os": ["Ubuntu 22.04", "Ubuntu 24.04"],
+    "os_note": "The Isaac Sim container is only supported on Linux.",
+    "driver_tested_linux": "580.65.06",
+    "driver_note": "Tested Linux driver version listed across the Minimum/Good/Ideal tiers (Windows tested: 580.88).",
+    "gpu_recommended": "GeForce RTX 4080",
+    "gpu_vram_min_gb": 16,
+    "gpu_rt_cores_required": true,
+    "gpu_unsupported": ["A100", "H100"],
+    "gpu_unsupported_quote": "GPUs without RT Cores (A100, H100) are not supported.",
+    "ram_gb": 32,
+    "storage_gb": 50,
+    "storage_type": "SSD",
+    "toolkit": "latest",
+    "internet_note": "Internet connection required for online assets and some extensions."
+  },
+  "docker_run": {
+    "image_ref": "nvcr.io/nvidia/isaac-sim:5.1.0",
+    "entrypoint": "bash",
+    "gpus": "all",
+    "network": "host",
+    "user": "1234:1234",
+    "rootless": true,
+    "rootless_quote": "The Isaac Sim container now runs as a rootless user.",
+    "environment": {
+      "ACCEPT_EULA": "Y",
+      "PRIVACY_CONSENT": "Y"
+    },
+    "cache_mounts": [
+      "~/docker/isaac-sim/cache/main:/isaac-sim/.cache:rw",
+      "~/docker/isaac-sim/cache/computecache:/isaac-sim/.nv/ComputeCache:rw",
+      "~/docker/isaac-sim/logs:/isaac-sim/.nvidia-omniverse/logs:rw",
+      "~/docker/isaac-sim/config:/isaac-sim/.nvidia-omniverse/config:rw",
+      "~/docker/isaac-sim/data:/isaac-sim/.local/share/ov/data:rw",
+      "~/docker/isaac-sim/pkg:/isaac-sim/.local/share/ov/pkg:rw"
+    ],
+    "shm_size": "not_documented",
+    "gui": {
+      "recommended": false,
+      "quote": "Running Isaac Sim with GUI in the container is generally not recommended.",
+      "headless_note": "The container supports running Python apps and standalone examples in headless mode only."
+    }
+  },
+  "ros2": {
+    "bridge_extension": "isaacsim.ros2.bridge",
+    "distros_supported": ["Humble", "Jazzy"],
+    "distro_note": "Humble is recommended on Ubuntu 22.04 (and Windows 10/11 via WSL2); Jazzy is recommended on Ubuntu 24.04.",
+    "python": "3.11 only",
+    "python_quote": "Isaac Sim is compatible with Python 3.11 only.",
+    "dds_default": "Fast DDS (rmw_fastrtps_cpp)",
+    "dds_alternative": "Cyclone DDS (rmw_cyclonedds_cpp)",
+    "dds_alternative_note": "Cyclone DDS is supported on Linux only; it is not supported on Windows (WSL2).",
+    "env": {
+      "ROS_DISTRO": "Used to determine whether ROS 2 is sourced and which distro to use.",
+      "RMW_IMPLEMENTATION": "Set before launch, e.g. rmw_fastrtps_cpp (default) or rmw_cyclonedds_cpp (alternative).",
+      "LD_LIBRARY_PATH": "Append exts/isaacsim.ros2.bridge/<distro>/lib; can only be set once per terminal.",
+      "FASTRTPS_DEFAULT_PROFILES_FILE": "Multi-machine Fast DDS requires a fastdds.xml profile using UDP transport."
+    },
+    "moveit_tutorial": {
+      "path": "../ros2_tutorials/tutorial_ros2_moveit.html",
+      "url": "https://docs.isaacsim.omniverse.nvidia.com/5.1.0/ros2_tutorials/tutorial_ros2_moveit.html",
+      "package": "isaac_moveit",
+      "package_note": "Contains the launch files and parameters to run Isaac Sim with the MoveIt2 stack."
+    }
+  },
+  "headless": {
+    "run_script": "./runheadless.sh",
+    "run_flag": "-v",
+    "run_flag_note": "-v shows additional logs while the shader cache is being warmed up.",
+    "readiness_marker": "Isaac Sim Full Streaming App is loaded.",
+    "compatibility_check": {
+      "script": "./isaac-sim.compatibility_check.sh",
+      "args": "--/app/quitAfter=10 --no-window",
+      "marker": "System checking result: PASSED"
+    },
+    "plain_headless_readiness": "not_documented",
+    "plain_headless_readiness_reason": "No readiness output is documented for a plain headless run without ./runheadless.sh."
+  },
+  "host_facts": {
+    "collected": "2026-09-20",
+    "method": "read-only inspection of this workstation",
+    "os_release": "Ubuntu 22.04.5",
+    "kernel": "6.8.0-136-generic",
+    "arch": "x86_64",
+    "cpu_logical": 32,
+    "ram_gib": 125.5,
+    "gpu_name": "RTX 4090 D",
+    "gpu_vram_mib": 24564,
+    "nvidia_driver": "580.178.04",
+    "cuda_version": "13.0",
+    "docker_version": "29.6.2",
+    "docker_mode": "rootless",
+    "nvidia_ctk_version": "1.20.0",
+    "nvidia_runtime_present": true,
+    "cdi_present": true,
+    "docker_compose_available": false,
+    "isaac_sim_images_local": 0,
+    "home_free_gb": 164
+  },
+  "gaps": [
+    {
+      "id": "compose_missing",
+      "detail": "docker compose is not available on the host and compose.yaml defines no isaac-sim service; container orchestration for Isaac Sim is still missing."
+    },
+    {
+      "id": "digest_undeclared_image_not_pulled",
+      "detail": "The verified tag's digest is not_declared because NGC requires authentication and the image has not been pulled on this host; content pinning is impossible at this phase."
+    },
+    {
+      "id": "rootless_gpu_unvalidated",
+      "detail": "Docker 29.6.2 runs rootless with the nvidia runtime and CDI present, but a GPU-in-container run has not been validated because P0.2 forbids starting containers."
+    },
+    {
+      "id": "eula_compose_pending",
+      "detail": "Wiring the mandatory ACCEPT_EULA=Y into a compose service is pending; no compose file currently passes the EULA flag."
+    },
+    {
+      "id": "plain_headless_readiness_unknown",
+      "detail": "No readiness marker is documented for a plain headless container run without ./runheadless.sh; how to detect readiness in that mode is unknown."
+    },
+    {
+      "id": "shm_size_unknown",
+      "detail": "The container install page documents no --shm-size requirement; the shared memory needed by the container is unknown."
+    },
+    {
+      "id": "dds_unvalidated",
+      "detail": "Default Fast DDS versus alternative Cyclone DDS has not been validated on this host/network; the RMW_IMPLEMENTATION choice is unknown."
+    },
+    {
+      "id": "eol_decision_pending",
+      "detail": "Isaac Sim 5.1.0 is marked unsupported by its own docs banner while the repo pins isaacsim==5.1.0; the stay-on-5.1 versus upgrade decision is pending."
+    },
+    {
+      "id": "assets_internet_unknown",
+      "detail": "Reachability of online assets and extensions from this host is unverified; the requirements page states an internet connection is required for online assets."
+    }
+  ],
+  "sources": {
+    "container_install": "https://docs.isaacsim.omniverse.nvidia.com/5.1.0/installation/install_container.html",
+    "requirements": "https://docs.isaacsim.omniverse.nvidia.com/5.1.0/installation/requirements.html",
+    "ros_install": "https://docs.isaacsim.omniverse.nvidia.com/5.1.0/installation/install_ros.html",
+    "license_additional": "https://docs.isaacsim.omniverse.nvidia.com/5.1.0/common/license-isaac-sim-additional.html",
+    "ngc_catalog": "https://catalog.ngc.nvidia.com/orgs/nvidia/containers/isaac-sim"
+  }
+}

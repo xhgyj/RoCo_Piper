@@ -33,7 +33,7 @@ OPERATION_PLAN = (
 )
 MANIFEST = ROOT / "artifacts/scene/example1-scene-manifest.json"
 STAP_PLAN = (
-    ROOT / "runs/example1-compound-pick-20260915T130000Z/generated-plan.json"
+    ROOT / "tests/fixtures/assembly_plans/example1-compound-pick.json"
 )
 
 ROBOT = "piper_0"

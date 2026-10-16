@@ -1,46 +1,13 @@
-"""A7 zero-motion skill executor for the formal operation scheduler.
+"""Dispatch validated robot operations through owned skill backends.
 
-This module maps one validated
-:class:`~rocobrick.robot_operation_plan.RobotOperation` onto the formal
-:class:`~rocobrick.multi_robot_scheduler.RobotOperationExecutor` seam. It
-consumes the frozen A2 result types unchanged and never sends motion in this
-phase:
+The executor preserves strict scheduler results, per-operation identity and
+confirmed physical state. WAIT uses live observation; motion skills require
+the corresponding injected backend and evidence gates. Unsupported paths fail
+closed, and cancellation is safe only with confirmed terminal evidence.
 
-* ``WAIT`` is the only skill that can be confirmed. It polls one injected
-  read-only per-robot observation transport (:class:`ObservationTransport`),
-  requires the observed ``sim_time_s`` of the operation's own executor robot
-  to advance by the requested ``duration_s``, and requires the requested
-  ``physical_instance_id`` to exist with a measured world AABB that stays
-  within ``aabb_tolerance_m`` of the first measured AABB. Only then are the
-  ``real_scene_observation`` and ``wait_duration_confirmed`` labels emitted.
-  Sleeping is polling only and is never evidence; a missing, malformed,
-  regressed or stagnant observation is rejected against a bounded monotonic
-  wall-clock deadline.
-* ``PICK``, ``TRANSIT`` and ``PLACE_DOWN`` are first admitted (validated
-  executor robot id and target shape) and then fail closed before any motion:
-  ``terminal=True``, ``passed=False``, ``motion_sent=False``, ``evidence={}``
-  and ``reason == "CAPABILITY_UNAVAILABLE"``. No required evidence label is
-  ever synthesized for them.
-* ``cancel(operation_id)`` returns a safe terminal
-  :class:`~rocobrick.multi_robot_scheduler.CancelEvidence` only for an
-  operation whose dispatch record proves that no motion was sent (every
-  operation of this phase). An unknown operation id, or a record that might
-  have sent motion, fails closed with ``safe=False``.
-
-Boundaries recorded for later phases (deliberately NOT implemented here):
-
-* ``PICK`` will reuse the measured-AABB TCP targets of
-  :mod:`rocobrick.skill_targets` and the phase program of
-  :mod:`rocobrick.session_phase_backend`; this executor neither imports nor
-  drives them yet.
-* ``TRANSIT`` can currently at most reach a measured pose above a brick
-  (``skill_targets.transit_target``); carrying/connection transport is not
-  implemented and must never be reported as ``carrying_state_confirmed``.
-* ``PLACE_DOWN`` dispatches to an injected per-robot backend only after the
-  ledger confirms the carrying state; the backend owns the separated
-  connection, release and retreat evidence.
-* The legacy ``--skill-request/v1`` path is not an entry point for this
-  executor.
+Targets and generic phase programs belong to rocobrick.skills.targets and
+rocobrick.skills.programs. Legacy planner, phase-backend and skill-request
+dispatch paths are not production interfaces.
 """
 
 from __future__ import annotations
@@ -53,14 +20,15 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 from typing import Protocol
 
+from rocobrick.adapters.moveit.transit import TransitContext
 from rocobrick.coordinated_layer import coordinated_layer_group
+from rocobrick.execution.operation_state_ledger import OperationStateLedger
 from rocobrick.multi_robot_scheduler import (
     CancelEvidence,
     JSONValue,
     OperationExecution,
     OperationStatus,
 )
-from rocobrick.operation_state_ledger import OperationStateLedger
 from rocobrick.robot_operation_plan import RobotOperation
 from rocobrick.skills.observation import (
     Pose,
@@ -74,7 +42,6 @@ from rocobrick.skills.targets import (
     world_orientation_to_base,
     world_position_to_base,
 )
-from rocobrick.transit_adapter import TransitContext
 from rocobrick.unified_dual_arm_runtime import (
     SharedSceneSnapshot,
     SuccessorPrePhaseEvidence,

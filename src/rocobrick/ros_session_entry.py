@@ -498,9 +498,11 @@ def filter_scene_state(document: Mapping, query: Mapping) -> dict[str, object]:
     brick id must exist in ``document["bricks"]`` and every requested pair
     must exist in ``document["connections"]`` after normalizing both orders
     onto the sorted ``"a|b"`` key. The gripper block and the logical opening
-    are copied only when the query asks for them. Any missing requested
-    entry raises ``ValueError`` with the offending id/key so the caller can
-    report a failed result instead of a partial scene.
+    are copied only when the query asks for them. A robot-scoped view's own
+    ``pad_object_contacts`` report is carried through verbatim (it is already
+    filtered to that robot), because the support proofs read it from here. Any
+    missing requested entry raises ``ValueError`` with the offending id/key so
+    the caller can report a failed result instead of a partial scene.
     """
     if (
         not isinstance(document, Mapping)
@@ -542,6 +544,10 @@ def filter_scene_state(document: Mapping, query: Mapping) -> dict[str, object]:
     for key in (
         "session_id", "manifest_sha256", "sequence", "robot_sequence", "tcp_pose",
         "placement_interfaces",
+        # The robot-scoped view's own part of the global pad/object contact
+        # report: SUPPORT_TOP and PLACE_UP prove their support from it, so a
+        # projected answer must keep carrying it.
+        "pad_object_contacts",
     ):
         if key in document:
             filtered[key] = document[key]

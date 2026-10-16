@@ -1,0 +1,383 @@
+{
+  "schema": "roco-piper-ros-installed-validation/v1",
+  "timestamp_utc": "2026-10-16T02:20:07.378797+00:00",
+  "image": "roco-piper-ros:humble",
+  "network_mode": "none",
+  "nodes_started": 0,
+  "network_participants": 0,
+  "install_prefix": "/evidence/ros-clean-install",
+  "candidate_root": "/candidate",
+  "package_share_dir": "/evidence/ros-clean-install/rocobrick_piper_l_moveit_config/share/rocobrick_piper_l_moveit_config",
+  "agx_share_dir": "/evidence/ros-clean-install/agx_arm_description/share/agx_arm_description",
+  "python_version": "3.10.12 (main, Jun 22 2026, 18:55:27) [GCC 11.4.0]",
+  "platform": "Linux-6.8.0-138-generic-x86_64-with-glibc2.35",
+  "ros_distro": "humble",
+  "checks": [
+    {
+      "name": "ament_prefix_resolution",
+      "ok": true,
+      "detail": "both packages resolve inside the sourced install prefix",
+      "evidence": {
+        "package_share_dir": "/evidence/ros-clean-install/rocobrick_piper_l_moveit_config/share/rocobrick_piper_l_moveit_config",
+        "agx_share_dir": "/evidence/ros-clean-install/agx_arm_description/share/agx_arm_description"
+      }
+    },
+    {
+      "name": "launch_and_helper_imports",
+      "ok": true,
+      "detail": "installed dual-arm launch + both helpers imported by path",
+      "evidence": {
+        "files": [
+          "/evidence/ros-clean-install/rocobrick_piper_l_moveit_config/share/rocobrick_piper_l_moveit_config/launch/dual_robot_config.py",
+          "/evidence/ros-clean-install/rocobrick_piper_l_moveit_config/share/rocobrick_piper_l_moveit_config/launch/dual_arm_config.py",
+          "/evidence/ros-clean-install/rocobrick_piper_l_moveit_config/share/rocobrick_piper_l_moveit_config/launch/dual_arm_move_group.launch.py"
+        ],
+        "symbols": {
+          "dual_robot_config.generate_dual_robot_configs": true,
+          "dual_arm_config.generate_dual_arm_configs": true,
+          "dual_arm_config.load_base_poses": true,
+          "dual_arm_config.combine_urdfs": true,
+          "dual_arm_move_group.generate_launch_description": true
+        }
+      }
+    },
+    {
+      "name": "joint_state_aggregator_import",
+      "ok": true,
+      "detail": "installed joint-state aggregator helper imported without a node",
+      "evidence": {
+        "file": "/evidence/ros-clean-install/rocobrick_piper_l_moveit_config/lib/rocobrick_piper_l_moveit_config/dual_joint_state_aggregator.py",
+        "joints": [
+          "joint1",
+          "joint2",
+          "joint3",
+          "joint4",
+          "joint5",
+          "joint6",
+          "gripper_joint1",
+          "gripper_joint2"
+        ]
+      }
+    },
+    {
+      "name": "real_xacro_expansion",
+      "ok": true,
+      "detail": "real xacro expansion produced 18 links / 17 joints",
+      "evidence": {
+        "xacro_file": "/evidence/ros-clean-install/rocobrick_piper_l_moveit_config/share/rocobrick_piper_l_moveit_config/urdf/piper_l.ros2_control.urdf.xacro",
+        "tcp_origin_xyz": "-1.887447531601083e-09 -1.3530843112619095e-16 0.1305895866844472",
+        "tcp_origin_rpy": "0 0 0",
+        "tcp_parent": "link6",
+        "hardware_plugin": "topic_based_ros2_control/TopicBasedSystem",
+        "hardware_topics": {
+          "joint_commands_topic": "/isaac_joint_command",
+          "joint_states_topic": "/isaac_joint_states"
+        },
+        "link_count": 18,
+        "joint_count": 17
+      }
+    },
+    {
+      "name": "calibration_artifact_hashes",
+      "ok": true,
+      "detail": "both declared calibration artifact hashes match the bound artifact bytes",
+      "evidence": {
+        "declared": {
+          "tcp_binding_artifact_sha256": "0da6d121bb50617282fc1e9517ae0413b5e782cea32918eff3c41da60e1ecfea",
+          "tcp_calibration_source_sha256": "3ba48537ed4f453c7e2507e042056128515e8a064adbab7a4c871b3ed2bc94cb"
+        },
+        "actual": {
+          "tcp_binding_artifact_sha256": "0da6d121bb50617282fc1e9517ae0413b5e782cea32918eff3c41da60e1ecfea",
+          "tcp_calibration_source_sha256": "3ba48537ed4f453c7e2507e042056128515e8a064adbab7a4c871b3ed2bc94cb"
+        }
+      }
+    },
+    {
+      "name": "dual_arm_config_generation",
+      "ok": true,
+      "detail": "combined dual-arm model/config generated from the real xacro",
+      "evidence": {
+        "runtime_config": "/candidate/config/user_config.json",
+        "runtime_config_sha256": "af41dbea5f50f861c985c572beac0f8d7336e13b8e311d9caf92d2d17fc919b4",
+        "base_poses": {
+          "piper_0": [
+            [
+              0.25,
+              -0.25,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              1.5707963267948968
+            ]
+          ],
+          "piper_1": [
+            [
+              -0.25,
+              -0.25,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              1.5707963267948968
+            ]
+          ]
+        },
+        "per_robot": {
+          "piper_0": {
+            "links": 18,
+            "joints": 17,
+            "hardware_topics": {
+              "joint_commands_topic": "/piper_0/isaac_joint_command",
+              "joint_states_topic": "/piper_0/isaac_joint_states"
+            },
+            "ros2_controller_nodes": [
+              "/piper_0/arm_controller",
+              "/piper_0/controller_manager",
+              "/piper_0/gripper_controller"
+            ]
+          },
+          "piper_1": {
+            "links": 18,
+            "joints": 17,
+            "hardware_topics": {
+              "joint_commands_topic": "/piper_1/isaac_joint_command",
+              "joint_states_topic": "/piper_1/isaac_joint_states"
+            },
+            "ros2_controller_nodes": [
+              "/piper_1/arm_controller",
+              "/piper_1/controller_manager",
+              "/piper_1/gripper_controller"
+            ]
+          }
+        },
+        "combined_urdf": "/tmp/rocobrick_installed_validation_t9kzi447/dual_arm/model.urdf",
+        "combined_srdf_groups": [
+          "dual_arm",
+          "dual_arm_tcp"
+        ],
+        "kinematics_groups": [
+          "piper_0_arm_tcp",
+          "piper_1_arm_tcp"
+        ],
+        "combined_controller_names": [
+          "piper_0_arm_controller",
+          "piper_0_gripper_controller",
+          "piper_1_arm_controller",
+          "piper_1_gripper_controller"
+        ]
+      }
+    },
+    {
+      "name": "controller_topic_configuration",
+      "ok": true,
+      "detail": "controller manager, trajectory controllers and hardware topics pinned",
+      "evidence": {
+        "ros2_controllers": [
+          "arm_controller",
+          "gripper_controller",
+          "joint_state_broadcaster",
+          "update_rate"
+        ],
+        "moveit_controllers": [
+          "arm_controller",
+          "gripper_controller"
+        ],
+        "hardware_topics": [
+          "/isaac_joint_command",
+          "/isaac_joint_states"
+        ]
+      }
+    },
+    {
+      "name": "sampler_shared_library",
+      "ok": true,
+      "detail": "sampler .so resolves all DT_NEEDED entries and dlopens without ROS",
+      "evidence": {
+        "library": "/evidence/ros-clean-install/rocobrick_piper_l_moveit_config/lib/librocobrick_clean_reference_sampler.so",
+        "sha256": "860d2190e8a742562278b3e3c0f553dee40093eaf29f813523191037677f991a",
+        "ldd_missing": [],
+        "ldd_libs": [
+          "libmoveit_constraint_samplers.so.2.5.10",
+          "libmoveit_planning_scene.so.2.5.10",
+          "libmoveit_kinematic_constraints.so.2.5.10",
+          "libmoveit_robot_state.so.2.5.10",
+          "libmoveit_robot_model.so.2.5.10",
+          "libmoveit_exceptions.so.2.5.10",
+          "libclass_loader.so",
+          "libconsole_bridge.so.1.0",
+          "libstdc++.so.6",
+          "libm.so.6",
+          "libgcc_s.so.1",
+          "libc.so.6",
+          "libmoveit_kinematics_base.so",
+          "libmoveit_transforms.so.2.5.10",
+          "librandom_numbers.so",
+          "librclcpp.so",
+          "librcutils.so",
+          "liboctomap.so.1.9",
+          "liboctomath.so.1.9",
+          "libmoveit_utils.so.2.5.10",
+          "libmoveit_collision_detection_fcl.so.2.5.10",
+          "libmoveit_collision_detection.so.2.5.10",
+          "libmoveit_robot_trajectory.so.2.5.10",
+          "libgeometric_shapes.so.2.3.4",
+          "libsrdfdom.so.2.0.7",
+          "librcpputils.so",
+          "liblibstatistics_collector.so",
+          "librcl.so",
+          "librcl_yaml_param_parser.so",
+          "librosgraph_msgs__rosidl_typesupport_cpp.so",
+          "libstatistics_msgs__rosidl_typesupport_cpp.so",
+          "libtracetools.so",
+          "librmw_implementation.so",
+          "libament_index_cpp.so",
+          "librcl_logging_interface.so",
+          "librmw.so",
+          "librcl_interfaces__rosidl_typesupport_cpp.so",
+          "libfcl.so.0.7",
+          "libtinyxml2.so.9",
+          "libassimp.so.5",
+          "libqhull_r.so.8.0",
+          "libresource_retriever.so",
+          "librcl_logging_spdlog.so",
+          "librcl_interfaces__rosidl_typesupport_c.so",
+          "librcl_interfaces__rosidl_generator_c.so",
+          "librosidl_runtime_c.so",
+          "libyaml.so",
+          "librosidl_typesupport_cpp.so",
+          "libccd.so.2",
+          "libz.so.1",
+          "libdraco.so.4",
+          "libminizip.so.1",
+          "libcurl.so.4",
+          "libspdlog.so.1",
+          "librosidl_typesupport_c.so",
+          "libbuiltin_interfaces__rosidl_generator_c.so",
+          "libnghttp2.so.14",
+          "libidn2.so.0",
+          "librtmp.so.1",
+          "libssh.so.4",
+          "libpsl.so.5",
+          "libssl.so.3",
+          "libcrypto.so.3",
+          "libgssapi_krb5.so.2",
+          "libldap-2.5.so.0",
+          "liblber-2.5.so.0",
+          "libzstd.so.1",
+          "libbrotlidec.so.1",
+          "libfmt.so.8",
+          "libunistring.so.2",
+          "libgnutls.so.30",
+          "libhogweed.so.6",
+          "libnettle.so.8",
+          "libgmp.so.10",
+          "libkrb5.so.3",
+          "libk5crypto.so.3",
+          "libcom_err.so.2",
+          "libkrb5support.so.0",
+          "libsasl2.so.2",
+          "libbrotlicommon.so.1",
+          "libp11-kit.so.0",
+          "libtasn1.so.6",
+          "libkeyutils.so.1",
+          "libresolv.so.2",
+          "libffi.so.8"
+        ],
+        "ctypes_dlopen": true,
+        "allocator_symbol_in_dynsym": true,
+        "plugin_class": "rocobrick/CleanReferenceSamplerAllocator",
+        "plugin_base_class": "constraint_samplers::ConstraintSamplerAllocator"
+      }
+    },
+    {
+      "name": "aggregator_and_sampler_wiring",
+      "ok": true,
+      "detail": "aggregator topic and combined move_group sampler wiring pinned",
+      "evidence": {
+        "aggregator_output_topic": "/dual_arm/joint_states",
+        "sampler_allocator": "rocobrick/CleanReferenceSamplerAllocator"
+      }
+    },
+    {
+      "name": "install_matches_candidate_source",
+      "ok": true,
+      "detail": "16 installed files byte-identical to the candidate source",
+      "evidence": {
+        "/evidence/ros-clean-install/rocobrick_piper_l_moveit_config/share/rocobrick_piper_l_moveit_config/constraint_sampler_plugins.xml": {
+          "source": "/candidate/ros_ws/src/rocobrick_piper_l_moveit_config/constraint_sampler_plugins.xml",
+          "match": true
+        },
+        "/evidence/ros-clean-install/rocobrick_piper_l_moveit_config/share/rocobrick_piper_l_moveit_config/launch/dual_arm_config.py": {
+          "source": "/candidate/ros_ws/src/rocobrick_piper_l_moveit_config/launch/dual_arm_config.py",
+          "match": true
+        },
+        "/evidence/ros-clean-install/rocobrick_piper_l_moveit_config/share/rocobrick_piper_l_moveit_config/launch/dual_arm_move_group.launch.py": {
+          "source": "/candidate/ros_ws/src/rocobrick_piper_l_moveit_config/launch/dual_arm_move_group.launch.py",
+          "match": true
+        },
+        "/evidence/ros-clean-install/rocobrick_piper_l_moveit_config/share/rocobrick_piper_l_moveit_config/launch/dual_robot_config.py": {
+          "source": "/candidate/ros_ws/src/rocobrick_piper_l_moveit_config/launch/dual_robot_config.py",
+          "match": true
+        },
+        "/evidence/ros-clean-install/rocobrick_piper_l_moveit_config/share/rocobrick_piper_l_moveit_config/config/initial_positions.yaml": {
+          "source": "/candidate/ros_ws/src/rocobrick_piper_l_moveit_config/config/initial_positions.yaml",
+          "match": true
+        },
+        "/evidence/ros-clean-install/rocobrick_piper_l_moveit_config/share/rocobrick_piper_l_moveit_config/config/joint_limits.yaml": {
+          "source": "/candidate/ros_ws/src/rocobrick_piper_l_moveit_config/config/joint_limits.yaml",
+          "match": true
+        },
+        "/evidence/ros-clean-install/rocobrick_piper_l_moveit_config/share/rocobrick_piper_l_moveit_config/config/kinematics.yaml": {
+          "source": "/candidate/ros_ws/src/rocobrick_piper_l_moveit_config/config/kinematics.yaml",
+          "match": true
+        },
+        "/evidence/ros-clean-install/rocobrick_piper_l_moveit_config/share/rocobrick_piper_l_moveit_config/config/moveit_controllers.yaml": {
+          "source": "/candidate/ros_ws/src/rocobrick_piper_l_moveit_config/config/moveit_controllers.yaml",
+          "match": true
+        },
+        "/evidence/ros-clean-install/rocobrick_piper_l_moveit_config/share/rocobrick_piper_l_moveit_config/config/pilz_cartesian_limits.yaml": {
+          "source": "/candidate/ros_ws/src/rocobrick_piper_l_moveit_config/config/pilz_cartesian_limits.yaml",
+          "match": true
+        },
+        "/evidence/ros-clean-install/rocobrick_piper_l_moveit_config/share/rocobrick_piper_l_moveit_config/config/piper_l.srdf": {
+          "source": "/candidate/ros_ws/src/rocobrick_piper_l_moveit_config/config/piper_l.srdf",
+          "match": true
+        },
+        "/evidence/ros-clean-install/rocobrick_piper_l_moveit_config/share/rocobrick_piper_l_moveit_config/config/ros2_controllers.yaml": {
+          "source": "/candidate/ros_ws/src/rocobrick_piper_l_moveit_config/config/ros2_controllers.yaml",
+          "match": true
+        },
+        "/evidence/ros-clean-install/rocobrick_piper_l_moveit_config/share/rocobrick_piper_l_moveit_config/urdf/piper_l.camera_stand.xacro": {
+          "source": "/candidate/ros_ws/src/rocobrick_piper_l_moveit_config/urdf/piper_l.camera_stand.xacro",
+          "match": true
+        },
+        "/evidence/ros-clean-install/rocobrick_piper_l_moveit_config/share/rocobrick_piper_l_moveit_config/urdf/piper_l.ros2_control.urdf.xacro": {
+          "source": "/candidate/ros_ws/src/rocobrick_piper_l_moveit_config/urdf/piper_l.ros2_control.urdf.xacro",
+          "match": true
+        },
+        "/evidence/ros-clean-install/rocobrick_piper_l_moveit_config/share/rocobrick_piper_l_moveit_config/urdf/piper_l.ros2_control.xacro": {
+          "source": "/candidate/ros_ws/src/rocobrick_piper_l_moveit_config/urdf/piper_l.ros2_control.xacro",
+          "match": true
+        },
+        "/evidence/ros-clean-install/rocobrick_piper_l_moveit_config/share/rocobrick_piper_l_moveit_config/urdf/piper_l.tcp_calibration.xacro": {
+          "source": "/candidate/ros_ws/src/rocobrick_piper_l_moveit_config/urdf/piper_l.tcp_calibration.xacro",
+          "match": true
+        },
+        "/evidence/ros-clean-install/rocobrick_piper_l_moveit_config/lib/rocobrick_piper_l_moveit_config/dual_joint_state_aggregator.py": {
+          "source": "/candidate/ros_ws/src/rocobrick_piper_l_moveit_config/scripts/dual_joint_state_aggregator.py",
+          "match": true
+        }
+      }
+    }
+  ],
+  "limitations": [
+    "pluginlib runtime class discovery / MoveIt ConstraintSamplerAllocator instantiation is NOT exercised: it needs a running move_group / pluginlib graph. Verified instead: DT_NEEDED resolution (ldd), a no-ROS dlopen (ctypes), exported symbols in the .so and the installed constraint_sampler_plugins.xml declaration.",
+    "No launch, node, ROS graph, DDS participant or Isaac process was started; runtime behaviour (controllers, TF, planning) is out of scope."
+  ],
+  "passed": true,
+  "host_docker_command": "docker run --rm --network none -v /tmp/roco-live-cleanup-20261015-session2:/evidence -v /tmp/roco-live-cleanup-20261015-session2/candidate:/candidate:ro -v /tmp/roco-live-cleanup-20261015-session2/candidate:/evidence/candidate:ro roco-piper-ros:humble bash -lc 'source /opt/ros/humble/setup.bash && source /evidence/ros-clean-install/setup.bash && python3 /evidence/validate_ros_installed.py --install /evidence/ros-clean-install --candidate /candidate --out /evidence/ros-installed-validation.json --image roco-piper-ros:humble --network none'",
+  "image_id": "sha256:659623efed210acf91ea1bc76e6aac2d360ed62882bc536693a4afc0fb113e98"
+}

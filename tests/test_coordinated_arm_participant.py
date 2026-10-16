@@ -62,7 +62,7 @@ class FakeClient:
         self.sent = 0
         self.runtime = runtime
 
-    def send_goal_async(self, goal):
+    def send_goal_async(self, goal, feedback_callback=None):
         self.sent += 1
         if self.runtime is not None:
             self.runtime._command_count += 1
@@ -240,3 +240,66 @@ def test_dispatch_exception_never_claims_safe_cancellation():
     with pytest.raises(RuntimeError, match="dispatch"):
         participant.start(start_at_sim_time_s=10.0)
     assert participant.cancel()["safe"] is False
+
+
+def test_goal_tolerance_is_recorded_in_the_controller_goal():
+    """The arrival bound is derived from the tolerance we actually asked for."""
+    runtime = FakeRuntime()
+    participant = CoordinatedArmParticipant(runtime)
+    assert participant.prepare(trajectory(), start_at_sim_time_s=10.0)["prepared"]
+    assert [item.position for item in participant._goal.goal_tolerance] == [
+        0.02
+    ] * len(ARM)
+
+
+def test_arrival_accepts_an_endpoint_inside_the_goal_tolerance():
+    """Accept the endpoint the controller was asked to hold, plus one margin.
+
+    Live 2026-10-14 (task-c-top-offset13d): 0.0157 rad against a 0.02 rad goal
+    tolerance was reported SUCCEEDED by the controller, and the old 0.015 rad
+    arrival gate failed the whole support pre-phase on it (the same motion had
+    passed at 0.0119 rad one run earlier). The supervisor must not be stricter
+    than the tolerance the controller was asked to hold.
+    """
+    import pytest
+
+    runtime = FakeRuntime(state={f"joint{i}": 0.0 for i in range(1, 7)})
+    participant = CoordinatedArmParticipant(runtime)
+    assert participant.prepare(trajectory(), start_at_sim_time_s=10.0)["prepared"]
+    # Planned endpoint is 0.05 rad everywhere; joint3 lands 0.0157 rad short.
+    runtime._state = {
+        f"joint{i}": (0.0343 if i == 3 else 0.05) for i in range(1, 7)
+    }
+    evidence = participant.start(start_at_sim_time_s=10.0)
+    assert evidence["final_joint_error_rad"] == pytest.approx(0.0157)
+    assert evidence["goal_tolerance_rad"] == 0.02
+    assert evidence["arrival_tolerance_rad"] == 0.025
+    assert evidence["arrival_confirmed"] is True
+    assert evidence["safe"] is True
+
+
+def test_arrival_bound_follows_a_policy_down_without_undercutting_it():
+    """A stricter policy tightens the goal tolerance and the bound with it."""
+    import pytest
+
+    from rocobrick.execution.prepared_motion import SynchronizationPolicy
+
+    runtime = FakeRuntime(state={f"joint{i}": 0.0 for i in range(1, 7)})
+    runtime.clock_values = lambda: (9_000_000_000,)
+    runtime.latest_stamped_isaac_state = lambda: {
+        "age_s": 0.01,
+        "sample_count": runtime._isaac_state_count,
+        "sim_time_s": 11.0,
+    }
+    policy = SynchronizationPolicy(0.02, 0.01, 0.2)
+    participant = CoordinatedArmParticipant(runtime, policy=policy)
+    assert participant.prepare(trajectory(), start_at_sim_time_s=10.0)["prepared"]
+    assert all(item.position == 0.01 for item in participant._goal.goal_tolerance)
+    # 0.012 rad short of the 0.05 rad endpoint: outside the policy's own
+    # 0.01 rad goal tolerance would be rejected, inside the bound is accepted.
+    runtime._state = {f"joint{i}": (0.038 if i == 3 else 0.05) for i in range(1, 7)}
+    evidence = participant.start(start_at_sim_time_s=10.0)
+    assert evidence["goal_tolerance_rad"] == 0.01
+    assert evidence["arrival_tolerance_rad"] == 0.015
+    assert evidence["final_joint_error_rad"] == pytest.approx(0.012)
+    assert evidence["arrival_confirmed"] is True

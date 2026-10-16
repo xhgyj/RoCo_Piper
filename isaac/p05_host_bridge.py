@@ -102,7 +102,7 @@ import shlex
 import signal
 import sys
 import time
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -264,8 +264,12 @@ def _kit_launch_argv(args: argparse.Namespace) -> list[str]:
     ]
     if os.environ.get("ROCOBRICK_HEADED") == "1":
         # Headless remains the default. This opt-in is for an operator
-        # observing one bounded run from an Isaac desktop session.
+        # observing one bounded run from an Isaac desktop session. The
+        # observer camera is an operator view of the workspace, so the
+        # cinematic post effects that blur the recorded frame are off.
         argv.insert(-2, "--/app/window/enabled=true")
+        argv.insert(-2, "--/rtx/post/dof/enabled=false")
+        argv.insert(-2, "--/rtx/post/motionblur/enabled=false")
     return argv
 
 
@@ -1243,6 +1247,45 @@ def capture_owned_window(output: Path, *, run_command=None, owner_pid=None) -> d
         return {"error": f"{type(exc).__name__}: {exc}"}
 
 
+_FRAME_CAPTURE_DIR_ENV = "ROCOBRICK_CAPTURE_DIR"
+_FRAME_CAPTURE_STRIDE_ENV = "ROCOBRICK_CAPTURE_STRIDE"
+_FRAME_CAPTURE_DEFAULT_STRIDE = 12
+
+
+def frame_capture_directory() -> Path | None:
+    """Return the opt-in frame-capture directory, or None when disabled.
+
+    Frames are written by Kit from the viewport render product itself, so the
+    capture is independent of the desktop session state (a locked or grabbed
+    X server blocks ``import``/``x11grab`` screen capture, live evidence
+    task-c-top-offset13t-headed 2026-10-14).
+    """
+    value = os.environ.get(_FRAME_CAPTURE_DIR_ENV, "").strip()
+    if not value:
+        return None
+    directory = Path(value)
+    directory.mkdir(parents=True, exist_ok=True)
+    return directory
+
+
+def frame_capture_stride() -> int:
+    """Return how many rendered frames pass between two captured frames."""
+    value = os.environ.get(_FRAME_CAPTURE_STRIDE_ENV, "").strip()
+    if not value:
+        return _FRAME_CAPTURE_DEFAULT_STRIDE
+    try:
+        stride = int(value)
+    except ValueError as exc:
+        raise ValueError(
+            f"{_FRAME_CAPTURE_STRIDE_ENV} must be a positive integer, got {value!r}"
+        ) from exc
+    if stride <= 0:
+        raise ValueError(
+            f"{_FRAME_CAPTURE_STRIDE_ENV} must be a positive integer, got {value!r}"
+        )
+    return stride
+
+
 def sync_viewport_physics(world: object, fabric: object) -> None:
     """Copy the latest PhysX transforms to rendering without stepping Kit.
 
@@ -1253,7 +1296,11 @@ def sync_viewport_physics(world: object, fabric: object) -> None:
 
 
 async def render_viewport_without_physics(
-    world: object, settings: object, app: object, refresh: Callable[[], None]
+    world: object,
+    settings: object,
+    app: object,
+    refresh: Callable[[], None],
+    capture: Callable[[], Awaitable[None]] | None = None,
 ) -> None:
     """Yield to Kit for rendering, without adding an unobserved physics tick.
 
@@ -1261,6 +1308,12 @@ async def render_viewport_without_physics(
     step. Match Isaac 5.1 SimulationContext.render_async's playSimulations
     guard while retaining our explicit Fabric refresh and non-reentrant update.
     Restore the caller's setting even on cancellation or rendering failure.
+
+    ``capture`` runs inside the same physics-disabled window. A viewport
+    capture waits for additional Kit frames, and those updates stepped physics
+    when they were issued from the caller's loop (live evidence,
+    task-c-top-offset13u-headed 2026-10-14: the support press failed only once
+    frame capture was enabled).
     """
     key = "/app/player/playSimulations"
     previous = settings.get(key)
@@ -1271,11 +1324,18 @@ async def render_viewport_without_physics(
     try:
         refresh()
         await app.next_update_async()
-        after = (float(world.current_time), world.current_time_step_index)
-        if after != before:
+        if (float(world.current_time), world.current_time_step_index) != before:
+            after = (float(world.current_time), world.current_time_step_index)
             raise RuntimeError(
                 f"render-only Kit update advanced physics: {before} -> {after}"
             )
+        if capture is not None:
+            await capture()
+            after = (float(world.current_time), world.current_time_step_index)
+            if after != before:
+                raise RuntimeError(
+                    f"frame capture advanced physics: {before} -> {after}"
+                )
     finally:
         settings.set_bool(key, previous)
 
@@ -1290,6 +1350,14 @@ class BridgeState:
         self.viewport_fabric = None
         self.viewport_sync_count = 0
         self.viewport_render_only_count = 0
+        # Opt-in observer-viewport frame capture. Capture failures are counted
+        # and reported; they never fail the run that is being recorded.
+        self.capture_dir = frame_capture_directory()
+        self.capture_stride = frame_capture_stride()
+        self.capture_count = 0
+        self.capture_renders = 0
+        self.capture_errors = 0
+        self.capture_last_error = None
         self.exit_diagnostics_enabled = (
             os.environ.get("ROCOBRICK_EXIT_DIAGNOSTICS") == "1"
         )
@@ -1356,9 +1424,72 @@ class BridgeState:
         from omni.kit.app import get_app
 
         await render_viewport_without_physics(
-            world, get_settings(), get_app(), lambda: self.refresh_viewport(world)
+            world,
+            get_settings(),
+            get_app(),
+            lambda: self.refresh_viewport(world),
+            self.capture_viewport_frame if self.capture_dir is not None else None,
         )
         self.viewport_render_only_count += 1
+
+    async def capture_viewport_frame(self) -> None:
+        """Write one observer-viewport frame when opt-in capture is enabled.
+
+        The frame comes from the viewport render product, so it records the
+        same observer camera the operator sees without reading the X server
+        back (a locked session blocks window-level screen capture). A capture
+        failure is counted in the evidence and never fails the run.
+        """
+        if self.capture_dir is None:
+            return
+        render_index = self.capture_renders
+        self.capture_renders += 1
+        if render_index % self.capture_stride:
+            return
+        from omni.kit.viewport.utility import (
+            capture_viewport_to_file,
+            get_active_viewport,
+        )
+
+        viewport = get_active_viewport()
+        if viewport is None:
+            self.capture_errors += 1
+            self.capture_last_error = "no active viewport to capture"
+            return
+        index = self.capture_count
+        frame_path = self.capture_dir / f"frame_{index:06d}.png"
+        try:
+            # ``capture_viewport_to_file`` returns the capture delegate, not an
+            # awaitable; awaiting its result both writes the file before the
+            # next capture and keeps the capture queue bounded.
+            capture = capture_viewport_to_file(viewport, file_path=str(frame_path))
+            if capture is None:
+                raise RuntimeError("viewport capture was not scheduled")
+            await capture.wait_for_result()
+        except Exception as exc:
+            self.capture_errors += 1
+            self.capture_last_error = f"{type(exc).__name__}: {exc}"
+            return
+        self.capture_count += 1
+        sim_time = None
+        if self.world is not None:
+            sim_time = float(self.world.current_time)
+        try:
+            with (self.capture_dir / "frames.jsonl").open("a") as handle:
+                handle.write(
+                    json.dumps(
+                        {
+                            "frame": index,
+                            "file": frame_path.name,
+                            "sim_time_s": sim_time,
+                            "wall_time_s": round(time.time(), 4),
+                        }
+                    )
+                    + "\n"
+                )
+        except OSError as exc:
+            self.capture_errors += 1
+            self.capture_last_error = f"{type(exc).__name__}: {exc}"
 
     def capture_exit_diagnostics(self, phase: str) -> None:
         """Record opt-in exit images and body poses without commanding motion."""
@@ -2469,7 +2600,7 @@ async def run_bridge(
         from rocobrick.runtime_host import bootstrap_runtime_host
         from rocobrick.runtime_host_inputs import build_runtime_host_inputs
         from rocobrick.stap_contract import parse_stap_plan
-        from rocobrick.structure_scene import (
+        from rocobrick.plan.structure_scene import (
             build_structure_scene_plan,
             build_structure_scene_plan_from_files,
         )
@@ -2597,6 +2728,12 @@ async def run_bridge(
                     },
                     "part_mapping": dict(runtime_host.physical_instance_paths),
                     "collision_filter_pairs": list(runtime_host.collision_filter_pairs),
+                    "disabled_camera_collisions": list(
+                        runtime_host.disabled_camera_collisions
+                    ),
+                    "hidden_camera_visuals": list(
+                        runtime_host.hidden_camera_visuals
+                    ),
                 }
             )
 
@@ -2873,6 +3010,15 @@ async def run_bridge(
         "seconds_wall": round(time.monotonic() - hold_started, 3),
         "sim_time_final_s": round(float(world.current_time), 6),
     }
+    if state.capture_dir is not None:
+        evidence["frame_capture"] = {
+            "directory": str(state.capture_dir),
+            "stride": state.capture_stride,
+            "renders": state.capture_renders,
+            "frames": state.capture_count,
+            "errors": state.capture_errors,
+            "last_error": state.capture_last_error,
+        }
     evidence["steps_total"] = steps
     if args.scene_manifest is not None:
         for channel in bridge.channels:

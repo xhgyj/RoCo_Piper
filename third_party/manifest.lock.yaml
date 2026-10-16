@@ -1,0 +1,58 @@
+# RoCo_Piper third-party source lock (P0.1).
+# This file is the single source of truth for pinned third-party versions.
+# Never clone or track a floating branch: always check out the exact commit
+# recorded here and verify the license source sha256 before importing.
+schema: rocobrick-third-party-lock/v1
+generated_at_utc: "2026-09-19T18:30:51Z"
+repositories:
+  agx_arm_ros:
+    url: https://github.com/agilexrobotics/agx_arm_ros.git
+    branch: ros2
+    commit: b9ad14de2a6eb818a2d206fbd1adba48343662f7
+    license:
+      id: MIT
+      source_path: LICENSE
+      sha256: 247944c63de1573653722ba784f96123da267105b7b48577e0c8826a24b809f6
+    purpose: >-
+      ROS 2 Humble driver stack for AgileX Piper arms (URDF/SRDF description,
+      MoveIt configuration, ctrl node); upstream source of the Piper joint
+      limits, gripper joints, and controller interfaces reused by the planner.
+    verified_facts:
+      ros2_humble_supported: true
+      packages_present:
+        - agx_arm_ctrl
+        - agx_arm_description
+        - agx_arm_moveit
+        - agx_arm_msgs
+      gripper:
+        command_joint: gripper
+        mimic_joints:
+          - gripper_joint1
+          - gripper_joint2
+        opening_range_m: [0.0, 0.1]
+    import:
+      method: vcs
+      destination: ros_ws/src/agx_arm_ros
+      patches: []
+  agx_arm_sim:
+    url: https://github.com/agilexrobotics/agx_arm_sim.git
+    branch: master
+    commit: f8cd8b147c75d59e14f90fb0646770eefa268ed0
+    license:
+      id: MIT
+      source_path: README.md
+      sha256: b91918f2972101eee621cba9badbc90e6057b9c5269c0bb7ae00f84195d31399
+    purpose: >-
+      AgileX arm simulation assets (URDF/Xacro plus USD models) for Piper and
+      Piper L, used as the vendor source for the Isaac Sim robot assets.
+    verified_facts:
+      supports_piper: true
+      supports_piper_l: true
+      isaac_sim_5_1_compatibility: not_declared
+      no_standalone_license_file: true
+      assets_license_reaudit_phase: P0.4
+      assets_license_confirmed: false
+    import:
+      method: vcs
+      destination: isaac/vendor/agx_arm_sim
+      patches: []

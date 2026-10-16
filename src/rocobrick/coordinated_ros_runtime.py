@@ -70,6 +70,24 @@ class CoordinatedMoveItPlanRuntime:
             self.node, factories.move_group_type(), self.action_name
         )
 
+    def move_group_client(self) -> object | None:
+        """The one combined MoveGroup action client, registered on demand.
+
+        This is the planner every participant runtime must plan through: the
+        participant groups (``<robot>_arm``, ``<robot>_arm_tcp``) exist only
+        in the combined model this client addresses, so a participant owned
+        client would address a model that does not exist. Returns None only if
+        the client cannot be created, so callers fail closed.
+
+        Returns:
+            The shared combined MoveGroup action client, or None.
+        """
+        try:
+            self.register()
+        except Exception:  # noqa: BLE001 - unregistered ROS transport
+            return None
+        return self._client
+
     def ready(self) -> bool:
         """Return action-server readiness without sending a goal."""
         if self._client is None:

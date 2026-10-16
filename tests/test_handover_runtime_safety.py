@@ -1,288 +1,212 @@
-"""Offline regressions for HANDOVER targets and no-dispatch shutdown proof."""
+"""Formal HANDOVER safety regressions; no ROS/Isaac processes are started."""
 
 import asyncio
+from copy import deepcopy
 from dataclasses import replace
 from types import SimpleNamespace
 
 import pytest
+from test_coordinated_handover_lifecycle import fixture, operation
 from test_coordinated_ros_runtime import pose, request
 from test_handoff_contract import _handover_request
+from test_handover_joint_planning import planning_request, snapshot
 from test_persistent_ros_worker import ROBOTS, TOKEN, pump
 
-from rocobrick.coordinated_session import FreeSpaceMotionEvidence
+from rocobrick.adapters.moveit.handover_live import LiveSimulationHandover
 from rocobrick.coordinated_session_entry import perform_coordinated_plan
-from rocobrick.execution.operation_state_ledger import OperationStateLedger
 from rocobrick.execution.ros_session_worker import SCHEMA, SessionWorker, write_atomic
 from rocobrick.planning_scene import box_geometry_digest
-from rocobrick.skills.handover import (
-    HandoverHandler,
-    HandoverOperationBackend,
-    receiver_attachment_from_sample,
-    receiver_precontact_target,
-    require_receiver_contact_geometry,
+from rocobrick.skills.direct_handover import DirectHandoverBackend
+from rocobrick.skills.handover_observation import (
+    parse_handover_observation,
+    verify_co_hold,
 )
-from rocobrick.skills.observation import PickObservation, Pose
-from rocobrick.skills.targets import (
-    RobotBaseFrame,
-    SkillParams,
-    TcpProvenance,
-    pick_targets,
-)
+from rocobrick.skills.handover_planning import calibrated_target
+from rocobrick.skills.placement_geometry import compose, inverse
+from rocobrick.skills.targets import world_orientation_to_base, world_position_to_base
 
 
 @pytest.mark.parametrize("robot", ROBOTS)
 def test_receiver_target_is_measured_object_boundary_in_its_own_base(robot):
-    """Rotated/translated bases preserve both pose numbers and frame identity."""
-    base = RobotBaseFrame((0.25, -0.25, 0.0), (0.0, 0.0, 2**-0.5, 2**-0.5))
-    params = SkillParams()
-    targets = pick_targets(
-        (-0.09, 0.02, 0.10),
-        (-0.07, 0.04, 0.12),
-        base,
-        TcpProvenance("a" * 64, "b" * 64),
-        params,
-    )
-    target = receiver_precontact_target(
-        robot, targets,
-        aabb_min=(-0.09, 0.02, 0.10), aabb_max=(-0.07, 0.04, 0.12), base=base,
-    )["tcp_pose"]
+    """Retain frame/provenance binding, not the retired side-grasp coordinate."""
+    item = planning_request()
+    ctx = item.donor if item.donor.robot_id == robot else item.receiver
+    world = item.observation(robot).tcp_pose
+    target = calibrated_target(world, ctx, item.profile)["tcp_pose"]
     assert target["frame_id"] == f"{robot}_base_link"
     assert target["tip_link"] == f"{robot}_rocobrick_tcp"
-    assert target["position"] == pytest.approx((0.28, 0.33, 0.1135))
+    assert target["position"] == pytest.approx(
+        world_position_to_base(world.position_xyz, ctx.base)
+    )
     assert target["orientation_xyzw"] == pytest.approx(
-        targets.precontact_boundary.orientation_xyzw
+        world_orientation_to_base(world.orientation_xyzw, ctx.base)
     )
-    assert target["runtime_model_sha256"] == "a" * 64
-    assert target["source_sha256"] == "b" * 64
-    assert target["position_tolerance_m"] == params.position_tolerance_m
+    assert target["runtime_model_sha256"] == ctx.provenance.runtime_model_sha256
+    assert target["source_sha256"] == ctx.provenance.source_sha256
+    assert target["position_tolerance_m"] == item.profile.position_tolerance_m
 
 
-def test_receiver_contact_boundary_keeps_the_pick_floor_tip_clearance():
-    """Transfer planning retains the successful PICK path's floor margin."""
-    from rocobrick.skills.pick import FINGER_TIP_BELOW_TCP_M, FLOOR_CONTACT_MARGIN_M
-
-    base = RobotBaseFrame((0.0, 0.0, 0.0), (0.0, 0.0, 0.0, 1.0))
-    minimum, maximum = (-0.01, -0.01, 0.0), (0.01, 0.01, 0.01)
-    targets = pick_targets(
-        minimum, maximum, base, TcpProvenance("a" * 64, "b" * 64), SkillParams()
-    )
-    target = receiver_precontact_target(
-        "piper_1", targets, aabb_min=minimum, aabb_max=maximum, base=base,
-        ground_top_z_m=0.0,
-    )["tcp_pose"]
-    assert target["position"][2] == pytest.approx(
-        FINGER_TIP_BELOW_TCP_M + FLOOR_CONTACT_MARGIN_M
-    )
-
-
-@pytest.mark.parametrize(
-    "field,value",
-    [
-        ("frame_id", "base_link"),
-        ("frame_id", "piper_0_base_link"),
-        ("tip_link", "piper_0_rocobrick_tcp"),
-    ],
-)
+@pytest.mark.parametrize("field,value", [
+    ("frame_id", "base_link"), ("frame_id", "piper_0_base_link"),
+    ("tip_link", "piper_0_rocobrick_tcp"),
+])
 def test_handover_contract_rejects_default_or_foreign_receiver_frame(field, value):
-    """The production frame regression is refused before calling ROS IK."""
+    """Foreign receiver frame is refused before any ROS request."""
     item = _handover_request()
     tcp = {**item.receiver_target["tcp_pose"], field: value}
     with pytest.raises(ValueError, match="frame/tip"):
         replace(item, receiver_target={"tcp_pose": tcp})
 
 
-def _sample(tcp_position=(0.0, 0.0, 0.1)):
-    """Return an identified cube between horizontal finger pads."""
-    return PickObservation(
-        "piper_1", "brick-1", "live-session", "c" * 64, 4, 2.0,
-        Pose((0.0, 0.0, 0.1), (0.0, 0.0, 0.0, 1.0)),
-        Pose(tcp_position, (0.0, 0.0, 0.0, 1.0)),
-        0.015, (-0.01, -0.01, 0.09), (0.01, 0.01, 0.11),
-    )
-
-
-@pytest.mark.parametrize(
-    "position", [(0.3, 0.0, 0.1), (0.0, 0.3, 0.1), (0.0, 0.0, 0.24)]
-)
-def test_distant_stationary_object_cannot_prove_receiver_contact(position):
-    """Stationary relative pose and plausible opening alone are insufficient."""
-    with pytest.raises(ValueError, match="contact geometry"):
-        require_receiver_contact_geometry(_sample(position), tolerance_m=0.005)
-    require_receiver_contact_geometry(_sample(), tolerance_m=0.005)
+@pytest.mark.parametrize("axis", range(3))
+def test_distant_stationary_object_cannot_prove_receiver_contact(axis):
+    """Stationary relative pose/opening without actual pad contact proves nothing."""
+    req = planning_request()
+    samples = []
+    for seq in range(2, 6):
+        raw = snapshot(seq)
+        raw["robots"][req.receiver.robot_id]["tcp_pose"]["position_xyz"][axis] += 0.3
+        raw["pad_object_contacts"]["contacts"] = [
+            c for c in raw["pad_object_contacts"]["contacts"]
+            if c["robot_id"] != req.receiver.robot_id
+        ]
+        samples.append(parse_handover_observation(
+            raw, donor_id=req.donor.robot_id, receiver_id=req.receiver.robot_id,
+            physical_instance_id=req.physical_instance_id, session_id="session-1",
+            manifest_sha256="c" * 64,
+        ))
+    expected = compose(inverse(samples[0].donor.object_pose), samples[0].donor.tcp_pose)
+    with pytest.raises(ValueError, match="both identified pads"):
+        verify_co_hold(samples, profile=req.profile, follow_samples=4,
+                       donor_window=(0.015, 0.017), receiver_window=(0.015, 0.017),
+                       expected_object_to_donor_tcp=expected)
 
 
 def test_cohold_geometry_failure_never_transfers_scene_or_releases_donor():
-    """Failure at the co-hold gate preserves the confirmed physical owner."""
-    item = replace(_handover_request(), scene_snapshot=_snapshot(_sample()))
-    calls = []
-
-    class FreeSpace:
-        async def execute_free_space(self, req):
-            """Return an arrived free-space lifecycle, not holding proof."""
-            return FreeSpaceMotionEvidence(
-                req.motion_id, req.participants,
-                planned=True, prepared=True, started=True, arrival_confirmed=True,
-                terminal=True, safe_to_release=True,
-                participant_evidence={
-                    robot: {"arrival_confirmed": True} for robot in req.participants
-                },
-                evidence={}, reason=None,
-            )
-
-    class Motion:
-        def run_motion_operation(self, robot, operation):
-            """Return successful gripper feedback and record every dispatch."""
-            calls.append((robot, operation.kind.value))
-            return {"result": {"passed": True, "execution": {
-                "terminal": True, "safe_to_release": True, "goal_accepted": True,
-            }}}
-
-    class Observations:
-        async def observe(self, req):
-            """Return a stationary object far from the receiver."""
-            return _snapshot(_sample((0.3, 0.0, 0.1)))
-
-        def verify_co_hold(self, req, samples):
-            """Apply the same mandatory geometry guard as live observations."""
-            require_receiver_contact_geometry(
-                _sample((0.3, 0.0, 0.1)), tolerance_m=0.005
-            )
-            pytest.fail("distant object cannot prove co-hold")
-
-    ledger = OperationStateLedger(ROBOTS)
-    ledger.confirm_holding("piper_0", "brick-1", {"holding_confirmed": True})
-    result = asyncio.run(HandoverHandler(
-        ledger, free_space=FreeSpace(), motion=Motion(), observations=Observations(),
-        poll_interval_s=0.0,
-    ).execute(item))
-    assert not result.ready_to_commit
-    assert "contact geometry" in result.reason
-    assert len(calls) == 1 and calls[0][0] == "piper_1"
-    assert ledger.owner_of_object("brick-1") == "piper_0"
-    assert "scene_transfer_committed" not in result.evidence
-    assert "donor_release_feedback" not in result.evidence
+    """Reject missing contact before scene transfer or donor release."""
+    prepared, ledger, transport, backend = fixture(defect="no_receiver_contacts")
+    result = asyncio.run(backend.execute(operation(prepared)))
+    assert not result.passed
+    assert "donor_open" not in transport.calls
+    assert "scene_transfer" not in transport.calls
+    assert ledger.owner_of_object("brick-1") == prepared.identity.donor_robot_id
+    assert ledger.observe(
+        prepared.identity.receiver_robot_id, "holding:brick-1"
+    ) is None
 
 
 def test_handover_no_dispatch_failure_does_not_claim_motion():
-    """A planning refusal is terminal-safe but is never a successful transfer."""
-    from test_handoff_contract import _handover_evidence
-
-    evidence = _handover_evidence(
-        receiver_free_space=False, receiver_grasp_feedback=False,
-        co_hold_confirmed=False, scene_transfer_committed=False,
-        donor_release_feedback=False, receiver_holding_follow=False,
-        evidence={"receiver_free_space": {"lifecycle": {
-            "dispatch_attempted": False, "physical_execution": False,
-            "terminal": True, "safe_to_release": True,
-        }}},
+    """Refuse a foreign executor without dispatch, with terminal-safe evidence."""
+    prepared, ledger, transport, backend = fixture()
+    wrong = replace(
+        operation(prepared), executor_robot_id=prepared.identity.donor_robot_id
     )
-    operation = SimpleNamespace(operation_id="handover-1", executor_robot_id="piper_1")
-    result = HandoverOperationBackend._result(operation, evidence, committed=False)
-    assert not result.motion_sent
-    assert not result.passed
-    assert result.terminal
-    assert result.evidence["owner_transfer_committed"] is False
+    result = asyncio.run(backend.execute(wrong))
+    assert not result.motion_sent and not result.passed and result.terminal
+    assert result.evidence["safe_to_release"] is True
+    assert not transport.calls
+    assert ledger.observe(
+        prepared.identity.donor_robot_id, "holding:brick-1"
+    ) is not None
 
 
-@pytest.mark.parametrize("failure", ["scene-transfer", "release"])
-def test_attempted_transfer_failure_invalidates_confirmed_holder(failure):
-    """Timeouts cannot leave the old ownership record as physical proof."""
-    class Handler(HandoverHandler):
-        async def _execute_free_space(self, req):
-            return FreeSpaceMotionEvidence(
-                req.operation_id, (req.receiver_robot_id,), True, True, True,
-                True, True, True,
-                {req.receiver_robot_id: {"arrival_confirmed": True}}, {}, None,
-            )
-
-        async def _dispatch_gripper(self, robot, payload, req, phase):
-            if phase == "donor_release":
-                raise TimeoutError("release result unavailable after dispatch")
-            return {"passed": True}
-
-        async def _samples(self, req):
-            return ({"sequence": 4},) * req.follow_samples
-
-        async def _dispatch_transfer(self, req, sample):
-            if failure == "scene-transfer":
-                raise TimeoutError("scene result unavailable after request")
-            return {"committed": True}
-
-    class Observations:
-        def verify_co_hold(self, req, samples):
-            return {"confirmed": True}
-
-    item = _handover_request()
-    ledger = OperationStateLedger(ROBOTS)
-    ledger.confirm_holding("piper_0", "brick-1", {"holding_confirmed": True})
-    result = asyncio.run(Handler(
-        ledger, free_space=object(), motion=object(),
-        observations=Observations(), poll_interval_s=0.0,
-    ).execute(item))
-    assert not result.ready_to_commit
-    assert not result.terminal and not result.safe_to_release
-    assert result.evidence["scene_transfer_attempted"] is True
-    assert (result.evidence.get("donor_release_attempted") is True) == (
-        failure == "release"
-    )
+@pytest.mark.parametrize("phase", ["scene_transfer", "donor_open"])
+def test_attempted_transfer_failure_invalidates_confirmed_holder(phase):
+    """Unknown scene/release completion invalidates both confirmed holding facts."""
+    prepared, ledger, transport, backend = fixture(fail=phase)
+    result = asyncio.run(backend.execute(operation(prepared)))
+    assert not result.passed and result.motion_sent
+    assert result.evidence["safe_to_release"] is False
+    assert transport.cancelled
     assert ledger.uncertain_handover("brick-1") is not None
     assert ledger.observe("piper_0", "holding:brick-1") is None
     assert ledger.observe("piper_1", "holding:brick-1") is None
 
 
-def _snapshot(sample):
-    """Serialize one observation using the strict live scene schema.
+def _live_transfer_fixture():
+    """Bind the real transfer method to an offline session boundary.
 
     Returns:
-        One co-sampled scene snapshot with exact provenance.
+        The prepared program, bound owner and recorded dispatch calls.
     """
-    return {
-        "schema": "rocobrick-scene-state/v1",
-        "session_id": sample.session_id,
-        "manifest_sha256": sample.manifest_sha256,
-        "scene_digest": "a" * 64,
-        "sequence": sample.sequence,
-        "sim_time_s": sample.sim_time_s,
-        "robots": {
-            sample.robot_id: {
-                "robot_id": sample.robot_id,
-                "sequence": sample.sequence,
-                "sim_time_s": sample.sim_time_s,
-                "opening_m": sample.opening_m,
-                "tcp_pose": {
-                    "position_xyz": list(sample.tcp_pose.position_xyz),
-                    "orientation_xyzw": list(sample.tcp_pose.orientation_xyzw),
-                },
-            }
-        },
-        "bricks": {
-            sample.physical_instance_id: {
-                "aabb_min": list(sample.aabb_min),
-                "aabb_max": list(sample.aabb_max),
-                "pose": {
-                    "position_xyz": list(sample.object_pose.position_xyz),
-                    "orientation_xyzw": list(sample.object_pose.orientation_xyzw),
-                },
-            }
-        },
-    }
+    prepared, _, _, _ = fixture()
+    calls = []
+
+    def dispatch(robot, op):
+        calls.append((robot, op))
+        return {"result": {"passed": True, "execution": {
+            "transfer_status": "COMMITTED", "donor_after": [], "receiver_after": [{}],
+            "terminal": True, "safe_to_release": True,
+        }}}
+
+    owner = SimpleNamespace(
+        authorization=SimpleNamespace(session_id="session-1", manifest_sha256="c" * 64),
+        session=SimpleNamespace(run_motion_operation=dispatch),
+        _receipt=lambda *args: args,
+    )
+    return prepared, owner, calls
 
 
 def test_transfer_attachment_uses_post_approach_receiver_tcp():
-    """Pre-motion receiver-relative boxes must not survive receiver movement."""
-    initial = _snapshot(_sample((0.3, 0.0, 0.24)))
-    item = replace(_handover_request(), scene_snapshot=initial)
-    attach = receiver_attachment_from_sample(item, _snapshot(_sample()))
-    assert attach["minimum_m"] == pytest.approx((-0.01, -0.01, -0.01))
-    assert attach["maximum_m"] == pytest.approx((0.01, 0.01, 0.01))
-    assert attach["geometry_digest"] == box_geometry_digest(
-        object_id="brick-1", frame_id="piper_1_rocobrick_tcp",
-        minimum_m=attach["minimum_m"], maximum_m=attach["maximum_m"],
+    """Exercise real live transfer from current TCP, including its digest API."""
+    prepared, owner, calls = _live_transfer_fixture()
+    raw = snapshot(4)
+    asyncio.run(LiveSimulationHandover._transfer(
+        owner, prepared, "scene_transfer", {"scene_snapshot": raw},
+    ))
+    assert len(calls) == 1
+    _, op = calls[0]
+    assert op.payload["frame_id"] == "piper_0_rocobrick_tcp"
+    assert op.payload["minimum_m"] == pytest.approx((-0.008, -0.008, -0.0055))
+    assert op.payload["maximum_m"] == pytest.approx((0.008, 0.008, 0.0055))
+    assert op.payload["geometry_digest"] == box_geometry_digest(
+        object_id="brick-1", frame_id="piper_0_rocobrick_tcp",
+        minimum_m=op.payload["minimum_m"], maximum_m=op.payload["maximum_m"],
     )
-    foreign = _snapshot(_sample())
-    foreign["session_id"] = "foreign"
-    with pytest.raises(ValueError, match="provenance"):
-        receiver_attachment_from_sample(item, foreign)
+
+
+@pytest.mark.parametrize(
+    "key,value", [("session_id", "foreign"), ("manifest_sha256", "e" * 64)]
+)
+def test_transfer_attachment_rejects_foreign_provenance_before_dispatch(key, value):
+    """Old attachment helper's provenance guard now exercises the real live path."""
+    prepared, owner, calls = _live_transfer_fixture()
+    raw = deepcopy(snapshot(4))
+    raw[key] = value
+    with pytest.raises(ValueError):
+        asyncio.run(LiveSimulationHandover._transfer(
+            owner, prepared, "scene_transfer", {"scene_snapshot": raw},
+        ))
+    assert not calls
+
+
+def test_direct_backend_pre_dispatch_failure_is_fail_closed_not_terminal_safe():
+    """Record Direct's conservative nonterminal result, not old backend equivalence."""
+    owner = SimpleNamespace(session=SimpleNamespace())
+    backend = DirectHandoverBackend(owner)
+    op = SimpleNamespace(operation_id="direct-no-dispatch", executor_robot_id="piper_0")
+    result = asyncio.run(backend.execute(op))
+    assert not result.passed and not result.motion_sent and not result.terminal
+    assert result.evidence["handover_complete"] is False
+    assert "persistent combined planning/execution is unavailable" in result.reason
+    assert backend._motion_ids == {}
+
+
+def test_receiver_contact_boundary_keeps_the_pick_floor_tip_clearance(tmp_path):
+    """Retire the PICK z clamp, but retain actual full-model floor rejection."""
+    from test_handover_geometry import native_scene
+
+    from rocobrick.adapters.moveit.handover_geometry import IsolatedHandoverGeometry
+
+    scene, item = native_scene(tmp_path)
+    assert scene.check(item.start_state, holder=item.donor.robot_id).valid
+    captured = deepcopy(item.scene_snapshot)
+    captured["environment_colliders"]["floor"] = {
+        "aabb_min": [-2.0, -2.0, -0.1], "aabb_max": [2.0, 2.0, 0.1],
+    }
+    obstructed = replace(item, scene_snapshot=captured)
+    blocked = IsolatedHandoverGeometry(scene.files, obstructed)
+    assert not blocked.check(obstructed.start_state, holder=item.donor.robot_id).valid
 
 
 def _planning_fixture():
@@ -317,6 +241,13 @@ def _planning_fixture():
             robot: {joint: 0.05 for joint in arms[robot]} for robot in ROBOTS
         },
         unified_start_state=lambda: {joint: 0.0 for joint in names},
+        # The sim-arbiter clearance gate reads the combined robot description
+        # the planner used.  This double declares no collidable bodies, so the
+        # gate has nothing to measure; the real session serves the latched
+        # /dual_arm/robot_description.
+        unified_robot_description=lambda: '<robot name="dual_stub"><link name="dual_world"/><link name="stub_link"/>'
+        '<joint name="stub_joint" type="fixed"><parent link="dual_world"/>'
+        '<child link="stub_link"/></joint></robot>',
         coordinated_plan_runtime=lambda: SimpleNamespace(
             plan=lambda req, timeout_s: {
                 "joint_names": tuple(names),

@@ -1,8 +1,8 @@
 import pytest
 
 from rocobrick.models import FailureReason
-from rocobrick.skill_execution import execute_skill
-from rocobrick.skills import PhaseResult, PhaseStatus
+from rocobrick.skills.execution import execute_skill
+from rocobrick.skills.programs import PhaseResult, PhaseStatus
 from rocobrick.task_facts import EventType, TaskFactStore
 
 

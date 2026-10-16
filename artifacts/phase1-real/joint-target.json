@@ -1,0 +1,580 @@
+{
+  "checks": {
+    "bounded_and_no_leftovers": true,
+    "command_observed": true,
+    "container_profile_client_only_no_listener": true,
+    "host_cleanup_orderly": true,
+    "host_commands_applied": true,
+    "host_marker": true,
+    "log_scan_clean": true,
+    "outbound_target_passed": true,
+    "p1a_prerequisite": true,
+    "probe_passed": true,
+    "readiness": true,
+    "return_passed": true
+  },
+  "collected_at_utc": "2026-09-21T04:49:11.068841+00:00",
+  "container": {
+    "exit_status": "0",
+    "image": "sha256:659623efed210acf91ea1bc76e6aac2d360ed62882bc536693a4afc0fb113e98",
+    "name": "rocobrick-p1-real-joint-2568270"
+  },
+  "container_log_tail": "[p1-real-inner] move_group precondition ready=1\n[p1-real-inner] probe_status=0\n",
+  "controllers_listing": "\u001b[92mjoint_state_broadcaster\u001b[0m joint_state_broadcaster/JointStateBroadcaster          \u001b[92mactive\u001b[0m\n\u001b[92mgripper_controller     \u001b[0m joint_trajectory_controller/JointTrajectoryController  \u001b[92mactive\u001b[0m\n\u001b[92marm_controller         \u001b[0m joint_trajectory_controller/JointTrajectoryController  \u001b[92mactive\u001b[0m\n",
+  "gpu_diagnostic": [
+    "GPU 0: NVIDIA GeForce RTX 4090 D (UUID: GPU-9707ae73-9aea-5c4a-841c-f322933ac495)"
+  ],
+  "host_bridge": {
+    "articulation_prim_path": "/World/Robot_0/root_joint",
+    "bounded": {
+      "hold_seconds_s": 240.0,
+      "hold_steps": 125000,
+      "max_steps": 1000000,
+      "ready_timeout_s": 120.0,
+      "render_steps": false,
+      "time_limit_s": 600.0
+    },
+    "bridge_extension_enabled": false,
+    "cleanup": {
+      "app_close_initiated": true,
+      "rclpy_shutdown": true,
+      "timeline_stopped": true,
+      "world_stopped": true
+    },
+    "clock_published_at_ready": 1,
+    "commands": {
+      "applied": 366,
+      "clamped_to_limits": 0,
+      "received": 366,
+      "unknown_joint_names_ignored": []
+    },
+    "dds_profile": "/home/mzictt/RoCo_Piper/.runtime/dds/fastdds-host.xml",
+    "dof_limits_source": "robot.dof_properties",
+    "elapsed_s": 246.406,
+    "headless": true,
+    "hold": {
+      "seconds_wall": 240.0,
+      "sim_time_final_s": 2607.250136,
+      "steps": 156428
+    },
+    "hold_completed": true,
+    "hold_samples": [
+      {
+        "playing": true,
+        "sim_time_s": 2.117,
+        "step": 125,
+        "wall_s": 0.339
+      },
+      {
+        "playing": true,
+        "sim_time_s": 4.117,
+        "step": 245,
+        "wall_s": 0.67
+      },
+      {
+        "playing": true,
+        "sim_time_s": 6.117,
+        "step": 365,
+        "wall_s": 0.835
+      },
+      {
+        "playing": true,
+        "sim_time_s": 8.117,
+        "step": 485,
+        "wall_s": 0.921
+      },
+      {
+        "playing": true,
+        "sim_time_s": 10.117,
+        "step": 605,
+        "wall_s": 1.015
+      },
+      {
+        "playing": true,
+        "sim_time_s": 12.117,
+        "step": 725,
+        "wall_s": 1.098
+      },
+      {
+        "playing": true,
+        "sim_time_s": 14.117,
+        "step": 845,
+        "wall_s": 1.161
+      },
+      {
+        "playing": true,
+        "sim_time_s": 16.117,
+        "step": 965,
+        "wall_s": 1.224
+      },
+      {
+        "playing": true,
+        "sim_time_s": 18.117,
+        "step": 1085,
+        "wall_s": 1.286
+      },
+      {
+        "playing": true,
+        "sim_time_s": 20.117,
+        "step": 1205,
+        "wall_s": 1.348
+      }
+    ],
+    "in_process_rclpy": true,
+    "joint_command_message_type": "sensor_msgs/JointState",
+    "joint_dofs": [
+      "joint1",
+      "joint2",
+      "joint3",
+      "joint4",
+      "joint5",
+      "joint6",
+      "gripper_joint1",
+      "gripper_joint2"
+    ],
+    "joint_states_published_at_ready": 1,
+    "omnigraph_created": false,
+    "passed": true,
+    "phase": "P0.5",
+    "publish_totals": {
+      "clock": 6977,
+      "joint_states": 6977,
+      "joint_states_diag": 6977,
+      "positions_nan": 0
+    },
+    "rclpy_bundled_humble": true,
+    "rclpy_module": "/home/mzictt/RoCo_Piper/.venv/lib/python3.11/site-packages/isaacsim/exts/isaacsim.ros2.bridge/humble/rclpy/rclpy/__init__.py",
+    "rclpy_node_count": 1,
+    "rclpy_node_name": "piper_l0_host_bridge",
+    "rclpy_source": "bundled humble rclpy via tools/isaac-ros-env.sh",
+    "rclpy_started": true,
+    "readiness_marker": "p0.5_host_bridge_ready",
+    "ready": true,
+    "robot_prim_path": "/World/Robot_0",
+    "ros_domain_id": 73,
+    "schema": "rocobrick-host-bridge-smoke/v1",
+    "sim_time_at_ready_s": 0.116667,
+    "steps_to_ready": 5,
+    "steps_total": 156433,
+    "timeline_playing": true,
+    "topics": {
+      "clock": "/clock",
+      "joint_commands": "/isaac_joint_command",
+      "joint_states": "/isaac_joint_states"
+    },
+    "usd": {
+      "path": "/home/mzictt/RoCo_Piper/robot_assets/piper_l/USD/piper_l_gripper_d435.usd",
+      "sha256": "a781d52f9d55291fca9c8f2695abf9e311640d996314d272f47639d5323e2375"
+    }
+  },
+  "host_exit_status": "0",
+  "host_log_tail": "026-09-21T04:45:08Z [6,105ms] [Error] [omni.physx.plugin] PhysX error: Could not find CUDA module containing function 'calculateAnisotropyLaunch'., FILE /builds/omniverse/physics/physx/source/cudamanager/src/CudaKernelWrangler.cpp, LINE 115\n2026-09-21T04:45:08Z [6,106ms] [Error] [omni.physx.plugin] PhysX error: Could not find CUDA module containing function 'anisotropyKernel'., FILE /builds/omniverse/physics/physx/source/cudamanager/src/CudaKernelWrangler.cpp, LINE 115\n2026-09-21T04:45:08Z [6,106ms] [Error] [omni.physx.plugin] PhysX error: Could not find CUDA module containing function 'smoothPositionsKernel'., FILE /builds/omniverse/physics/physx/source/cudamanager/src/CudaKernelWrangler.cpp, LINE 115\n2026-09-21T04:45:08Z [6,106ms] [Error] [omni.physx.plugin] PhysX error: Could not find CUDA module containing function 'iso_ComputeParticleDensityUsingSDF'., FILE /builds/omniverse/physics/physx/source/cudamanager/src/CudaKernelWrangler.cpp, LINE 115\n2026-09-21T04:45:08Z [6,106ms] [Error] [omni.physx.plugin] PhysX error: Could not find CUDA module containing function 'iso_ComputeParticleDensityUsingSDFSparse'., FILE /builds/omniverse/physics/physx/source/cudamanager/src/CudaKernelWrangler.cpp, LINE 115\n2026-09-21T04:45:08Z [6,106ms] [Error] [omni.physx.plugin] PhysX error: Could not find CUDA module containing function 'iso_ComputeParticleDensity'., FILE /builds/omniverse/physics/physx/source/cudamanager/src/CudaKernelWrangler.cpp, LINE 115\n2026-09-21T04:45:08Z [6,106ms] [Error] [omni.physx.plugin] PhysX error: Could not find CUDA module containing function 'iso_ComputeParticleDensitySparse'., FILE /builds/omniverse/physics/physx/source/cudamanager/src/CudaKernelWrangler.cpp, LINE 115\n2026-09-21T04:45:08Z [6,106ms] [Error] [omni.physx.plugin] PhysX error: Could not find CUDA module containing function 'iso_CountCellVerts'., FILE /builds/omniverse/physics/physx/source/cudamanager/src/CudaKernelWrangler.cpp, LINE 115\n2026-09-21T04:45:08Z [6,106ms] [Error] [omni.physx.plugin] PhysX error: Could not find CUDA module containing function 'iso_CountCellVertsSparse'., FILE /builds/omniverse/physics/physx/source/cudamanager/src/CudaKernelWrangler.cpp, LINE 115\n2026-09-21T04:45:08Z [6,106ms] [Error] [omni.physx.plugin] PhysX error: Could not find CUDA module containing function 'iso_CountCellVertsDC'., FILE /builds/omniverse/physics/physx/source/cudamanager/src/CudaKernelWrangler.cpp, LINE 115\n2026-09-21T04:45:08Z [6,106ms] [Error] [omni.physx.plugin] PhysX error: Could not find CUDA module containing function 'iso_CountCellVertsDCSparse'., FILE /builds/omniverse/physics/physx/source/cudamanager/src/CudaKernelWrangler.cpp, LINE 115\n2026-09-21T04:45:08Z [6,106ms] [Error] [omni.physx.plugin] PhysX error: Could not find CUDA module containing function 'iso_CreateVerts'., FILE /builds/omniverse/physics/physx/source/cudamanager/src/CudaKernelWrangler.cpp, LINE 115\n2026-09-21T04:45:08Z [6,106ms] [Error] [omni.physx.plugin] PhysX error: Could not find CUDA module containing function 'iso_CreateVertsSparse'., FILE /builds/omniverse/physics/physx/source/cudamanager/src/CudaKernelWrangler.cpp, LINE 115\n2026-09-21T04:45:08Z [6,106ms] [Error] [omni.physx.plugin] PhysX error: Could not find CUDA module containing function 'iso_CreateVertsDC'., FILE /builds/omniverse/physics/physx/source/cudamanager/src/CudaKernelWrangler.cpp, LINE 115\n2026-09-21T04:45:08Z [6,106ms] [Error] [omni.physx.plugin] PhysX error: Could not find CUDA module containing function 'iso_CreateVertsDCSparse'., FILE /builds/omniverse/physics/physx/source/cudamanager/src/CudaKernelWrangler.cpp, LINE 115\n2026-09-21T04:45:08Z [6,106ms] [Error] [omni.physx.plugin] PhysX error: Could not find CUDA module containing function 'iso_CountTriIds'., FILE /builds/omniverse/physics/physx/source/cudamanager/src/CudaKernelWrangler.cpp, LINE 115\n2026-09-21T04:45:08Z [6,106ms] [Error] [omni.physx.plugin] PhysX error: Could not find CUDA module containing function 'iso_CountTriIdsSparse'., FILE /builds/omniverse/physics/physx/source/cudamanager/src/CudaKernelWrangler.cpp, LINE 115\n2026-09-21T04:45:08Z [6,106ms] [Error] [omni.physx.plugin] PhysX error: Could not find CUDA module containing function 'iso_CountTriIdsDC'., FILE /builds/omniverse/physics/physx/source/cudamanager/src/CudaKernelWrangler.cpp, LINE 115\n2026-09-21T04:45:08Z [6,106ms] [Error] [omni.physx.plugin] PhysX error: Could not find CUDA module containing function 'iso_CountTriIdsDCSparse'., FILE /builds/omniverse/physics/physx/source/cudamanager/src/CudaKernelWrangler.cpp, LINE 115\n2026-09-21T04:45:08Z [6,106ms] [Error] [omni.physx.plugin] PhysX error: Could not find CUDA module containing function 'iso_CreateTriIds'., FILE /builds/omniverse/physics/physx/source/cudamanager/src/CudaKernelWrangler.cpp, LINE 115\n2026-09-21T04:45:08Z [6,106ms] [Error] [omni.physx.plugin] PhysX error: Could not find CUDA module containing function 'iso_CreateTriIdsSparse'., FILE /builds/omniverse/physics/physx/source/cudamanager/src/CudaKernelWrangler.cpp, LINE 115\n2026-09-21T04:45:08Z [6,107ms] [Error] [omni.physx.plugin] PhysX error: Could not find CUDA module containing function 'iso_CreateTriIdsDC'., FILE /builds/omniverse/physics/physx/source/cudamanager/src/CudaKernelWrangler.cpp, LINE 115\n2026-09-21T04:45:08Z [6,107ms] [Error] [omni.physx.plugin] PhysX error: Could not find CUDA module containing function 'iso_CreateTriIdsDCSparse'., FILE /builds/omniverse/physics/physx/source/cudamanager/src/CudaKernelWrangler.cpp, LINE 115\n2026-09-21T04:45:08Z [6,107ms] [Error] [omni.physx.plugin] PhysX error: Could not find CUDA module containing function 'iso_SmoothVerts'., FILE /builds/omniverse/physics/physx/source/cudamanager/src/CudaKernelWrangler.cpp, LINE 115\n2026-09-21T04:45:08Z [6,107ms] [Error] [omni.physx.plugin] PhysX error: Could not find CUDA module containing function 'iso_AverageVerts'., FILE /builds/omniverse/physics/physx/source/cudamanager/src/CudaKernelWrangler.cpp, LINE 115\n2026-09-21T04:45:08Z [6,107ms] [Error] [omni.physx.plugin] PhysX error: Could not find CUDA module containing function 'iso_SmoothNormals'., FILE /builds/omniverse/physics/physx/source/cudamanager/src/CudaKernelWrangler.cpp, LINE 115\n2026-09-21T04:45:08Z [6,107ms] [Error] [omni.physx.plugin] PhysX error: Could not find CUDA module containing function 'iso_SmoothNormalsSparse'., FILE /builds/omniverse/physics/physx/source/cudamanager/src/CudaKernelWrangler.cpp, LINE 115\n2026-09-21T04:45:08Z [6,107ms] [Error] [omni.physx.plugin] PhysX error: Could not find CUDA module containing function 'iso_SmoothNormalsNormalize'., FILE /builds/omniverse/physics/physx/source/cudamanager/src/CudaKernelWrangler.cpp, LINE 115\n2026-09-21T04:45:08Z [6,107ms] [Error] [omni.physx.plugin] PhysX error: Could not find CUDA module containing function 'iso_SmoothNormalsNormalizeSparse'., FILE /builds/omniverse/physics/physx/source/cudamanager/src/CudaKernelWrangler.cpp, LINE 115\n2026-09-21T04:45:08Z [6,107ms] [Error] [omni.physx.plugin] PhysX error: Could not find CUDA module containing function 'iso_ComputeNormals'., FILE /builds/omniverse/physics/physx/source/cudamanager/src/CudaKernelWrangler.cpp, LINE 115\n2026-09-21T04:45:08Z [6,107ms] [Error] [omni.physx.plugin] PhysX error: Could not find CUDA module containing function 'iso_ComputeNormalsSparse'., FILE /builds/omniverse/physics/physx/source/cudamanager/src/CudaKernelWrangler.cpp, LINE 115\n2026-09-21T04:45:08Z [6,107ms] [Error] [omni.physx.plugin] PhysX error: Could not find CUDA module containing function 'iso_NormalizeNormals'., FILE /builds/omniverse/physics/physx/source/cudamanager/src/CudaKernelWrangler.cpp, LINE 115\n2026-09-21T04:45:08Z [6,107ms] [Error] [omni.physx.plugin] PhysX error: Could not find CUDA module containing function 'iso_NormalizeNormalsSparse'., FILE /builds/omniverse/physics/physx/source/cudamanager/src/CudaKernelWrangler.cpp, LINE 115\n2026-09-21T04:45:08Z [6,107ms] [Error] [omni.physx.plugin] PhysX error: Could not find CUDA module containing function 'iso_GridFilterGauss'., FILE /builds/omniverse/physics/physx/source/cudamanager/src/CudaKernelWrangler.cpp, LINE 115\n2026-09-21T04:45:08Z [6,107ms] [Error] [omni.physx.plugin] PhysX error: Could not find CUDA module containing function 'iso_GridFilterGaussSparse'., FILE /builds/omniverse/physics/physx/source/cudamanager/src/CudaKernelWrangler.cpp, LINE 115\n2026-09-21T04:45:08Z [6,107ms] [Error] [omni.physx.plugin] PhysX error: Could not find CUDA module containing function 'iso_GridFilterDilateErode'., FILE /builds/omniverse/physics/physx/source/cudamanager/src/CudaKernelWrangler.cpp, LINE 115\n2026-09-21T04:45:08Z [6,107ms] [Error] [omni.physx.plugin] PhysX error: Could not find CUDA module containing function 'iso_GridFilterDilateErodeSparse'., FILE /builds/omniverse/physics/physx/source/cudamanager/src/CudaKernelWrangler.cpp, LINE 115\n2026-09-21T04:45:08Z [6,107ms] [Error] [omni.physx.plugin] PhysX error: Could not find CUDA module containing function 'sg_SparseGridCalcSubgridHashes'., FILE /builds/omniverse/physics/physx/source/cudamanager/src/CudaKernelWrangler.cpp, LINE 115\n2026-09-21T04:45:08Z [6,107ms] [Error] [omni.physx.plugin] PhysX error: Could not find CUDA module containing function 'sg_SparseGridMarkRequiredNeighbors'., FILE /builds/omniverse/physics/physx/source/cudamanager/src/CudaKernelWrangler.cpp, LINE 115\n2026-09-21T04:45:08Z [6,107ms] [Error] [omni.physx.plugin] PhysX error: Could not find CUDA module containing function 'sg_SparseGridSortedArrayToDelta'., FILE /builds/omniverse/physics/physx/source/cudamanager/src/CudaKernelWrangler.cpp, LINE 115\n2026-09-21T04:45:08Z [6,107ms] [Error] [omni.physx.plugin] PhysX error: Could not find CUDA module containing function 'sg_SparseGridGetUniqueValues'., FILE /builds/omniverse/physics/physx/source/cudamanager/src/CudaKernelWrangler.cpp, LINE 115\n2026-09-21T04:45:08Z [6,108ms] [Error] [omni.physx.plugin] PhysX error: Could not find CUDA module containing function 'sg_SparseGridClearDensity'., FILE /builds/omniverse/physics/physx/source/cudamanager/src/CudaKernelWrangler.cpp, LINE 115\n2026-09-21T04:45:08Z [6,108ms] [Error] [omni.physx.plugin] PhysX error: Could not find CUDA module containing function 'sg_SparseGridBuildSubgridNeighbors'., FILE /builds/omniverse/physics/physx/source/cudamanager/src/CudaKernelWrangler.cpp, LINE 115\n2026-09-21T04:45:08Z [6,108ms] [Error] [omni.physx.plugin] PhysX error: Could not find CUDA module containing function 'sg_MarkSubgridEndIndices'., FILE /builds/omniverse/physics/physx/source/cudamanager/src/CudaKernelWrangler.cpp, LINE 115\n2026-09-21T04:45:08Z [6,108ms] [Error] [omni.physx.plugin] PhysX error: Could not find CUDA module containing function 'sg_ReuseSubgrids'., FILE /builds/omniverse/physics/physx/source/cudamanager/src/CudaKernelWrangler.cpp, LINE 115\n2026-09-21T04:45:08Z [6,108ms] [Error] [omni.physx.plugin] PhysX error: Could not find CUDA module containing function 'sg_AddReleasedSubgridsToUnusedStack'., FILE /builds/omniverse/physics/physx/source/cudamanager/src/CudaKernelWrangler.cpp, LINE 115\n2026-09-21T04:45:08Z [6,108ms] [Error] [omni.physx.plugin] PhysX error: Could not find CUDA module containing function 'sg_AllocateNewSubgrids'., FILE /builds/omniverse/physics/physx/source/cudamanager/src/CudaKernelWrangler.cpp, LINE 115\n2026-09-21T04:45:08Z [6,108ms] [Error] [omni.physx.plugin] PhysX error: Could not find CUDA module containing function 'interleaveBuffers'., FILE /builds/omniverse/physics/physx/source/cudamanager/src/CudaKernelWrangler.cpp, LINE 115\n2026-09-21T04:45:08Z [6,108ms] [Error] [omni.physx.plugin] PhysX error: Could not find CUDA module containing function 'interpolateSkinnedClothVertices'., FILE /builds/omniverse/physics/physx/source/cudamanager/src/CudaKernelWrangler.cpp, LINE 115\n2026-09-21T04:45:08Z [6,108ms] [Error] [omni.physx.plugin] PhysX error: Could not find CUDA module containing function 'interpolateSkinnedSoftBodyVertices'., FILE /builds/omniverse/physics/physx/source/cudamanager/src/CudaKernelWrangler.cpp, LINE 115\n2026-09-21T04:45:08Z [6,108ms] [Error] [omni.physx.plugin] PhysX error: Could not find CUDA module containing function 'normalVectorsAreaWeighted'., FILE /builds/omniverse/physics/physx/source/cudamanager/src/CudaKernelWrangler.cpp, LINE 115\n2026-09-21T04:45:08Z [6,108ms] [Error] [omni.physx.plugin] PhysX error: Could not find CUDA module containing function 'normalizeNormals'., FILE /builds/omniverse/physics/physx/source/cudamanager/src/CudaKernelWrangler.cpp, LINE 115\n2026-09-21T04:45:08Z [6,108ms] [Error] [omni.physx.plugin] PhysX error: Could not find CUDA module containing function 'zeroNormals'., FILE /builds/omniverse/physics/physx/source/cudamanager/src/CudaKernelWrangler.cpp, LINE 115\n2026-09-21T04:45:08Z [6,108ms] [Error] [omni.physx.plugin] PhysX error: Could not find CUDA module containing function 'bvhComputeTriangleBounds'., FILE /builds/omniverse/physics/physx/source/cudamanager/src/CudaKernelWrangler.cpp, LINE 115\n2026-09-21T04:45:08Z [6,108ms] [Error] [omni.physx.plugin] PhysX error: Could not find CUDA module containing function 'bvhComputeTotalBounds'., FILE /builds/omniverse/physics/physx/source/cudamanager/src/CudaKernelWrangler.cpp, LINE 115\n2026-09-21T04:45:08Z [6,108ms] [Error] [omni.physx.plugin] PhysX error: Could not find CUDA module containing function 'bvhComputeTotalInvEdges'., FILE /builds/omniverse/physics/physx/source/cudamanager/src/CudaKernelWrangler.cpp, LINE 115\n2026-09-21T04:45:08Z [6,108ms] [Error] [omni.physx.plugin] PhysX error: Could not find CUDA module containing function 'bvhCalculateMortonCodes'., FILE /builds/omniverse/physics/physx/source/cudamanager/src/CudaKernelWrangler.cpp, LINE 115\n2026-09-21T04:45:08Z [6,108ms] [Error] [omni.physx.plugin] PhysX error: Could not find CUDA module containing function 'bvhCalculateKeyDeltas'., FILE /builds/omniverse/physics/physx/source/cudamanager/src/CudaKernelWrangler.cpp, LINE 115\n2026-09-21T04:45:08Z [6,108ms] [Error] [omni.physx.plugin] PhysX error: Could not find CUDA module containing function 'bvhCalculateKeyDeltasSquaredDistance'., FILE /builds/omniverse/physics/physx/source/cudamanager/src/CudaKernelWrangler.cpp, LINE 115\n2026-09-21T04:45:08Z [6,108ms] [Error] [omni.physx.plugin] PhysX error: Could not find CUDA module containing function 'bvhBuildLeaves'., FILE /builds/omniverse/physics/physx/source/cudamanager/src/CudaKernelWrangler.cpp, LINE 115\n2026-09-21T04:45:08Z [6,108ms] [Error] [omni.physx.plugin] PhysX error: Could not find CUDA module containing function 'bvhBuildHierarchy'., FILE /builds/omniverse/physics/physx/source/cudamanager/src/CudaKernelWrangler.cpp, LINE 115\n2026-09-21T04:45:08Z [6,109ms] [Error] [omni.physx.plugin] PhysX error: Could not find CUDA module containing function 'bvhBuildHierarchyAndWindingClusters'., FILE /builds/omniverse/physics/physx/source/cudamanager/src/CudaKernelWrangler.cpp, LINE 115\n2026-09-21T04:45:08Z [6,109ms] [Error] [omni.physx.plugin] PhysX error: Could not find CUDA module containing function 'sdfCalculateDenseGridBlocks'., FILE /builds/omniverse/physics/physx/source/cudamanager/src/CudaKernelWrangler.cpp, LINE 115\n2026-09-21T04:45:08Z [6,109ms] [Error] [omni.physx.plugin] PhysX error: Could not find CUDA module containing function 'sdfCalculateDenseGridHybrid'., FILE /builds/omniverse/physics/physx/source/cudamanager/src/CudaKernelWrangler.cpp, LINE 115\n2026-09-21T04:45:08Z [6,109ms] [Error] [omni.physx.plugin] PhysX error: Could not find CUDA module containing function 'sdfPopulateBackgroundSDF'., FILE /builds/omniverse/physics/physx/source/cudamanager/src/CudaKernelWrangler.cpp, LINE 115\n2026-09-21T04:45:08Z [6,109ms] [Error] [omni.physx.plugin] PhysX error: Could not find CUDA module containing function 'sdfMarkRequiredSdfSubgrids'., FILE /builds/omniverse/physics/physx/source/cudamanager/src/CudaKernelWrangler.cpp, LINE 115\n2026-09-21T04:45:08Z [6,109ms] [Error] [omni.physx.plugin] PhysX error: Could not find CUDA module containing function 'sdfPopulateSdfSubgrids'., FILE /builds/omniverse/physics/physx/source/cudamanager/src/CudaKernelWrangler.cpp, LINE 115\n2026-09-21T04:45:08Z [6,109ms] [Error] [omni.physx.plugin] PhysX error: Could not find CUDA module containing function 'sdfCountHoles'., FILE /builds/omniverse/physics/physx/source/cudamanager/src/CudaKernelWrangler.cpp, LINE 115\n2026-09-21T04:45:08Z [6,109ms] [Error] [omni.physx.plugin] PhysX error: Could not find CUDA module containing function 'sdfFindHoles'., FILE /builds/omniverse/physics/physx/source/cudamanager/src/CudaKernelWrangler.cpp, LINE 115\n2026-09-21T04:45:08Z [6,109ms] [Error] [omni.physx.plugin] PhysX error: Could not find CUDA module containing function 'sdfApplyHoleCorrections'., FILE /builds/omniverse/physics/physx/source/cudamanager/src/CudaKernelWrangler.cpp, LINE 115\n2026-09-21T04:45:08Z [6,109ms] [Error] [omni.physx.plugin] PhysX error: Could not find CUDA module containing function 'sdfCalculateDenseGridPointCloud'., FILE /builds/omniverse/physics/physx/source/cudamanager/src/CudaKernelWrangler.cpp, LINE 115\n2026-09-21T04:45:08Z [6,133ms] [Warning] [omni.timeline.plugin] Deprecated: direct use of ITimeline callbacks is deprecated. Use ITimeline::getTimeline (Python: omni.timeline.get_timeline_interface) instead.\n2026-09-21T04:45:08Z [6,304ms] [Error] [carb.graphics-vulkan.plugin] Out of GPU memory allocating resource 'LdrColor' [size: unknown]\n2026-09-21T04:45:08Z [6,304ms] [Error] [carb.graphics-vulkan.plugin] Failure injector rule to repro:\n{\n    debugName=\"LdrColor\",\n}\n2026-09-21T04:45:08Z [6,304ms] [Error] [carb.graphics-vulkan.plugin] VkResult: ERROR_OUT_OF_DEVICE_MEMORY\n2026-09-21T04:45:08Z [6,304ms] [Error] [carb.graphics-vulkan.plugin] vkAllocateMemory failed.\n2026-09-21T04:45:08Z [6,304ms] [Error] [gpu.foundation.plugin] Texture creation failed for the device: 0.\n2026-09-21T04:45:08Z [6,304ms] [Error] [carb.scenerenderer-rtx.plugin] Failed to allocate 1280x720 LdrColor resource for device mask 0x1\n2026-09-21T04:45:08Z [6,304ms] [Error] [omni.usd] HydraEngine::render failed to end the compute graph: error code 6\nStarting kit application with the following args:  ['/home/mzictt/RoCo_Piper/.venv/lib/python3.11/site-packages/isaacsim/exts/isaacsim.simulation_app/isaacsim/simulation_app/simulation_app.py', '/home/mzictt/RoCo_Piper/.venv/lib/python3.11/site-packages/isaacsim/apps/isaacsim.exp.base.python.kit', '--/app/tokens/exe-path=/home/mzictt/RoCo_Piper/.venv/lib/python3.11/site-packages/isaacsim/kit', '--/persistent/app/viewport/displayOptions=3094', '--/rtx/materialDb/syncLoads=True', '--/rtx/hydra/materialSyncLoads=True', '--/omni.kit.plugin/syncUsdLoads=True', '--/app/renderer/resolution/width=1280', '--/app/renderer/resolution/height=720', '--/app/window/width=1440', '--/app/window/height=900', '--/renderer/multiGpu/enabled=True', '--/app/fastShutdown=True', '--/app/installSignalHandlers=0', '--ext-folder', '/home/mzictt/RoCo_Piper/.venv/lib/python3.11/site-packages/isaacsim/exts', '--ext-folder', '/home/mzictt/RoCo_Piper/.venv/lib/python3.11/site-packages/isaacsim/apps', '--/physics/cudaDevice=0', '--/plugins/carb.tasking.plugin/threadCount=32', '--/plugins/omni.tbb.globalcontrol/maxThreadCount=32', '--portable', '--no-window', '--/app/window/hideUi=1']\nPassing the following args to the base kit application:  []\nWarp 1.8.2 initialized:\n   CUDA Toolkit 12.8, Driver 13.0\n   Devices:\n     \"cpu\"      : \"x86_64\"\n     \"cuda:0\"   : \"NVIDIA GeForce RTX 4090 D\" (23 GiB, sm_89, mempool enabled)\n   Kernel cache:\n     /home/mzictt/.cache/warp/1.8.2\nWarp DeprecationWarning: The `warp.sim` module is deprecated and will be removed in v1.10. Please transition to using the forthcoming Newton library instead.\n{\"elapsed_s\": 0.012, \"joint_dofs\": [\"joint1\", \"joint2\", \"joint3\", \"joint4\", \"joint5\", \"joint6\", \"gripper_joint1\", \"gripper_joint2\"], \"marker\": \"p0.5_host_bridge_ready\", \"schema\": \"rocobrick-host-bridge-smoke/v1\", \"stage\": \"ready\", \"steps\": 5}\n[246.477s] Simulation App Shutting Down\n",
+  "leftovers": {
+    "container": null,
+    "host_process": null
+  },
+  "log_scan": {
+    "files": [
+      "host-joint-bridge.log",
+      "container.log",
+      "probe.log",
+      "move_group.log.tail"
+    ],
+    "findings": [],
+    "passed": true,
+    "patterns": [
+      "address already in use",
+      "error binding",
+      "binding at port",
+      "shared memory",
+      "udpv4",
+      "udpv6",
+      "multicast",
+      "hardware init",
+      "failed to activate",
+      "activation failed",
+      "stale",
+      "SHM",
+      "nan"
+    ]
+  },
+  "move_group_log_tail": "nitor]: Publishing maintained planning scene on 'monitored_planning_scene'\n[move_group-3] [INFO] [1789965912.254735455] [moveit.ros_planning_interface.moveit_cpp]: Listening to 'joint_states' for joint states\n[move_group-3] [INFO] [1789965912.255300953] [moveit_ros.current_state_monitor]: Listening to joint states on topic 'joint_states'\n[move_group-3] [INFO] [1789965912.255779285] [moveit_ros.planning_scene_monitor.planning_scene_monitor]: Listening to '/attached_collision_object' for attached collision objects\n[move_group-3] [INFO] [1789965912.255786332] [moveit_ros.planning_scene_monitor.planning_scene_monitor]: Starting planning scene monitor\n[move_group-3] [INFO] [1789965912.256125500] [moveit_ros.planning_scene_monitor.planning_scene_monitor]: Listening to '/planning_scene'\n[move_group-3] [INFO] [1789965912.256130750] [moveit_ros.planning_scene_monitor.planning_scene_monitor]: Starting world geometry update monitor for collision objects, attached objects, octomap updates.\n[move_group-3] [INFO] [1789965912.256476344] [moveit_ros.planning_scene_monitor.planning_scene_monitor]: Listening to 'collision_object'\n[move_group-3] [INFO] [1789965912.256811780] [moveit_ros.planning_scene_monitor.planning_scene_monitor]: Listening to 'planning_scene_world' for planning scene world geometry\n[move_group-3] [WARN] [1789965912.256873066] [moveit.ros.occupancy_map_monitor.middleware_handle]: Resolution not specified for Octomap. Assuming resolution = 0.1 instead\n[move_group-3] [ERROR] [1789965912.256878814] [moveit.ros.occupancy_map_monitor.middleware_handle]: No 3D sensor plugin(s) defined for octomap updates\n[ros2_control_node-1] [INFO] [1789965912.280401958] [controller_manager]: Configuring controller 'joint_state_broadcaster'\n[ros2_control_node-1] [INFO] [1789965912.280467521] [joint_state_broadcaster]: 'joints' or 'interfaces' parameter is empty. All available state interfaces will be published\n[spawner-5] [INFO] [1789965912.281027423] [spawner_arm_controller]: \u001b[94mLoaded \u001b[1marm_controller\u001b[0m\n[ros2_control_node-1] [INFO] [1789965912.325469214] [controller_manager]: Configuring controller 'gripper_controller'\n[ros2_control_node-1] [INFO] [1789965912.325559443] [gripper_controller]: No specific joint names are used for command interfaces. Using 'joints' parameter.\n[ros2_control_node-1] [INFO] [1789965912.325577889] [gripper_controller]: Command interfaces are [position] and state interfaces are [position velocity].\n[ros2_control_node-1] [INFO] [1789965912.325594735] [gripper_controller]: Using 'splines' interpolation method.\n[ros2_control_node-1] [INFO] [1789965912.326816599] [gripper_controller]: Controller state will be published at 50.00 Hz.\n[ros2_control_node-1] [INFO] [1789965912.329331859] [gripper_controller]: Action status changes will be monitored at 20.00 Hz.\n[ros2_control_node-1] [INFO] [1789965912.378468715] [controller_manager]: Configuring controller 'arm_controller'\n[ros2_control_node-1] [INFO] [1789965912.378611250] [arm_controller]: No specific joint names are used for command interfaces. Using 'joints' parameter.\n[ros2_control_node-1] [INFO] [1789965912.378630171] [arm_controller]: Command interfaces are [position] and state interfaces are [position velocity].\n[ros2_control_node-1] [INFO] [1789965912.378642269] [arm_controller]: Using 'splines' interpolation method.\n[ros2_control_node-1] [INFO] [1789965912.379782228] [arm_controller]: Controller state will be published at 50.00 Hz.\n[ros2_control_node-1] [INFO] [1789965912.381920264] [arm_controller]: Action status changes will be monitored at 20.00 Hz.\n[move_group-3] [WARN] [1789965912.522239667] [moveit_ros.planning_scene_monitor.planning_scene_monitor]: The complete state of the robot is not yet known.  Missing gripper\n[spawner-4] [INFO] [1789965912.523058160] [spawner_joint_state_broadcaster]: \u001b[92mConfigured and activated \u001b[1mjoint_state_broadcaster\u001b[0m\n[spawner-6] [INFO] [1789965912.569184721] [spawner_gripper_controller]: \u001b[92mConfigured and activated \u001b[1mgripper_controller\u001b[0m\n[INFO] [spawner-4]: process has finished cleanly [pid 71]\n[spawner-5] [INFO] [1789965912.660928619] [spawner_arm_controller]: \u001b[92mConfigured and activated \u001b[1marm_controller\u001b[0m\n[INFO] [spawner-6]: process has finished cleanly [pid 75]\n[INFO] [spawner-5]: process has finished cleanly [pid 73]\n[move_group-3] [INFO] [1789965912.989737411] [moveit.ros_planning_interface.moveit_cpp]: Loading planning pipeline 'ompl'\n[move_group-3] [INFO] [1789965912.994636051] [moveit.ros_planning.planning_pipeline]: Using planning interface 'OMPL'\n[move_group-3] [INFO] [1789965912.995490413] [moveit_ros.add_time_optimal_parameterization]: Param 'ompl.path_tolerance' was not set. Using default value: 0.100000\n[move_group-3] [INFO] [1789965912.995501320] [moveit_ros.add_time_optimal_parameterization]: Param 'ompl.resample_dt' was not set. Using default value: 0.100000\n[move_group-3] [INFO] [1789965912.995503997] [moveit_ros.add_time_optimal_parameterization]: Param 'ompl.min_angle_change' was not set. Using default value: 0.001000\n[move_group-3] [INFO] [1789965912.995515333] [moveit_ros.fix_workspace_bounds]: Param 'ompl.default_workspace_bounds' was not set. Using default value: 10.000000\n[move_group-3] [INFO] [1789965912.995523194] [moveit_ros.fix_start_state_bounds]: Param 'ompl.start_state_max_bounds_error' was set to 0.100000\n[move_group-3] [INFO] [1789965912.995526176] [moveit_ros.fix_start_state_bounds]: Param 'ompl.start_state_max_dt' was not set. Using default value: 0.500000\n[move_group-3] [INFO] [1789965912.995532364] [moveit_ros.fix_start_state_collision]: Param 'ompl.start_state_max_dt' was not set. Using default value: 0.500000\n[move_group-3] [INFO] [1789965912.995535077] [moveit_ros.fix_start_state_collision]: Param 'ompl.jiggle_fraction' was set to 0.050000\n[move_group-3] [INFO] [1789965912.995538014] [moveit_ros.fix_start_state_collision]: Param 'ompl.max_sampling_attempts' was not set. Using default value: 100\n[move_group-3] [INFO] [1789965912.995543649] [moveit.ros_planning.planning_pipeline]: Using planning request adapter 'Add Time Optimal Parameterization'\n[move_group-3] [INFO] [1789965912.995545901] [moveit.ros_planning.planning_pipeline]: Using planning request adapter 'Resolve constraint frames to robot links'\n[move_group-3] [INFO] [1789965912.995547680] [moveit.ros_planning.planning_pipeline]: Using planning request adapter 'Fix Workspace Bounds'\n[move_group-3] [INFO] [1789965912.995549690] [moveit.ros_planning.planning_pipeline]: Using planning request adapter 'Fix Start State Bounds'\n[move_group-3] [INFO] [1789965912.995551513] [moveit.ros_planning.planning_pipeline]: Using planning request adapter 'Fix Start State In Collision'\n[move_group-3] [INFO] [1789965912.995553315] [moveit.ros_planning.planning_pipeline]: Using planning request adapter 'Fix Start State Path Constraints'\n[move_group-3] [INFO] [1789965912.997693607] [moveit.ros_planning_interface.moveit_cpp]: Loading planning pipeline 'pilz_industrial_motion_planner'\n[move_group-3] [INFO] [1789965912.999083619] [moveit.pilz_industrial_motion_planner.joint_limits_aggregator]: Reading limits from namespace robot_description_planning\n[move_group-3] [INFO] [1789965913.004975552] [moveit.pilz_industrial_motion_planner]: Available plugins: pilz_industrial_motion_planner/PlanningContextLoaderCIRC pilz_industrial_motion_planner/PlanningContextLoaderLIN pilz_industrial_motion_planner/PlanningContextLoaderPTP \n[move_group-3] [INFO] [1789965913.004985461] [moveit.pilz_industrial_motion_planner]: About to load: pilz_industrial_motion_planner/PlanningContextLoaderCIRC\n[move_group-3] [INFO] [1789965913.005712832] [moveit.pilz_industrial_motion_planner]: Registered Algorithm [CIRC]\n[move_group-3] [INFO] [1789965913.005726127] [moveit.pilz_industrial_motion_planner]: About to load: pilz_industrial_motion_planner/PlanningContextLoaderLIN\n[move_group-3] [INFO] [1789965913.006207067] [moveit.pilz_industrial_motion_planner]: Registered Algorithm [LIN]\n[move_group-3] [INFO] [1789965913.006216299] [moveit.pilz_industrial_motion_planner]: About to load: pilz_industrial_motion_planner/PlanningContextLoaderPTP\n[move_group-3] [INFO] [1789965913.006554754] [moveit.pilz_industrial_motion_planner]: Registered Algorithm [PTP]\n[move_group-3] [INFO] [1789965913.006559785] [moveit.ros_planning.planning_pipeline]: Using planning interface 'Pilz Industrial Motion Planner'\n[move_group-3] [INFO] [1789965913.044772333] [moveit.plugins.moveit_simple_controller_manager]: Added FollowJointTrajectory controller for arm_controller\n[move_group-3] [INFO] [1789965913.047057481] [moveit.plugins.moveit_simple_controller_manager]: Added FollowJointTrajectory controller for gripper_controller\n[move_group-3] [INFO] [1789965913.047157901] [moveit.plugins.moveit_simple_controller_manager]: Returned 2 controllers in list\n[move_group-3] [INFO] [1789965913.047169190] [moveit.plugins.moveit_simple_controller_manager]: Returned 2 controllers in list\n[move_group-3] [INFO] [1789965913.047579489] [moveit_ros.trajectory_execution_manager]: Trajectory execution is managing controllers\n[move_group-3] [INFO] [1789965913.047588015] [move_group.move_group]: MoveGroup debug mode is ON\n[move_group-3] [INFO] [1789965913.058121502] [move_group.move_group]: \n[move_group-3] \n[move_group-3] ********************************************************\n[move_group-3] * MoveGroup using: \n[move_group-3] *     - ApplyPlanningSceneService\n[move_group-3] *     - ClearOctomapService\n[move_group-3] *     - CartesianPathService\n[move_group-3] *     - ExecuteTrajectoryAction\n[move_group-3] *     - GetPlanningSceneService\n[move_group-3] *     - KinematicsService\n[move_group-3] *     - MoveAction\n[move_group-3] *     - MotionPlanService\n[move_group-3] *     - QueryPlannersService\n[move_group-3] *     - StateValidationService\n[move_group-3] ********************************************************\n[move_group-3] \n[move_group-3] [INFO] [1789965913.058142214] [moveit_move_group_capabilities_base.move_group_context]: MoveGroup context using planning plugin ompl_interface/OMPLPlanner\n[move_group-3] [INFO] [1789965913.058146317] [moveit_move_group_capabilities_base.move_group_context]: MoveGroup context initialization complete\n[move_group-3] \u001b[96mLoading 'move_group/ApplyPlanningSceneService'...\n[move_group-3] \u001b[0m\u001b[96mLoading 'move_group/ClearOctomapService'...\n[move_group-3] \u001b[0m\u001b[96mLoading 'move_group/MoveGroupCartesianPathService'...\n[move_group-3] \u001b[0m\u001b[96mLoading 'move_group/MoveGroupExecuteTrajectoryAction'...\n[move_group-3] \u001b[0m\u001b[96mLoading 'move_group/MoveGroupGetPlanningSceneService'...\n[move_group-3] \u001b[0m\u001b[96mLoading 'move_group/MoveGroupKinematicsService'...\n[move_group-3] \u001b[0m\u001b[96mLoading 'move_group/MoveGroupMoveAction'...\n[move_group-3] \u001b[0m\u001b[96mLoading 'move_group/MoveGroupPlanService'...\n[move_group-3] \u001b[0m\u001b[96mLoading 'move_group/MoveGroupQueryPlannersService'...\n[move_group-3] \u001b[0m\u001b[96mLoading 'move_group/MoveGroupStateValidationService'...\n[move_group-3] \u001b[0m\u001b[92m\n[move_group-3] You can start planning now!\n[move_group-3] \n[move_group-3] [WARN] [1789965913.538853380] [moveit_ros.planning_scene_monitor.planning_scene_monitor]: The complete state of the robot is not yet known.  Missing gripper\n[move_group-3] [WARN] [1789965914.544695306] [moveit_ros.planning_scene_monitor.planning_scene_monitor]: The complete state of the robot is not yet known.  Missing gripper\n[move_group-3] [INFO] [1789965915.173552262] [moveit_move_group_default_capabilities.move_action_capability]: Received request\n[move_group-3] [INFO] [1789965915.173984654] [moveit_move_group_default_capabilities.move_action_capability]: executing..\n[move_group-3] [INFO] [1789965915.174171904] [moveit_move_group_default_capabilities.move_action_capability]: Combined planning and execution request received for MoveGroup action. Forwarding to planning and execution pipeline.\n[move_group-3] [WARN] [1789965915.174203105] [moveit_move_group_capabilities_base.move_group_capability]: Execution of motions should always start at the robot's current state. Ignoring the state supplied as start state in the motion planning request\n[move_group-3] [WARN] [1789965915.174213519] [moveit_move_group_capabilities_base.move_group_capability]: Execution of motions should always start at the robot's current state. Ignoring the state supplied as difference in the planning scene diff\n[move_group-3] [INFO] [1789965915.174300014] [moveit_ros.plan_execution]: Planning attempt 1 of at most 1\n[move_group-3] [INFO] [1789965915.186136540] [moveit.ompl_planning.model_based_planning_context]: Planner configuration 'arm' will use planner 'geometric::RRTConnect'. Additional configuration parameters will be set when the planner is constructed.\n[move_group-3] [WARN] [1789965915.529717050] [moveit_trajectory_processing.time_optimal_trajectory_generation]: Joint acceleration limits are not defined. Using the default 1 rad/s^2. You can define acceleration limits in the URDF or joint_limits.yaml.\n[move_group-3] [INFO] [1789965915.541463788] [moveit.plugins.moveit_simple_controller_manager]: Returned 2 controllers in list\n[move_group-3] [INFO] [1789965915.541475803] [moveit.plugins.moveit_simple_controller_manager]: Returned 2 controllers in list\n[move_group-3] [INFO] [1789965915.541503209] [moveit_ros.trajectory_execution_manager]: Validating trajectory with allowed_start_tolerance 0.01\n[move_group-3] [INFO] [1789965915.541546520] [moveit_ros.trajectory_execution_manager]: Starting trajectory execution ...\n[move_group-3] [INFO] [1789965915.541561783] [moveit.plugins.moveit_simple_controller_manager]: Returned 2 controllers in list\n[move_group-3] [INFO] [1789965915.541568273] [moveit.plugins.moveit_simple_controller_manager]: Returned 2 controllers in list\n[move_group-3] [INFO] [1789965915.541634340] [moveit.simple_controller_manager.follow_joint_trajectory_controller_handle]: sending trajectory to arm_controller\n[ros2_control_node-1] [INFO] [1789965915.541820215] [arm_controller]: Received new action goal\n[ros2_control_node-1] [INFO] [1789965915.541860527] [arm_controller]: Accepted new action goal\n[move_group-3] [INFO] [1789965915.542308720] [moveit.simple_controller_manager.follow_joint_trajectory_controller_handle]: arm_controller started execution\n[move_group-3] [INFO] [1789965915.542320233] [moveit.simple_controller_manager.follow_joint_trajectory_controller_handle]: Goal request accepted!\n[move_group-3] [WARN] [1789965915.577404244] [moveit_ros.planning_scene_monitor.planning_scene_monitor]: The complete state of the robot is not yet known.  Missing gripper\n[ros2_control_node-1] [INFO] [1789965915.625186960] [arm_controller]: Goal reached, success!\n[move_group-3] [INFO] [1789965915.642476334] [moveit.simple_controller_manager.follow_joint_trajectory_controller_handle]: Controller 'arm_controller' successfully finished\n[move_group-3] [INFO] [1789965915.642517494] [moveit_ros.trajectory_execution_manager]: Completed trajectory execution with status SUCCEEDED ...\n[move_group-3] [INFO] [1789965915.651655264] [moveit_move_group_default_capabilities.move_action_capability]: Solution was found and executed.\n[move_group-3] [WARN] [1789965916.592509075] [moveit_ros.planning_scene_monitor.planning_scene_monitor]: The complete state of the robot is not yet known.  Missing gripper\n[move_group-3] [WARN] [1789965917.624337130] [moveit_ros.planning_scene_monitor.planning_scene_monitor]: The complete state of the robot is not yet known.  Missing gripper\n[move_group-3] [INFO] [1789965917.678204169] [moveit_move_group_default_capabilities.move_action_capability]: Received request\n[move_group-3] [INFO] [1789965917.678480867] [moveit_move_group_default_capabilities.move_action_capability]: executing..\n[move_group-3] [INFO] [1789965917.678568215] [moveit_move_group_default_capabilities.move_action_capability]: Combined planning and execution request received for MoveGroup action. Forwarding to planning and execution pipeline.\n[move_group-3] [WARN] [1789965917.678582337] [moveit_move_group_capabilities_base.move_group_capability]: Execution of motions should always start at the robot's current state. Ignoring the state supplied as start state in the motion planning request\n[move_group-3] [WARN] [1789965917.678588824] [moveit_move_group_capabilities_base.move_group_capability]: Execution of motions should always start at the robot's current state. Ignoring the state supplied as difference in the planning scene diff\n[move_group-3] [INFO] [1789965917.678594236] [moveit_ros.plan_execution]: Planning attempt 1 of at most 1\n[move_group-3] [INFO] [1789965917.694752091] [moveit.ompl_planning.model_based_planning_context]: Planner configuration 'arm' will use planner 'geometric::RRTConnect'. Additional configuration parameters will be set when the planner is constructed.\n[move_group-3] [INFO] [1789965918.200647085] [moveit.plugins.moveit_simple_controller_manager]: Returned 2 controllers in list\n[move_group-3] [INFO] [1789965918.200672375] [moveit.plugins.moveit_simple_controller_manager]: Returned 2 controllers in list\n[move_group-3] [INFO] [1789965918.200714314] [moveit_ros.trajectory_execution_manager]: Validating trajectory with allowed_start_tolerance 0.01\n[move_group-3] [INFO] [1789965918.200771907] [moveit_ros.trajectory_execution_manager]: Starting trajectory execution ...\n[move_group-3] [INFO] [1789965918.200800719] [moveit.plugins.moveit_simple_controller_manager]: Returned 2 controllers in list\n[move_group-3] [INFO] [1789965918.200814852] [moveit.plugins.moveit_simple_controller_manager]: Returned 2 controllers in list\n[move_group-3] [INFO] [1789965918.200876802] [moveit.simple_controller_manager.follow_joint_trajectory_controller_handle]: sending trajectory to arm_controller\n[ros2_control_node-1] [INFO] [1789965918.200961134] [arm_controller]: Received new action goal\n[ros2_control_node-1] [INFO] [1789965918.200986577] [arm_controller]: Accepted new action goal\n[move_group-3] [INFO] [1789965918.201029958] [moveit.simple_controller_manager.follow_joint_trajectory_controller_handle]: arm_controller started execution\n[move_group-3] [INFO] [1789965918.201037032] [moveit.simple_controller_manager.follow_joint_trajectory_controller_handle]: Goal request accepted!\n[ros2_control_node-1] [INFO] [1789965918.521422600] [arm_controller]: Goal reached, success!\n[move_group-3] [INFO] [1789965918.551375813] [moveit.simple_controller_manager.follow_joint_trajectory_controller_handle]: Controller 'arm_controller' successfully finished\n[move_group-3] [INFO] [1789965918.551481592] [moveit_ros.trajectory_execution_manager]: Completed trajectory execution with status SUCCEEDED ...\n[move_group-3] [INFO] [1789965918.560900299] [moveit_move_group_default_capabilities.move_action_capability]: Solution was found and executed.\n[move_group-3] [WARN] [1789965918.645669968] [moveit_ros.planning_scene_monitor.planning_scene_monitor]: The complete state of the robot is not yet known.  Missing gripper\n[move_group-3] [WARN] [1789965919.681677910] [moveit_ros.planning_scene_monitor.planning_scene_monitor]: The complete state of the robot is not yet known.  Missing gripper\n[move_group-3] [WARN] [1789965920.709240821] [moveit_ros.planning_scene_monitor.planning_scene_monitor]: The complete state of the robot is not yet known.  Missing gripper\n[move_group-3] [WARN] [1789965921.715657077] [moveit_ros.planning_scene_monitor.planning_scene_monitor]: The complete state of the robot is not yet known.  Missing gripper\n[move_group-3] [WARN] [1789965922.725867019] [moveit_ros.planning_scene_monitor.planning_scene_monitor]: The complete state of the robot is not yet known.  Missing gripper\n[move_group-3] [WARN] [1789965923.745836780] [moveit_ros.planning_scene_monitor.planning_scene_monitor]: The complete state of the robot is not yet known.  Missing gripper\n[move_group-3] [WARN] [1789965924.748670928] [moveit_ros.planning_scene_monitor.planning_scene_monitor]: The complete state of the robot is not yet known.  Missing gripper\n",
+  "net_tcp_listeners": [],
+  "p1a_prerequisite": {
+    "passed": true,
+    "path": "/home/mzictt/RoCo_Piper/artifacts/phase1/dds-multiprocess-gate.json",
+    "schema": "rocobrick-p1-dds-multiprocess-gate/v1"
+  },
+  "passed": true,
+  "phase": "P1.B",
+  "probe": {
+    "actions": {
+      "arm_follow": "/arm_controller/follow_joint_trajectory",
+      "move_group_candidates": [
+        "/move_action",
+        "/move_group"
+      ]
+    },
+    "admission": {
+      "chosen_deltas": {
+        "joint1": 0.2,
+        "joint4": 0.15
+      },
+      "margin": 0.03,
+      "passed": true,
+      "target": {
+        "joint1": 0.199995593,
+        "joint2": 0.001761626,
+        "joint3": -2.4306e-05,
+        "joint4": 0.153641953,
+        "joint5": 0.000870335,
+        "joint6": 1.7416e-05
+      }
+    },
+    "admission_margin": 0.03,
+    "allowed_planning_time_s": 5.0,
+    "baseline": {
+      "gripper_joint1": 1.221e-06,
+      "gripper_joint2": -1.2e-08,
+      "joint1": -4.407e-06,
+      "joint2": 0.001761626,
+      "joint3": -2.4306e-05,
+      "joint4": 0.003641953,
+      "joint5": 0.000870335,
+      "joint6": 1.7416e-05
+    },
+    "baseline_fresh": true,
+    "baseline_matches_broadcast": true,
+    "baseline_state_messages": 3,
+    "command_stats": {
+      "count": 163,
+      "invalid": 0,
+      "max_position": 0.1945683391237435,
+      "min_position": -0.008706061702328755,
+      "unknown_names": []
+    },
+    "exact_state_match_tolerance": 0.0001,
+    "execution_position_limits": {
+      "joint1": [
+        -2.6179938,
+        2.6179938
+      ],
+      "joint2": [
+        0.0,
+        3.1415926
+      ],
+      "joint3": [
+        -2.9670597,
+        0.0
+      ],
+      "joint4": [
+        -1.7453292,
+        1.7453292
+      ],
+      "joint5": [
+        -1.2217304,
+        1.2217304
+      ],
+      "joint6": [
+        -2.0943951,
+        2.0943951
+      ]
+    },
+    "expected_dof_names": [
+      "joint1",
+      "joint2",
+      "joint3",
+      "joint4",
+      "joint5",
+      "joint6",
+      "gripper_joint1",
+      "gripper_joint2"
+    ],
+    "final_error_max_main": 0.03,
+    "final_error_max_other": 0.04,
+    "goal_tolerance": 0.01,
+    "gripper_drift_max": 0.01,
+    "min_baseline_state_messages": 3,
+    "outbound": {
+      "accepted": true,
+      "action_and_plan_passed": true,
+      "command_messages": 81,
+      "error_code": 1,
+      "error_code_name": "SUCCESS",
+      "feedback_passed": true,
+      "final_errors": {
+        "joint1": 0.005464644,
+        "joint2": 0.010839651,
+        "joint3": 3.447e-06,
+        "joint4": 0.005711885,
+        "joint5": 0.009917235,
+        "joint6": 0.002502781
+      },
+      "final_positions": {
+        "gripper_joint1": 3.563e-05,
+        "gripper_joint2": -4.1e-08,
+        "joint1": 0.194530949,
+        "joint2": 0.012601277,
+        "joint3": -2.0859e-05,
+        "joint4": 0.159353837,
+        "joint5": 0.01078757,
+        "joint6": -0.002485365
+      },
+      "gripper_drift": 3.4409e-05,
+      "label": "outbound",
+      "passed": true,
+      "planned_point_count": 10,
+      "planned_trajectory": {
+        "arm_joints_exact": true,
+        "min_waypoints_met": true,
+        "nonfinite_waypoints": 0,
+        "trajectory_joint_names": [
+          "joint1",
+          "joint2",
+          "joint3",
+          "joint4",
+          "joint5",
+          "joint6"
+        ],
+        "waypoint_count": 10,
+        "waypoint_max_limit_excess": {
+          "joint1": 0.0,
+          "joint2": 0.0,
+          "joint3": 0.0,
+          "joint4": 0.0,
+          "joint5": 0.0,
+          "joint6": 0.0
+        },
+        "waypoints_within_limits": true
+      },
+      "planning_time_s": 0.0,
+      "post_command_state_messages": 71,
+      "settled_at_rest": true,
+      "status": 4,
+      "status_name": "SUCCEEDED",
+      "target": {
+        "joint1": 0.199995593,
+        "joint2": 0.001761626,
+        "joint3": -2.4306e-05,
+        "joint4": 0.153641953,
+        "joint5": 0.000870335,
+        "joint6": 1.7416e-05
+      }
+    },
+    "passed": true,
+    "phase": "P1.B",
+    "readiness": {
+      "arm_follow_action_ready": true,
+      "broadcast_joint_state_messages": 12,
+      "clock_increasing": true,
+      "clock_messages": 3,
+      "controllers": {
+        "arm_controller": "active",
+        "gripper_controller": "active",
+        "joint_state_broadcaster": "active"
+      },
+      "controllers_active": true,
+      "isaac_invalid_state_messages": 0,
+      "isaac_joint_state_messages": 3,
+      "move_group_action_name": "/move_action",
+      "plan_service_name": "/plan_kinematic_path"
+    },
+    "return": {
+      "accepted": true,
+      "action_and_plan_passed": true,
+      "command_messages": 163,
+      "error_code": 1,
+      "error_code_name": "SUCCESS",
+      "feedback_passed": true,
+      "final_errors": {
+        "joint1": 0.008552833,
+        "joint2": 0.010111521,
+        "joint3": 4.44e-07,
+        "joint4": 0.003811973,
+        "joint5": 0.00866668,
+        "joint6": 0.00274452
+      },
+      "final_positions": {
+        "gripper_joint1": 1.002e-06,
+        "gripper_joint2": -1e-09,
+        "joint1": -0.00855724,
+        "joint2": 0.011873147,
+        "joint3": -2.3862e-05,
+        "joint4": -0.000170021,
+        "joint5": -0.007796345,
+        "joint6": 0.002761936
+      },
+      "gripper_drift": 2.19e-07,
+      "label": "return",
+      "passed": true,
+      "planned_point_count": 11,
+      "planned_trajectory": {
+        "arm_joints_exact": true,
+        "min_waypoints_met": true,
+        "nonfinite_waypoints": 0,
+        "trajectory_joint_names": [
+          "joint1",
+          "joint2",
+          "joint3",
+          "joint4",
+          "joint5",
+          "joint6"
+        ],
+        "waypoint_count": 11,
+        "waypoint_max_limit_excess": {
+          "joint1": 0.0,
+          "joint2": 0.0,
+          "joint3": 0.0,
+          "joint4": 0.0,
+          "joint5": 0.0,
+          "joint6": 0.0
+        },
+        "waypoints_within_limits": true
+      },
+      "planning_time_s": 0.0,
+      "post_command_state_messages": 82,
+      "settled_at_rest": true,
+      "status": 4,
+      "status_name": "SUCCEEDED",
+      "target": {
+        "joint1": -4.407e-06,
+        "joint2": 0.001761626,
+        "joint3": -2.4306e-05,
+        "joint4": 0.003641953,
+        "joint5": 0.000870335,
+        "joint6": 1.7416e-05
+      }
+    },
+    "return_arm_error_max": 0.03,
+    "scaling_factor": 0.1,
+    "schema": "rocobrick-p1-real-joint-probe/v1",
+    "services": {
+      "list_controllers": "/controller_manager/list_controllers",
+      "plan_candidates": [
+        "/plan_kinematic_path",
+        "/move_group/plan_kinematic_path"
+      ]
+    },
+    "settle_stable_delta_max": 0.0005,
+    "settle_stable_samples": 8,
+    "target_deltas": {
+      "joint1": 0.2,
+      "joint4": 0.15
+    },
+    "topics": {
+      "broadcast_joint_states": "/joint_states",
+      "clock": "/clock",
+      "isaac_joint_states": "/isaac_joint_states",
+      "joint_commands": "/isaac_joint_command"
+    }
+  },
+  "probe_log_tail": "",
+  "profiles": {
+    "host_address": "10.198.61.26",
+    "host_port": 17650,
+    "profiles": {
+      "container": {
+        "initial_peers": [
+          [
+            "10.198.61.26",
+            17650
+          ]
+        ],
+        "listening_ports": [],
+        "participant_id": null,
+        "path": "/home/mzictt/RoCo_Piper/.runtime/dds/fastdds-container.xml",
+        "role": "container-client",
+        "sha256": "758ddfda286de89bcc72f2d85b23222f4c10a26c65683567073de66a7e8270b8"
+      },
+      "container-mesh": {
+        "initial_peers": [
+          [
+            "10.198.61.26",
+            17650
+          ]
+        ],
+        "listening_ports": [],
+        "local_spdp_multicast": [
+          "239.255.0.1",
+          25650
+        ],
+        "participant_id": null,
+        "path": "/home/mzictt/RoCo_Piper/.runtime/dds/fastdds-container-mesh.xml",
+        "role": "container-client-mesh",
+        "sha256": "1e08fdb081edd0f4f22448ee46abb112b4d9aaa92acfba7a29b41097686f3932"
+      },
+      "container-p1": {
+        "initial_peers": [
+          [
+            "10.198.61.26",
+            17650
+          ]
+        ],
+        "listening_ports": [],
+        "participant_id": 1,
+        "path": "/home/mzictt/RoCo_Piper/.runtime/dds/fastdds-container-p1.xml",
+        "role": "container-client",
+        "sha256": "990f7125ac763821cb31f257e35b4b9eeca3ab2a0803bb7b864f9c7f3b8d9f94"
+      },
+      "container-p2": {
+        "initial_peers": [
+          [
+            "10.198.61.26",
+            17650
+          ]
+        ],
+        "listening_ports": [],
+        "participant_id": 2,
+        "path": "/home/mzictt/RoCo_Piper/.runtime/dds/fastdds-container-p2.xml",
+        "role": "container-client",
+        "sha256": "f0e7ccbe9801d940f3b3b897424f441de5efd47b5bd93ab1f5284ab210c4b42d"
+      },
+      "container-p3": {
+        "initial_peers": [
+          [
+            "10.198.61.26",
+            17650
+          ]
+        ],
+        "listening_ports": [],
+        "participant_id": 3,
+        "path": "/home/mzictt/RoCo_Piper/.runtime/dds/fastdds-container-p3.xml",
+        "role": "container-client",
+        "sha256": "6061a6ab90137a4a4f9e103237badae587a010599d496da409066fc060399646"
+      },
+      "container-p4": {
+        "initial_peers": [
+          [
+            "10.198.61.26",
+            17650
+          ]
+        ],
+        "listening_ports": [],
+        "participant_id": 4,
+        "path": "/home/mzictt/RoCo_Piper/.runtime/dds/fastdds-container-p4.xml",
+        "role": "container-client",
+        "sha256": "13635917ed7cc13b877a7e3d80396b50cc6067981becfbb2edcb585d1e228833"
+      },
+      "host": {
+        "initial_peers": [],
+        "listening_ports": [
+          17650
+        ],
+        "participant_id": 0,
+        "path": "/home/mzictt/RoCo_Piper/.runtime/dds/fastdds-host.xml",
+        "role": "host-listener",
+        "sha256": "9cbb704710bd2c80845492cadc259086634a06a3dc50524684588a1cba6c3785"
+      }
+    },
+    "roles": {
+      "container-client": "client-only TCPv4 (no listening_ports); discovers the host via initialPeersList 10.198.61.26:17650",
+      "container-client-mesh": "client-only TCPv4 to the host listener PLUS a netns-local UDPv4 transport and SPDP multicast peer 239.255.0.1:25650 so container-stack processes discover each other inside the container; still no TCP listening port",
+      "host-listener": "owns the only boundary listening endpoint, fixed TCP 17650; accepts container clients"
+    },
+    "schema": "rocobrick-dds-profiles/v2",
+    "topology": "single-host-listener-17650-client-only-containers",
+    "transport": "TCPv4"
+  },
+  "readiness_marker_seen": true,
+  "schema": "rocobrick-p1-real-joint-smoke/v1"
+}

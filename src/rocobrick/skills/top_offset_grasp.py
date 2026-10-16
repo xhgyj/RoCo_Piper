@@ -120,8 +120,25 @@ def top_offset_targets(
     if normal[2] < math.cos(0.03):
         raise ValueError("vertical offset PICK requires upright studs")
     local = [0.0, 0.0, 0.0]
+    # The free strip is the only thing keeping the jaws out of the mated upper
+    # brick, and the strip's *centre* left the jaws' upper part over the
+    # covered half: at the place-up seat the jaw faces grazed the upper brick
+    # and MoveIt rejected the whole insertion plan as a collision (live
+    # evidence, task-c-top-offset13k-headless 2026-10-14: invalid LIN states
+    # 6..11 of 12, contacts between brick-794d and piper_0_gripper_link1/2).
+    # Deeper is not better either: 6 mm of shift bought 3.3 mm of seat
+    # clearance but the longer moment arm let the brick slip in the jaws at
+    # the stud engagement (task-c-top-offset13l-headless: grasp_slipped after
+    # 3.2 mm of slide, ~2 mm below the seat).  The pad centre therefore moves
+    # by min(4.5 mm, 30% of the strip): 3 mm still left the plan's last states
+    # in contact (13o: invalid 10..13 of 14), 6 mm cleared it but let the brick
+    # slip at the engagement (13l).  The jaws are far wider than the strip, so
+    # every strip point stays covered by the pads.
+    deeper = min(0.0045, binding.free_length_m * 0.3)
     local[binding.free_axis] = binding.free_sign * (
-        binding.footprint_m[binding.free_axis] / 2 - binding.free_length_m / 2
+        binding.footprint_m[binding.free_axis] / 2
+        - binding.free_length_m / 2
+        + deeper
     )
     # The live AABB anchors contact height; no platform height is hardcoded.
     local[2] = (sample.aabb_max[2] - sample.aabb_min[2]) / 2 + 0.0035
@@ -130,6 +147,17 @@ def top_offset_targets(
         (0, 0, math.sin(yaw / 2), math.cos(yaw / 2)),
         (1, 0, 0, 0),
     )
+    # Rotate about the horizontal closing axis, leaning the wrist toward the
+    # free strip while keeping both pad normals aligned with the brick sides.
+    free = [0.0, 0.0, 0.0]
+    free[binding.free_axis] = binding.free_sign
+    axis = (-free[1], free[0], 0.0)
+    half_angle = math.radians(context.params.top_offset_pick_tilt_deg) / 2
+    lean = (
+        *tuple(value * math.sin(half_angle) for value in axis),
+        math.cos(half_angle),
+    )
+    orientation = _quat_mul(lean, orientation)
     contact = compose(sample.object_pose, Pose(tuple(local), orientation))
     base_orientation = world_orientation_to_base(contact.orientation_xyzw, context.base)
 
@@ -169,6 +197,7 @@ def top_offset_targets(
         {
             **asdict(binding),
             "mode": "vertical_offset",
+            "downward_tilt_deg": context.params.top_offset_pick_tilt_deg,
             "orientation_branches": 2,
             "approach_opening_m": opening,
             "local_contact_xyz_m": local,
@@ -192,8 +221,15 @@ def verify_top_offset_arrival(reference, current, contact: Pose) -> None:
         raise ValueError("vertical offset grasp arrival pose is outside target")
     relative = compose(inverse(current.object_pose), current.tcp_pose)
     rotation = relative.orientation_xyzw
-    if _quat_rotate_vector(rotation, (0, 0, 1))[2] > -math.cos(0.03):
-        raise ValueError("vertical offset grasp tool is not downward")
+    measured_axis = _quat_rotate_vector(rotation, (0, 0, 1))
+    expected_relative = compose(inverse(current.object_pose), contact)
+    expected_axis = _quat_rotate_vector(expected_relative.orientation_xyzw, (0, 0, 1))
+    if expected_axis[2] > -math.cos(math.radians(35.0) + 0.03) or sum(
+        a * b for a, b in zip(measured_axis, expected_axis)
+    ) < math.cos(0.03):
+        raise ValueError(
+            "vertical offset grasp tool is not downward at its target axis"
+        )
     closing = _quat_rotate_vector(rotation, (0, 1, 0))
     axis = max((0, 1), key=lambda i: abs(closing[i]))
     if abs(closing[axis]) < math.cos(0.03) or abs(closing[2]) > math.sin(0.03):

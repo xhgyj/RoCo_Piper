@@ -1,10 +1,13 @@
 """Offline regression for PhysX-to-render synchronization without Kit reentry."""
 
+import asyncio
 import importlib.util
 import inspect
 import sys
 from pathlib import Path
 from types import SimpleNamespace
+
+import pytest
 
 
 def bridge_module():
@@ -62,6 +65,80 @@ def test_both_headed_loops_refresh_before_kit_yield():
     assert "finally:" in helper and "settings.set_bool(key, previous)" in helper
 
 
+def _render_harness(*, on_capture=None):
+    """Build a world/settings/app triple for the render-only helper.
+
+    Returns:
+        The triple plus the recorded app update count and capture flags.
+    """
+    world = SimpleNamespace(
+        get_physics_dt=lambda: 1 / 60,
+        current_time=10.0,
+        current_time_step_index=600,
+    )
+    settings = SimpleNamespace(values={"/app/player/playSimulations": True})
+
+    def get(key):
+        return settings.values[key]
+
+    def set_bool(key, value):
+        settings.values[key] = value
+
+    settings.get = get
+    settings.set_bool = set_bool
+    app = SimpleNamespace(updates=0)
+
+    async def next_update_async():
+        app.updates += 1
+
+    app.next_update_async = next_update_async
+    flags = []
+
+    async def capture():
+        flags.append(settings.values["/app/player/playSimulations"])
+        app.updates += 2
+        if on_capture is not None:
+            on_capture(world)
+
+    return world, settings, app, flags, capture
+
+
+def test_frame_capture_runs_inside_the_physics_guard():
+    """Capture's extra Kit frames never step physics under the bridge loop."""
+    module = bridge_module()
+    world, settings, app, flags, capture = _render_harness()
+
+    asyncio.run(
+        module.render_viewport_without_physics(
+            world, settings, app, lambda: None, capture
+        )
+    )
+
+    assert flags == [False]
+    assert app.updates == 3
+    assert settings.values["/app/player/playSimulations"] is True
+
+
+def test_frame_capture_that_advances_physics_fails_closed():
+    """A capture that steps physics is reported and the setting restored."""
+    module = bridge_module()
+
+    def advance(world):
+        world.current_time += 1 / 60
+        world.current_time_step_index += 1
+
+    world, settings, app, _flags, capture = _render_harness(on_capture=advance)
+
+    with pytest.raises(RuntimeError, match="frame capture advanced physics"):
+        asyncio.run(
+            module.render_viewport_without_physics(
+                world, settings, app, lambda: None, capture
+            )
+        )
+
+    assert settings.values["/app/player/playSimulations"] is True
+
+
 def test_headed_keeps_bricksim_fabric_delegate(monkeypatch):
     """Robot visual repair must not disable BrickSim's Fabric render data."""
     module = bridge_module()
@@ -73,3 +150,5 @@ def test_headed_keeps_bricksim_fabric_delegate(monkeypatch):
     headed = module._kit_launch_argv(args)
     assert "--/app/useFabricSceneDelegate=false" not in headed
     assert "--/app/window/enabled=true" in headed
+    assert "--/rtx/post/dof/enabled=false" in headed
+    assert "--/rtx/post/motionblur/enabled=false" in headed

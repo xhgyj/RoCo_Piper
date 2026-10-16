@@ -35,13 +35,14 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 # ``source_plan_id`` declared by the committed example1 operation-plan
 # artifact. All tests stay on tracked files: no run artifact is required.
 EXAMPLE1_STAP_PATH = (
-    REPO_ROOT / "runs" / "scene-smoke-20260914T093942Z" / "input" / "plan.json"
+    REPO_ROOT / "tests" / "fixtures" / "assembly_plans" / "example1-scene-smoke.json"
 )
 EXAMPLE1_PLAN_PATH = (
     REPO_ROOT
-    / "runs"
-    / "example1-v2-plan-fixture"
-    / "example1-v2-robot-operation-plan.json"
+    / "tests"
+    / "fixtures"
+    / "robot_operation_plans"
+    / "example1-robot-operation-plan.json"
 )
 
 

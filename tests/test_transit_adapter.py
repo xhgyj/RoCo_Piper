@@ -6,6 +6,7 @@ from collections.abc import Mapping
 
 import pytest
 
+from rocobrick.adapters.moveit.transit import SessionTcpMotionAdapter
 from rocobrick.isaac_backend import RuntimeOperation
 from rocobrick.moveit_contract import (
     MAX_ORIENTATION_TOLERANCE_RAD,
@@ -14,7 +15,6 @@ from rocobrick.moveit_contract import (
 )
 from rocobrick.robot_operation_plan import RobotOperation
 from rocobrick.tcp_contract import EXPECTED_RUNTIME_MODEL_SHA256
-from rocobrick.transit_adapter import SessionTcpMotionAdapter
 
 
 class RecordingMotionSession:

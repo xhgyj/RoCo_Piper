@@ -13,13 +13,12 @@ pluginlib_export_plugin_description_file(moveit_core constraint_sampler_plugins.
 install(TARGETS rocobrick_clean_reference_sampler LIBRARY DESTINATION lib)
 install(DIRECTORY include/ DESTINATION include)
 install(
-  DIRECTORY config launch urdf
+  DIRECTORY config launch urdf meshes
   DESTINATION share/${PROJECT_NAME}
 )
 
 install(
   PROGRAMS scripts/dual_joint_state_aggregator.py
-             scripts/stage4_fake_arm_controller.py
   DESTINATION lib/${PROJECT_NAME}
 )
 

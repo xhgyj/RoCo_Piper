@@ -7,8 +7,8 @@ from types import SimpleNamespace
 import pytest
 
 from rocobrick.models import ActionType, SkillType
-from rocobrick.skill_execution import TaskRef, execute_skill
-from rocobrick.skills import (
+from rocobrick.skills.execution import TaskRef, execute_skill
+from rocobrick.skills.programs import (
     PICK_PROGRAM,
     PLACE_UP_PROGRAM,
     SUPPORT_TOP_PROGRAM,
@@ -53,7 +53,7 @@ def test_wait_program_is_pinned() -> None:
 
 
 def test_program_registry_covers_the_executable_skills() -> None:
-    from rocobrick.skills import PROGRAMS
+    from rocobrick.skills.programs import PROGRAMS
 
     assert set(PROGRAMS) == {
         SkillType.PICK,

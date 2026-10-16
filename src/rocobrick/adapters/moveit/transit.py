@@ -18,7 +18,7 @@ from rocobrick.moveit_contract import (
 )
 from rocobrick.multi_robot_scheduler import JSONValue
 from rocobrick.robot_operation_plan import RobotOperation
-from rocobrick.skill_targets import (
+from rocobrick.skills.targets import (
     RobotBaseFrame,
     SkillParams,
     TcpProvenance,

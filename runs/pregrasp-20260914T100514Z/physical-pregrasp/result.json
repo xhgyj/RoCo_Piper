@@ -1,6 +1,0 @@
-{
-  "success": false,
-  "stage": "STARTUP",
-  "reason": "RuntimeError",
-  "message": "pregrasp could not obtain a fresh admitted trajectory"
-}

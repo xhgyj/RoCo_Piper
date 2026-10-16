@@ -2,9 +2,9 @@
 
 The placement robot owns the moving LOWER brick. The supporting robot owns a
 non-grasping ``supporting:<upper>`` fact established by SUPPORT_TOP. MoveIt is
-used only before contact for approach; contact is one continuous upward TCP
-motion monitored by the upward guard, which cancels on exact connection or a
-physical safety stop. Release and retreat are proven after connection.
+used for collision-checked approach and supervised LIN contact. Optional
+measured-object feedback bounds each insertion step; exact connection or a
+physical safety stop ends motion. Release and retreat are proven separately.
 """
 
 from __future__ import annotations
@@ -15,6 +15,7 @@ from collections.abc import Mapping
 from dataclasses import asdict, dataclass
 from typing import Protocol
 
+from rocobrick.adapters.moveit.transit import TransitContext
 from rocobrick.coordinated_session import (
     FreeSpaceMotionEvidence,
     FreeSpaceMotionRequest,
@@ -38,6 +39,7 @@ from rocobrick.robot_operation_plan import RobotOperation
 from rocobrick.skills.contact import inspect_contact
 from rocobrick.skills.observation import (
     PlaceObservation,
+    Pose,
     _pose,
     parse_place_observation,
     verify_place_bricks,
@@ -49,8 +51,64 @@ from rocobrick.skills.placement_geometry import (
 )
 from rocobrick.skills.successor_motion import move_boundary
 from rocobrick.skills.support_evidence import verify_support_contact
-from rocobrick.transit_adapter import TransitContext
+from rocobrick.skills.targets import (
+    _quat_rotate_vector,
+    _tcp_pose_target,
+    world_orientation_to_base,
+    world_position_to_base,
+)
 from rocobrick.unified_dual_arm_runtime import SuccessorPrePhaseEvidence
+
+
+def _native_press_ready(measured: Mapping[str, object]) -> bool:
+    """Require native interface geometry before allowing bounded compression.
+
+    Returns:
+        Whether a fresh identified diagnostic satisfies every geometric gate.
+    """
+    thresholds = measured.get("native_assembly_thresholds", {})
+    diagnostics = measured.get("native_assembly_diagnostics", [])
+    if not isinstance(thresholds, Mapping) or not isinstance(diagnostics, list):
+        return False
+    if thresholds.get("enabled") is not True:
+        return False
+    for diagnostic in diagnostics:
+        if not isinstance(diagnostic, Mapping):
+            continue
+        names = ("relative_distance", "position_error", "tilt", "yaw_error")
+        limits = (
+            "distance_tolerance",
+            "max_penetration",
+            "position_tolerance",
+            "z_angle_tolerance",
+            "yaw_tolerance",
+        )
+        values = [diagnostic.get(name) for name in names] + [
+            thresholds.get(name) for name in limits
+        ]
+        if not all(
+            type(value) in (int, float) and math.isfinite(value) for value in values
+        ):
+            continue
+        (
+            distance,
+            position,
+            tilt,
+            yaw,
+            tolerance,
+            penetration,
+            planar,
+            angular,
+            yaw_limit,
+        ) = values
+        if (
+            -penetration <= distance <= tolerance
+            and 0 <= position <= planar
+            and abs(tilt) <= angular
+            and abs(yaw) <= yaw_limit
+        ):
+            return True
+    return False
 
 
 class PlaceUpObservationTransport(Protocol):
@@ -67,6 +125,11 @@ class PlaceUpFreeSpaceTransport(Protocol):
         self, request: FreeSpaceMotionRequest
     ) -> FreeSpaceMotionEvidence:
         """Execute the skill-owned pre-contact approach."""
+
+    async def free_space_context(
+        self, participants: tuple[str, ...]
+    ) -> tuple[Mapping[str, object], int, Mapping[str, float]]:
+        """Read one shared multi-robot scene with the complete start state."""
 
 
 class PlaceUpMotionTransport(Protocol):
@@ -242,6 +305,71 @@ class PlaceUpHandler:
             manifest_sha256=self._manifest_sha256,
         )
 
+    async def _guard_scene(
+        self, robot_id: str, support_robot_id: str
+    ) -> Mapping[str, object]:
+        """Read the shared scene the insert guard's proof needs.
+
+        The up-mode contact guard proves the SUPPORT robot's pad reaction while
+        checking the executor's bricks, so it needs one instant carrying both
+        robots' blocks and the global PhysX pad report. A robot-scoped
+        observation cannot serve it: by design it carries only the requesting
+        robot's own contact records, so the peer's proof could never find them
+        and the insertion failed closed before moving (live evidence,
+        task-c-top-offset13j-headless 2026-10-14: ``support_contact_lost`` while
+        piper_1's own slice showed the support pressing at 5.21 N).
+
+        Returns:
+            The shared multi-robot scene snapshot covering both robots.
+        """
+        if self._free_space is None:
+            raise ValueError("place-up contact guard requires the shared scene")
+        snapshot, _, _ = await self._free_space.free_space_context(
+            (robot_id, support_robot_id)
+        )
+        return snapshot
+
+    async def _regrip_before_insert(
+        self, operation: RobotOperation, sample: PlaceObservation
+    ) -> _MotionEvidence | None:
+        """Tighten the grip on the held brick before the upward insertion.
+
+        The insertion carries its whole load through pad friction: the support
+        robot's press on the upper brick transfers to the held lower brick at
+        the stud engagement, so a grip that carried the transport can still
+        creep under it (live evidence, task-c-top-offset13l/13p-headless: the
+        brick slid 3.0-3.2 mm in the jaws at the engagement and the guard
+        stopped the insertion).  Commanding a further
+        ``place_up_regrip_closing_m`` of closure presses the already touching
+        pads harder -- unlike the one-shot close, this cannot eject the brick,
+        because the pads are already gripping it.
+
+        Returns:
+            The regrip dispatch evidence, or None when it is disabled.
+        """
+        closing = self._context.params.place_up_regrip_closing_m
+        if closing <= 0.0:
+            return None
+        if self._motion is None:
+            raise ValueError("pre-insert regrip requires the motion transport")
+        measured = float(sample.lower.opening_m)
+        target = max(0.0, measured - closing)
+        window = (
+            max(0.0, measured - self._context.params.contact_window_slop_m),
+            measured + self._context.params.contact_window_slop_m,
+        )
+        regrip = gripper_operation(
+            GripperTarget(
+                opening_m=target,
+                duration_s=self._context.params.gripper_duration_s,
+                goal_tolerance=self._context.params.gripper_goal_tolerance,
+                expected_opening_m=window,
+            ),
+            60.0,
+            f"{operation.operation_id}:regrip",
+        )
+        return await self._dispatch(operation, "regrip", regrip)
+
     async def _dispatch(
         self, operation: RobotOperation, phase: str, runtime_operation: RuntimeOperation
     ) -> _MotionEvidence:
@@ -337,6 +465,171 @@ class PlaceUpHandler:
         if request_id is None or self._motion is None:
             return {"attempted": False, "terminal": False, "safe": False}
         return await asyncio.to_thread(self._motion.cancel_motion_operation, request_id)
+
+    def _feedback_target(self, sample, guard, offset_m):
+        """Derive a TCP goal from the live brick/TCP relation, not the old grasp.
+
+        Returns:
+            Calibrated target for a bounded offset along the live stud axis.
+        """
+        supported = _pose(guard["supported_pose"], "supported upper")
+        live_seat = compose(
+            compose(sample.upper.object_pose, inverse(supported)),
+            _pose(guard["desired_lower"], "desired lower"),
+        )
+        normal = _quat_rotate_vector(
+            sample.upper.object_pose.orientation_xyzw, (0, 0, 1)
+        )
+        desired = Pose(
+            tuple(live_seat.position_xyz[i] + normal[i] * offset_m for i in range(3)),
+            live_seat.orientation_xyzw,
+        )
+        measured_grasp = compose(
+            inverse(sample.lower.object_pose), sample.lower.tcp_pose
+        )
+        tcp = compose(desired, measured_grasp)
+        return _tcp_pose_target(
+            world_position_to_base(tcp.position_xyz, self._context.base),
+            world_orientation_to_base(tcp.orientation_xyzw, self._context.base),
+            self._context.provenance,
+            self._context.params,
+        )
+
+    async def _feedback_insert(self, operation, admission, guard, evidence):
+        """Align off-contact, then advance only from fresh measured object progress.
+
+        Returns:
+            Last terminal action evidence and explicit connection/safety stop.
+        """
+        step_m = self._context.params.place_up_feedback_step_m
+        feedback = {"step_m": step_m, "alignment_standoff_m": 0.008, "steps": []}
+        evidence["insertion_feedback"] = feedback
+        last = _MotionEvidence(False, True, True, False, {}, "no insertion motion")
+        stalled = 0
+        axial_commanded = 0.0
+        compression_commanded = 0.0
+        loop_deadline = asyncio.get_running_loop().time() + 240.0
+        for index in range(32):
+            if asyncio.get_running_loop().time() >= loop_deadline:
+                return last, "insertion_feedback_deadline"
+            scene = await self._guard_scene(
+                admission.robot_id, admission.support_robot_id
+            )
+            reason, before = inspect_contact(scene, guard)
+            feedback["last_observation"] = before
+            if reason is not None:
+                return last, reason
+            sample = parse_place_observation(
+                scene,
+                robot_id=admission.robot_id,
+                upper_physical_instance_id=admission.upper_physical_instance_id,
+                lower_physical_instance_id=admission.lower_physical_instance_id,
+                session_id=self._session_id,
+                manifest_sha256=self._manifest_sha256,
+            )
+            aligning = index < 2
+            near_contact = _native_press_ready(before)
+            force = before.get("contact_force_n")
+            compressing = near_contact and force is not None and abs(force) > 0.05
+            if aligning:
+                if (
+                    abs(before["seat_axial_error_m"] + 0.008) <= 0.001
+                    and before["seat_lateral_error_m"] <= 0.001
+                    and before["seat_angle_rad"] <= math.radians(1)
+                ):
+                    continue
+                offset = -0.008
+            else:
+                if before["seat_lateral_error_m"] > 0.001 or before[
+                    "seat_angle_rad"
+                ] > math.radians(3 if compressing else 1):
+                    return last, "insertion_alignment_not_confirmed"
+                offset = min(
+                    before["seat_axial_error_m"] + min(step_m, 0.00025)
+                    if near_contact
+                    else before["seat_axial_error_m"] + step_m,
+                    self._context.params.place_press_m,
+                )
+                if before["seat_axial_error_m"] >= self._context.params.place_press_m:
+                    return last, "insertion_depth_bound_reached"
+            target = self._feedback_target(sample, guard, offset)
+            suffix = f"align_up_{index}" if aligning else f"insert_up_step_{index - 2}"
+            last = await self._dispatch(
+                operation,
+                suffix,
+                guarded_tcp_operation(
+                    target, guard, 120.0, f"{operation.operation_id}:{suffix}"
+                ),
+            )
+            details = (
+                last.evidence.get("runtime", {}).get("execution", {}).get("details", {})
+            )
+            recorded = {
+                "phase": suffix,
+                "before": before,
+                "target_offset_m": offset,
+                "motion": dict(last.evidence),
+                "bounded_compression": compressing,
+            }
+            feedback["steps"].append(recorded)
+            stop = details.get("contact_stop_reason")
+            if not last.terminal or not last.safe:
+                return last, stop or "insertion_action_terminal_unknown"
+            if stop is not None or not last.passed:
+                return last, stop or "insertion_step_failed"
+            after_scene = await self._guard_scene(
+                admission.robot_id, admission.support_robot_id
+            )
+            reason, after = inspect_contact(after_scene, guard)
+            recorded["after"] = after
+            feedback["last_observation"] = after
+            if after["sequence"] <= before["sequence"]:
+                return last, "insertion_feedback_stale"
+            if reason is not None:
+                return last, reason
+            if not aligning:
+                normal = _quat_rotate_vector(
+                    sample.upper.object_pose.orientation_xyzw, (0, 0, 1)
+                )
+                after_sample = parse_place_observation(
+                    after_scene,
+                    robot_id=admission.robot_id,
+                    upper_physical_instance_id=admission.upper_physical_instance_id,
+                    lower_physical_instance_id=admission.lower_physical_instance_id,
+                    session_id=self._session_id,
+                    manifest_sha256=self._manifest_sha256,
+                )
+                tcp_advance = sum(
+                    normal[i]
+                    * (
+                        after_sample.lower.tcp_pose.position_xyz[i]
+                        - sample.lower.tcp_pose.position_xyz[i]
+                    )
+                    for i in range(3)
+                )
+                object_advance = (
+                    after["seat_axial_error_m"] - before["seat_axial_error_m"]
+                )
+                recorded["tcp_advance_m"] = tcp_advance
+                recorded["object_advance_m"] = object_advance
+                axial_commanded += max(0.0, tcp_advance)
+                if compressing:
+                    compression_commanded += max(0.0, tcp_advance)
+                    recorded["compression_commanded_m"] = compression_commanded
+                    if compression_commanded > 0.002:
+                        return last, "insertion_compression_budget_exhausted"
+                commanded_step = offset - before["seat_axial_error_m"]
+                stalled = (
+                    stalled + 1
+                    if tcp_advance > commanded_step * 0.5
+                    and object_advance < commanded_step * 0.2
+                    else 0
+                )
+                if stalled >= 2 and not compressing:
+                    return last, "insertion_object_not_following"
+                if axial_commanded > 0.008 + self._context.params.place_press_m + 0.003:
+                    return last, "insertion_command_budget_exhausted"
+        return last, "insertion_step_budget_exhausted"
 
     def _world_payload(
         self,
@@ -499,6 +792,18 @@ class PlaceUpHandler:
             terminal_safe = result.terminal and result.safe
             if not result.passed:
                 raise RuntimeError(result.reason or "plan_place_up failed")
+            regrip_sample = await self._observe(
+                admission.robot_id,
+                admission.upper_physical_instance_id,
+                admission.lower_physical_instance_id,
+            )
+            regrip = await self._regrip_before_insert(operation, regrip_sample)
+            if regrip is not None:
+                evidence["regrip"] = dict(regrip.evidence)
+                motion_sent = motion_sent or regrip.motion_sent
+                terminal_safe = regrip.terminal and regrip.safe
+                if not regrip.passed:
+                    raise RuntimeError(regrip.reason or "pre-insert regrip failed")
             aligned = await self._observe(
                 admission.robot_id,
                 admission.upper_physical_instance_id,
@@ -507,6 +812,19 @@ class PlaceUpHandler:
             # Anchor contact guards to the actual post-transport grasp, not
             # the old pose that existed before public-space movement.
             held = compose(inverse(aligned.lower.object_pose), aligned.lower.tcp_pose)
+            feedback_enabled = self._context.params.place_up_feedback_step_m > 0
+            if feedback_enabled:
+                # Keep the admitted interface/yaw branch, but anchor its seat
+                # to the same fresh upper frame as the connection proof.
+                desired_lower = compose(
+                    compose(
+                        aligned.upper.object_pose, inverse(sample.upper.object_pose)
+                    ),
+                    desired_lower,
+                )
+                evidence["place_up_geometry"]["feedback_desired_lower_pose"] = asdict(
+                    desired_lower
+                )
             verify_support_contact(
                 await self._observations.observe(admission.support_robot_id),
                 robot_id=admission.support_robot_id,
@@ -526,30 +844,39 @@ class PlaceUpHandler:
                 "desired_lower": asdict(desired_lower),
                 "supported_position_m": 0.002,
                 "supported_angle_rad": math.radians(3),
+                # Continuous insertion retains the measured-feedback trial's
+                # custody envelope; faster motion never loosens slip bounds.
                 "grasp_position_m": 0.003,
-                "grasp_angle_rad": 0.15,
+                "grasp_angle_rad": math.radians(3),
                 "force_limit_n": 8.0,
                 "mode": "insert_up",
             }
             evidence["contact_guard"] = guard
             reason, measured = inspect_contact(
-                await self._observations.observe(admission.robot_id), guard
+                await self._guard_scene(admission.robot_id, admission.support_robot_id),
+                guard,
             )
             if reason == "connection_confirmed":
                 connected = True
             elif reason is not None:
                 raise ValueError(f"contact guard stopped upward insertion: {reason}")
             else:
-                result = await self._dispatch(
-                    operation,
-                    "insert_up",
-                    guarded_tcp_operation(
-                        targets.contact,
-                        guard,
-                        120.0,
-                        f"{operation.operation_id}:insert_up",
-                    ),
-                )
+                if feedback_enabled:
+                    result, feedback_stop = await self._feedback_insert(
+                        operation, admission, guard, evidence
+                    )
+                    evidence["insertion_feedback"]["stop_reason"] = feedback_stop
+                else:
+                    result = await self._dispatch(
+                        operation,
+                        "insert_up",
+                        guarded_tcp_operation(
+                            targets.contact,
+                            guard,
+                            120.0,
+                            f"{operation.operation_id}:insert_up",
+                        ),
+                    )
                 evidence["insertion_up"] = dict(result.evidence)
                 motion_sent = motion_sent or result.motion_sent
                 terminal_safe = result.terminal and result.safe
@@ -559,18 +886,36 @@ class PlaceUpHandler:
                     )
                 runtime = result.evidence.get("runtime", {})
                 details = runtime.get("execution", {}).get("details", {})
-                stop = details.get("contact_stop_reason")
+                stop = (
+                    feedback_stop
+                    if feedback_enabled
+                    else details.get("contact_stop_reason")
+                )
                 connected = stop == "connection_confirmed"
+                if not result.passed and not connected:
+                    # A rejected/failed primitive invalidates this session.
+                    # Do not mask its root error with another scene request,
+                    # or submit a recovery action to a failed session.
+                    raise RuntimeError(
+                        result.reason or f"upward insertion primitive failed: {stop}"
+                    )
                 if not connected:
                     await asyncio.sleep(self._poll_interval_s)
                     settle_reason, _ = inspect_contact(
-                        await self._observations.observe(admission.robot_id), guard
+                        await self._guard_scene(
+                            admission.robot_id, admission.support_robot_id
+                        ),
+                        guard,
                     )
                     connected = settle_reason == "connection_confirmed"
                 if not connected:
                     # No press retries or release under an unconnected load.
                     # Withdraw once only after the insertion actually stopped.
                     unload_guard = {**guard, "mode": "unload_up"}
+                    # Recovery retains the previously validated gross custody
+                    # envelope; no release or success claim occurs here.
+                    unload_guard["grasp_position_m"] = 0.008
+                    unload_guard["grasp_angle_rad"] = 0.15
                     withdrawn = await self._dispatch(
                         operation,
                         "unload_up",
@@ -588,8 +933,8 @@ class PlaceUpHandler:
                         raise RuntimeError(
                             withdrawn.reason or "upward contact withdrawal failed"
                         )
-                    withdrawal_scene = await self._observations.observe(
-                        admission.robot_id
+                    withdrawal_scene = await self._guard_scene(
+                        admission.robot_id, admission.support_robot_id
                     )
                     withdrawal_reason, withdrawal_sample = inspect_contact(
                         withdrawal_scene, unload_guard

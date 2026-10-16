@@ -171,27 +171,25 @@ def test_handover_follow_sample_count_is_strict(count):
 def test_handover_commit_atomically_moves_holding_owner():
     """Move the confirmed owner only after every physical gate passes."""
     from rocobrick.execution.operation_state_ledger import OperationStateLedger
-    from rocobrick.skills.handover import HandoverHandler
 
     ledger = OperationStateLedger(("piper_0", "piper_1"))
     ledger.confirm_holding("piper_0", "brick-1", {"holding_confirmed": True})
-    result = HandoverHandler(ledger).commit(_handover_request(), _handover_evidence())
+    receiver_state = ledger.transfer_holding(_handover_request(), _handover_evidence())
 
-    assert result.evidence.passed
+    assert receiver_state.evidence["holding_confirmed"] is True
     assert ledger.owner_of_object("brick-1") == "piper_1"
     assert ledger.observe("piper_0", "holding:brick-1") is None
-    assert ledger.observe("piper_1", "holding:brick-1") == result.receiver_state
+    assert ledger.observe("piper_1", "holding:brick-1") == receiver_state
 
 
 def test_handover_partial_evidence_preserves_donor_owner():
     """Keep the donor lease when release evidence is incomplete."""
     from rocobrick.execution.operation_state_ledger import OperationStateLedger
-    from rocobrick.skills.handover import HandoverHandler
 
     ledger = OperationStateLedger(("piper_0", "piper_1"))
     ledger.confirm_holding("piper_0", "brick-1", {"holding_confirmed": True})
-    with pytest.raises(ValueError, match="incomplete"):
-        HandoverHandler(ledger).commit(
+    with pytest.raises(ValueError, match="complete terminal-safe"):
+        ledger.transfer_holding(
             _handover_request(),
             _handover_evidence(donor_release_feedback=False),
         )
@@ -230,60 +228,34 @@ def test_handover_unknown_state_blocks_both_robots_until_reconciled():
 
 
 def test_handover_operation_backend_adapts_and_commits_scheduler_result():
-    """The formal HANDOVER backend exposes committed physical evidence."""
-    from types import SimpleNamespace
+    """The real coordinated backend commits only after measured receiver follow."""
+    from test_coordinated_handover_lifecycle import fixture, operation
 
-    from rocobrick.robot_operation_plan import OperationTarget, RobotOperation
-    from rocobrick.skills.handover import HandoverOperationBackend
-
-    request = _handover_request()
-    operation = RobotOperation(
-        operation_id=request.operation_id,
-        source_task_id="task-1",
-        skill="HANDOVER",
-        executor_robot_id=request.receiver_robot_id,
-        participants=request.participants,
-        role_bindings={
-            "donor": request.donor_robot_id,
-            "receiver": request.receiver_robot_id,
-        },
-        target=OperationTarget(
-            {
-                "physical_instance_id": request.physical_instance_id,
-                "donor_robot_id": request.donor_robot_id,
-                "receiver_robot_id": request.receiver_robot_id,
-            }
-        ),
-        parameters={"co_hold_timeout_s": 10.0, "follow_samples": 3},
-        preconditions=(),
-        effects=("holding_transferred",),
-        resources=(
-            f"robot:{request.donor_robot_id}",
-            f"robot:{request.receiver_robot_id}",
-            f"part:{request.physical_instance_id}",
-        ),
-        evidence_requirements=(),
-    )
-
-    class FakeHandler:
-        async def execute(self, received):
-            assert received is request
-            return _handover_evidence()
-
-        def commit(self, received, evidence):
-            assert received is request
-            assert evidence.ready_to_commit
-            return SimpleNamespace(evidence=_handover_evidence(committed=True))
-
-    result = asyncio.run(
-        HandoverOperationBackend(
-            FakeHandler(), lambda received: request
-        ).execute(operation)
-    )
-
+    prepared, ledger, transport, backend = fixture()
+    result = asyncio.run(backend.execute(operation(prepared)))
     assert result.status.value == "CONFIRMED"
     assert result.passed is True
     assert result.terminal is True
     assert result.motion_sent is True
-    assert result.evidence["scene_transfer_committed"] is True
+    assert result.evidence["receiver_holding_follow"] is True
     assert result.evidence["owner_transfer_committed"] is True
+    assert ledger.owner_of_object("brick-1") == prepared.identity.receiver_robot_id
+    assert transport.release_states == [(prepared.identity.donor_robot_id, None, None)]
+
+
+@pytest.mark.parametrize("field,value", [
+    ("operation_id", "foreign"), ("donor_robot_id", "foreign"),
+    ("receiver_robot_id", "foreign"), ("physical_instance_id", "foreign"),
+])
+def test_handover_evidence_foreign_identity_cannot_transfer_owner(field, value):
+    """Matching truthy gates cannot authorize a different operation/object/robot."""
+    from rocobrick.execution.operation_state_ledger import OperationStateLedger
+
+    ledger = OperationStateLedger(("piper_0", "piper_1"))
+    ledger.confirm_holding("piper_0", "brick-1", {"holding_confirmed": True})
+    evidence = replace(_handover_evidence(), **{field: value})
+    with pytest.raises(ValueError, match="does not match"):
+        ledger.transfer_holding(_handover_request(), evidence)
+    assert ledger.owner_of_object("brick-1") == "piper_0"
+    assert ledger.observe("piper_0", "holding:brick-1") is not None
+    assert ledger.observe("piper_1", "holding:brick-1") is None

@@ -1,0 +1,279 @@
+{
+  "request_id": "assembly-plan-25a5d5cc586a1e5c65f2141d:approach:1",
+  "action": "PICK",
+  "robot_id": "piper_0",
+  "revisions": {
+    "world": "1",
+    "robot_state": "2",
+    "motion": "2"
+  },
+  "start": {
+    "names": [
+      "piper_0_joint1",
+      "piper_0_joint2",
+      "piper_0_joint3",
+      "piper_0_joint4",
+      "piper_0_joint5",
+      "piper_0_joint6",
+      "piper_0_gripper_joint1",
+      "piper_0_gripper_joint2"
+    ],
+    "positions": [
+      0.8490807414054871,
+      1.7471404075622559,
+      -1.4650852680206299,
+      0.0021048279013484716,
+      1.3753116130828857,
+      -0.724673330783844,
+      0.015500950627028942,
+      -0.015499033033847809
+    ]
+  },
+  "target": {
+    "frame_id": "world",
+    "position_m": [
+      -0.06799993891172629,
+      0.03000020729933447,
+      0.005999995099784771
+    ],
+    "orientation_xyzw": [
+      1.0,
+      0.0,
+      0.0,
+      0.0
+    ]
+  },
+  "objects": [
+    {
+      "object_id": "part:brick-4bbba49bec24496bb21e",
+      "pose": {
+        "frame_id": "world",
+        "position_m": [
+          -0.01599954254925251,
+          -0.19199985265731812,
+          0.003199758008122444
+        ],
+        "orientation_xyzw": [
+          3.453654073837086e-08,
+          2.9770561127405486e-07,
+          0.9999999999999548,
+          -2.7046866240939337e-08
+        ]
+      },
+      "primitives": [
+        {
+          "pose": {
+            "frame_id": "part:brick-4bbba49bec24496bb21e",
+            "position_m": [
+              -6.938893903907228e-18,
+              0.0,
+              0.0048000000000000004
+            ],
+            "orientation_xyzw": [
+              0.0,
+              0.0,
+              0.0,
+              1.0
+            ]
+          },
+          "dimensions_m": [
+            0.03200000151991844,
+            0.01600000075995922,
+            0.009600000455975533
+          ]
+        },
+        {
+          "pose": {
+            "frame_id": "part:brick-4bbba49bec24496bb21e",
+            "position_m": [
+              -3.469446951953614e-18,
+              -2.7755575615628914e-17,
+              0.010450000000000001
+            ],
+            "orientation_xyzw": [
+              0.0,
+              0.0,
+              0.0,
+              1.0
+            ]
+          },
+          "dimensions_m": [
+            0.03200000151991844,
+            0.01600000075995922,
+            0.0017000000225380065
+          ]
+        }
+      ]
+    },
+    {
+      "object_id": "part:brick-768de5a17827920c48d4",
+      "pose": {
+        "frame_id": "world",
+        "position_m": [
+          -0.0679999440908432,
+          0.030000213533639908,
+          -2.8405338525772095e-08
+        ],
+        "orientation_xyzw": [
+          5.517083776154212e-07,
+          4.58329031249944e-07,
+          -1.7063867685507464e-07,
+          0.9999999999997282
+        ]
+      },
+      "primitives": [
+        {
+          "pose": {
+            "frame_id": "part:brick-768de5a17827920c48d4",
+            "position_m": [
+              1.3877787807814457e-17,
+              -6.938893903907228e-18,
+              0.0048000000000000004
+            ],
+            "orientation_xyzw": [
+              0.0,
+              0.0,
+              0.0,
+              1.0
+            ]
+          },
+          "dimensions_m": [
+            0.03200000151991844,
+            0.01600000075995922,
+            0.009600000455975533
+          ]
+        },
+        {
+          "pose": {
+            "frame_id": "part:brick-768de5a17827920c48d4",
+            "position_m": [
+              1.3877787807814457e-17,
+              -3.469446951953614e-18,
+              0.010450000000000001
+            ],
+            "orientation_xyzw": [
+              0.0,
+              0.0,
+              0.0,
+              1.0
+            ]
+          },
+          "dimensions_m": [
+            0.03200000151991844,
+            0.01600000075995922,
+            0.0017000000225380063
+          ]
+        }
+      ]
+    },
+    {
+      "object_id": "ground",
+      "pose": {
+        "frame_id": "world",
+        "position_m": [
+          0.0,
+          0.0,
+          -0.011000000000000001
+        ],
+        "orientation_xyzw": [
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ]
+      },
+      "primitives": [
+        {
+          "pose": {
+            "frame_id": "ground",
+            "position_m": [
+              0.0,
+              0.0,
+              0.0
+            ],
+            "orientation_xyzw": [
+              0.0,
+              0.0,
+              0.0,
+              1.0
+            ]
+          },
+          "dimensions_m": [
+            2.0,
+            2.0,
+            0.02
+          ]
+        }
+      ]
+    }
+  ],
+  "other_robot_remaining_motion": {},
+  "allowed_contacts": [
+    {
+      "first": "part:brick-768de5a17827920c48d4",
+      "second": "piper_0_gripper_link1",
+      "max_force_n": 20.0,
+      "max_penetration_m": 0.002,
+      "max_duration_s": 5.0
+    },
+    {
+      "first": "part:brick-768de5a17827920c48d4",
+      "second": "piper_0_gripper_link2",
+      "max_force_n": 20.0,
+      "max_penetration_m": 0.002,
+      "max_duration_s": 5.0
+    }
+  ],
+  "robots": [
+    {
+      "robot_id": "piper_0",
+      "joints": {
+        "names": [
+          "piper_0_joint1",
+          "piper_0_joint2",
+          "piper_0_joint3",
+          "piper_0_joint4",
+          "piper_0_joint5",
+          "piper_0_joint6",
+          "piper_0_gripper_joint1",
+          "piper_0_gripper_joint2"
+        ],
+        "positions": [
+          0.8490807414054871,
+          1.7471404075622559,
+          -1.4650852680206299,
+          0.0021048279013484716,
+          1.3753116130828857,
+          -0.724673330783844,
+          0.015500950627028942,
+          -0.015499033033847809
+        ]
+      }
+    },
+    {
+      "robot_id": "piper_1",
+      "joints": {
+        "names": [
+          "piper_1_joint1",
+          "piper_1_joint2",
+          "piper_1_joint3",
+          "piper_1_joint4",
+          "piper_1_joint5",
+          "piper_1_joint6",
+          "piper_1_gripper_joint1",
+          "piper_1_gripper_joint2"
+        ],
+        "positions": [
+          -1.3451264067043667e-06,
+          0.0008361917571164668,
+          -2.429433516226709e-05,
+          0.0017880935920402408,
+          0.0003771650663111359,
+          6.327675691863988e-06,
+          3.8634777865809156e-07,
+          -2.0474830719763304e-08
+        ]
+      }
+    }
+  ]
+}

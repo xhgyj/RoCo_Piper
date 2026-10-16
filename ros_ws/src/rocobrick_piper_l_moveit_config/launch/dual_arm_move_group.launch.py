@@ -1,7 +1,6 @@
 """Launch one combined dual-arm MoveIt planning instance.
 
-This launch is intentionally separate from ``dual_move_group.launch.py``:
-the latter remains the legacy isolated per-robot diagnostic stack, while this
+The legacy isolated per-robot diagnostic launch has been retired. This
 entry owns one combined robot_description/SRDF/planning scene for coordinated
 free-space planning. Controller execution is not silently claimed atomic;
 the runtime coordinator must validate and dispatch the returned per-robot

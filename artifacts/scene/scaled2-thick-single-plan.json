@@ -1,0 +1,14 @@
+{
+  "schema": "robot-operation-plan/v1",
+  "plan_id": "scaled2-thick-single-v1",
+  "source_plan_id": "scaled2-thick-single-v1",
+  "robots": [
+    "piper_0",
+    "piper_1"
+  ],
+  "operations": [],
+  "dependencies": [],
+  "execution_layers": [],
+  "planned_schedule": [],
+  "evidence_requirements": []
+}

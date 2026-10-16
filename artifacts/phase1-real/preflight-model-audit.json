@@ -1,0 +1,1049 @@
+{
+  "schema": "rocobrick-piper-l-model-contract/v1",
+  "phase": "P0.4",
+  "model": "agilex_piper_l",
+  "collected_date_utc": "2026-09-21",
+  "offline": true,
+  "provenance": {
+    "pinned_repositories": {
+      "agx_arm_ros": {
+        "url": "https://github.com/agilexrobotics/agx_arm_ros.git",
+        "branch": "ros2",
+        "commit": "b9ad14de2a6eb818a2d206fbd1adba48343662f7",
+        "checkout_path": "ros_ws/src/agx_arm_ros",
+        "head_verified": true
+      },
+      "agx_arm_sim": {
+        "url": "https://github.com/agilexrobotics/agx_arm_sim.git",
+        "branch": "master",
+        "commit": "f8cd8b147c75d59e14f90fb0646770eefa268ed0",
+        "checkout_path": "isaac/vendor/agx_arm_sim",
+        "head_verified": true
+      }
+    },
+    "submodules": {
+      "agx_arm_urdf_in_agx_arm_ros": {
+        "url": "https://github.com/agilexrobotics/agx_arm_urdf.git",
+        "recorded_gitlink": "f6642ce0d7872c686f29c99e9e10cd23d1d49313",
+        "checked_out_head": "f6642ce0d7872c686f29c99e9e10cd23d1d49313",
+        "pin": "f6642ce0d7872c686f29c99e9e10cd23d1d49313",
+        "pin_verified": true,
+        "path": "ros_ws/src/agx_arm_ros/src/agx_arm_description/agx_arm_urdf",
+        "note": "Official planning model source; joint4 and joint5 limits differ from the pinned agx_arm_sim URDF/USD."
+      },
+      "agx_arm_urdf_in_agx_arm_sim": {
+        "recorded_gitlink": "1ee5659d02b33b9379fd647a2e5647800d67f0f4",
+        "initialized": false,
+        "note": "The agx_arm_sim checkout records gitlink 1ee5659d02b33b9379fd647a2e5647800d67f0f4 for its agx_arm_urdf submodule but it is not checked out and is not used for this audit."
+      }
+    },
+    "file_sha256": {
+      "ros_ws/src/agx_arm_ros/src/agx_arm_description/agx_arm_urdf/piper_l/urdf/piper_l_description.urdf": "d289652c494017ca8d50152343fdbd02fd25c4f1ac3bb80d59d1f2f3cfab6fda",
+      "ros_ws/src/agx_arm_ros/src/agx_arm_description/agx_arm_urdf/piper_l/urdf/piper_l_with_gripper_description.xacro": "8136b85f30043421fffbde0299806e652ac283a28f5ce7485d52903eb4aa4c4c",
+      "isaac/vendor/agx_arm_sim/agx_arm_description/urdf/piper_l_gripper_d435.urdf": "8a5e4a77c53947e234f7f8a15db14e30ca85eb2c9f7ae3dc1784f07057626b0d",
+      "robot_assets/piper_l/piper_l_gripper_d435.urdf": "8a5e4a77c53947e234f7f8a15db14e30ca85eb2c9f7ae3dc1784f07057626b0d",
+      "config/user_config.json": "af41dbea5f50f861c985c572beac0f8d7336e13b8e311d9caf92d2d17fc919b4",
+      "robot_assets/piper_l/USD/piper_l_gripper_d435.usd": "a781d52f9d55291fca9c8f2695abf9e311640d996314d272f47639d5323e2375",
+      "isaac/vendor/agx_arm_sim/agx_arm_description/urdf/USD/piper_l_gripper_d435/piper_l_gripper_d435.usd": "a781d52f9d55291fca9c8f2695abf9e311640d996314d272f47639d5323e2375",
+      "robot_assets/piper_l/USD/configuration/piper_l_gripper_d435_base.usd": "14b24829e7ec1179fe437f89222a9a7f586369e56b1ed010772b5887c3663b50",
+      "robot_assets/piper_l/USD/configuration/piper_l_gripper_d435_physics.usd": "7cd338a94a00d50d3f799ca39f66d1fad515b280dcca5b1b893dbe4953e35888",
+      "robot_assets/piper_l/USD/configuration/piper_l_gripper_d435_robot.usd": "41660f0300863d9bd8a675937afec9a62ecd174fc789c4c7a5d3553741b48f00",
+      "robot_assets/piper_l/USD/configuration/piper_l_gripper_d435_sensor.usd": "5fbd085f92be9940d861a16a5b31ccacbb031f196695c07e6764b35a8c3011fb",
+      "isaac/vendor/agx_arm_sim/Moveit2/piper_l_gripper_moveit_config/config/piper_l.srdf": "8f0610c725213e5d0e2765c2d27b1c39ed575149fa763113c137fa2a91eff33c",
+      "isaac/vendor/agx_arm_sim/Moveit2/piper_l_gripper_moveit_config/config/piper_l.ros2_control.xacro": "6e82dcc075cbc6032cbea9b6ce369a91686fa45d1d0495e0002abd53f9c31818",
+      "isaac/vendor/agx_arm_sim/Moveit2/piper_l_gripper_moveit_config/config/joint_limits.yaml": "bf77358fca76c1b26c58f29178888c087f3745e2525ab64b70cf6d266176a10a",
+      "isaac/vendor/agx_arm_sim/Moveit2/piper_l_gripper_moveit_config/config/moveit_controllers.yaml": "3ab3d22fc8e4807704da051bf45c347e2ada3758c818450db11e71527e64d2fe",
+      "isaac/vendor/agx_arm_sim/Moveit2/piper_l_gripper_moveit_config/config/ros2_controllers.yaml": "b65a353a0c78bdb550ad447d304309613233bb1874981193c2043f4814a502bd",
+      "isaac/vendor/agx_arm_sim/Moveit2/piper_l_gripper_moveit_config/config/kinematics.yaml": "da90b0a09b402ff7136d99270d82233d7fdcf9615e8a6b88061623287fe7a1ea",
+      "isaac/vendor/agx_arm_sim/Moveit2/piper_l_gripper_moveit_config/config/initial_positions.yaml": "a6f8335ab1a9f46b478b47f9accb5fed1bb9dac683525665b32b2d57331022d9",
+      "isaac/vendor/agx_arm_sim/Moveit2/piper_l_gripper_moveit_config/config/pilz_cartesian_limits.yaml": "fed80b213b77f13fb7b913d703609a66caa72ccb0617b41e83d3057e31749047",
+      "ros_ws/src/agx_arm_ros/src/agx_arm_description/agx_arm_urdf/LICENSE": "247944c63de1573653722ba784f96123da267105b7b48577e0c8826a24b809f6",
+      "ros_ws/src/agx_arm_ros/LICENSE": "247944c63de1573653722ba784f96123da267105b7b48577e0c8826a24b809f6",
+      "isaac/vendor/agx_arm_sim/README.md": "b91918f2972101eee621cba9badbc90e6057b9c5269c0bb7ae00f84195d31399"
+    },
+    "runtime_vendor_identity": {
+      "urdf": {
+        "runtime_path": "robot_assets/piper_l/piper_l_gripper_d435.urdf",
+        "vendor_path": "isaac/vendor/agx_arm_sim/agx_arm_description/urdf/piper_l_gripper_d435.urdf",
+        "runtime_sha256": "8a5e4a77c53947e234f7f8a15db14e30ca85eb2c9f7ae3dc1784f07057626b0d",
+        "vendor_sha256": "8a5e4a77c53947e234f7f8a15db14e30ca85eb2c9f7ae3dc1784f07057626b0d",
+        "byte_identical": true
+      },
+      "usd_top": {
+        "runtime_path": "robot_assets/piper_l/USD/piper_l_gripper_d435.usd",
+        "vendor_path": "isaac/vendor/agx_arm_sim/agx_arm_description/urdf/USD/piper_l_gripper_d435/piper_l_gripper_d435.usd",
+        "runtime_sha256": "a781d52f9d55291fca9c8f2695abf9e311640d996314d272f47639d5323e2375",
+        "vendor_sha256": "a781d52f9d55291fca9c8f2695abf9e311640d996314d272f47639d5323e2375",
+        "byte_identical": true
+      },
+      "usd_configuration_layers": {
+        "piper_l_gripper_d435_base.usd": {
+          "runtime_path": "robot_assets/piper_l/USD/configuration/piper_l_gripper_d435_base.usd",
+          "vendor_path": "isaac/vendor/agx_arm_sim/agx_arm_description/urdf/USD/piper_l_gripper_d435/configuration/piper_l_gripper_d435_base.usd",
+          "runtime_sha256": "14b24829e7ec1179fe437f89222a9a7f586369e56b1ed010772b5887c3663b50",
+          "vendor_sha256": "14b24829e7ec1179fe437f89222a9a7f586369e56b1ed010772b5887c3663b50",
+          "byte_identical": true
+        },
+        "piper_l_gripper_d435_physics.usd": {
+          "runtime_path": "robot_assets/piper_l/USD/configuration/piper_l_gripper_d435_physics.usd",
+          "vendor_path": "isaac/vendor/agx_arm_sim/agx_arm_description/urdf/USD/piper_l_gripper_d435/configuration/piper_l_gripper_d435_physics.usd",
+          "runtime_sha256": "7cd338a94a00d50d3f799ca39f66d1fad515b280dcca5b1b893dbe4953e35888",
+          "vendor_sha256": "7cd338a94a00d50d3f799ca39f66d1fad515b280dcca5b1b893dbe4953e35888",
+          "byte_identical": true
+        },
+        "piper_l_gripper_d435_robot.usd": {
+          "runtime_path": "robot_assets/piper_l/USD/configuration/piper_l_gripper_d435_robot.usd",
+          "vendor_path": "isaac/vendor/agx_arm_sim/agx_arm_description/urdf/USD/piper_l_gripper_d435/configuration/piper_l_gripper_d435_robot.usd",
+          "runtime_sha256": "41660f0300863d9bd8a675937afec9a62ecd174fc789c4c7a5d3553741b48f00",
+          "vendor_sha256": "41660f0300863d9bd8a675937afec9a62ecd174fc789c4c7a5d3553741b48f00",
+          "byte_identical": true
+        },
+        "piper_l_gripper_d435_sensor.usd": {
+          "runtime_path": "robot_assets/piper_l/USD/configuration/piper_l_gripper_d435_sensor.usd",
+          "vendor_path": "isaac/vendor/agx_arm_sim/agx_arm_description/urdf/USD/piper_l_gripper_d435/configuration/piper_l_gripper_d435_sensor.usd",
+          "runtime_sha256": "5fbd085f92be9940d861a16a5b31ccacbb031f196695c07e6764b35a8c3011fb",
+          "vendor_sha256": "5fbd085f92be9940d861a16a5b31ccacbb031f196695c07e6764b35a8c3011fb",
+          "byte_identical": true
+        }
+      }
+    },
+    "robot_assets_snapshot": {
+      "path": "robot_assets/piper_l",
+      "version_controlled": true,
+      "movable_joint_names": [
+        "joint1",
+        "joint2",
+        "joint3",
+        "joint4",
+        "joint5",
+        "joint6",
+        "gripper_joint1",
+        "gripper_joint2"
+      ],
+      "has_mimic_declarations": false,
+      "has_flange_link": false,
+      "differs_from_pinned_submodule": true,
+      "note": "Version-controlled local copy of the agx_arm_sim URDF/USD used at runtime; the audited URDF and USD layers are byte-identical to that pinned vendor checkout. The separate agx_arm_urdf planning model has flange_link, mimic declarations, different finger origins, and wider joint4/joint5 limits. Its gripper mimic relation remains the logical gripper reference."
+    }
+  },
+  "arm_joints": {
+    "count": 6,
+    "order": [
+      "joint1",
+      "joint2",
+      "joint3",
+      "joint4",
+      "joint5",
+      "joint6"
+    ],
+    "joints": [
+      {
+        "name": "joint1",
+        "type": "revolute",
+        "axis": [
+          0.0,
+          0.0,
+          1.0
+        ],
+        "limit": {
+          "lower": -2.6179938,
+          "upper": 2.6179938,
+          "effort": 100.0,
+          "velocity": 5.0
+        },
+        "parent_link": "base_link",
+        "child_link": "link1",
+        "origin_xyz": [
+          0.0,
+          0.0,
+          0.123
+        ],
+        "origin_rpy": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "source": {
+          "path": "ros_ws/src/agx_arm_ros/src/agx_arm_description/agx_arm_urdf/piper_l/urdf/piper_l_description.urdf",
+          "sha256": "d289652c494017ca8d50152343fdbd02fd25c4f1ac3bb80d59d1f2f3cfab6fda"
+        }
+      },
+      {
+        "name": "joint2",
+        "type": "revolute",
+        "axis": [
+          0.0,
+          0.0,
+          1.0
+        ],
+        "limit": {
+          "lower": 0.0,
+          "upper": 3.1415926,
+          "effort": 100.0,
+          "velocity": 5.0
+        },
+        "parent_link": "link1",
+        "child_link": "link2",
+        "origin_xyz": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "origin_rpy": [
+          1.5707963,
+          -0.1357866,
+          -3.1415926
+        ],
+        "source": {
+          "path": "ros_ws/src/agx_arm_ros/src/agx_arm_description/agx_arm_urdf/piper_l/urdf/piper_l_description.urdf",
+          "sha256": "d289652c494017ca8d50152343fdbd02fd25c4f1ac3bb80d59d1f2f3cfab6fda"
+        }
+      },
+      {
+        "name": "joint3",
+        "type": "revolute",
+        "axis": [
+          0.0,
+          0.0,
+          1.0
+        ],
+        "limit": {
+          "lower": -2.9670597,
+          "upper": 0.0,
+          "effort": 100.0,
+          "velocity": 5.0
+        },
+        "parent_link": "link2",
+        "child_link": "link3",
+        "origin_xyz": [
+          0.33823,
+          0.0,
+          0.0
+        ],
+        "origin_rpy": [
+          0.0,
+          0.0,
+          -1.7938494
+        ],
+        "source": {
+          "path": "ros_ws/src/agx_arm_ros/src/agx_arm_description/agx_arm_urdf/piper_l/urdf/piper_l_description.urdf",
+          "sha256": "d289652c494017ca8d50152343fdbd02fd25c4f1ac3bb80d59d1f2f3cfab6fda"
+        }
+      },
+      {
+        "name": "joint4",
+        "type": "revolute",
+        "axis": [
+          0.0,
+          0.0,
+          1.0
+        ],
+        "limit": {
+          "lower": -2.2165681,
+          "upper": 2.2165681,
+          "effort": 100.0,
+          "velocity": 5.0
+        },
+        "parent_link": "link3",
+        "child_link": "link4",
+        "origin_xyz": [
+          -0.02301,
+          -0.32075,
+          0.0
+        ],
+        "origin_rpy": [
+          1.5707963,
+          0.0,
+          0.0
+        ],
+        "source": {
+          "path": "ros_ws/src/agx_arm_ros/src/agx_arm_description/agx_arm_urdf/piper_l/urdf/piper_l_description.urdf",
+          "sha256": "d289652c494017ca8d50152343fdbd02fd25c4f1ac3bb80d59d1f2f3cfab6fda"
+        }
+      },
+      {
+        "name": "joint5",
+        "type": "revolute",
+        "axis": [
+          0.0,
+          0.0,
+          1.0
+        ],
+        "limit": {
+          "lower": -1.5620696,
+          "upper": 1.5620696,
+          "effort": 100.0,
+          "velocity": 5.0
+        },
+        "parent_link": "link4",
+        "child_link": "link5",
+        "origin_xyz": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "origin_rpy": [
+          -1.5707963,
+          0.0,
+          0.0
+        ],
+        "source": {
+          "path": "ros_ws/src/agx_arm_ros/src/agx_arm_description/agx_arm_urdf/piper_l/urdf/piper_l_description.urdf",
+          "sha256": "d289652c494017ca8d50152343fdbd02fd25c4f1ac3bb80d59d1f2f3cfab6fda"
+        }
+      },
+      {
+        "name": "joint6",
+        "type": "revolute",
+        "axis": [
+          0.0,
+          0.0,
+          1.0
+        ],
+        "limit": {
+          "lower": -2.0943951,
+          "upper": 2.0943951,
+          "effort": 100.0,
+          "velocity": 5.0
+        },
+        "parent_link": "link5",
+        "child_link": "link6",
+        "origin_xyz": [
+          0.0,
+          -0.091,
+          0.0
+        ],
+        "origin_rpy": [
+          1.5707963,
+          0.0,
+          0.0
+        ],
+        "source": {
+          "path": "ros_ws/src/agx_arm_ros/src/agx_arm_description/agx_arm_urdf/piper_l/urdf/piper_l_description.urdf",
+          "sha256": "d289652c494017ca8d50152343fdbd02fd25c4f1ac3bb80d59d1f2f3cfab6fda"
+        }
+      }
+    ],
+    "source_of_record": {
+      "path": "ros_ws/src/agx_arm_ros/src/agx_arm_description/agx_arm_urdf/piper_l/urdf/piper_l_description.urdf",
+      "sha256": "d289652c494017ca8d50152343fdbd02fd25c4f1ac3bb80d59d1f2f3cfab6fda"
+    }
+  },
+  "limit_conflict": {
+    "planning_urdf": {
+      "path": "ros_ws/src/agx_arm_ros/src/agx_arm_description/agx_arm_urdf/piper_l/urdf/piper_l_description.urdf",
+      "sha256": "d289652c494017ca8d50152343fdbd02fd25c4f1ac3bb80d59d1f2f3cfab6fda"
+    },
+    "execution_urdf": {
+      "path": "isaac/vendor/agx_arm_sim/agx_arm_description/urdf/piper_l_gripper_d435.urdf",
+      "sha256": "8a5e4a77c53947e234f7f8a15db14e30ca85eb2c9f7ae3dc1784f07057626b0d"
+    },
+    "execution_usd": {
+      "path": "isaac/vendor/agx_arm_sim/agx_arm_description/urdf/USD/piper_l_gripper_d435/piper_l_gripper_d435.usd",
+      "sha256": "a781d52f9d55291fca9c8f2695abf9e311640d996314d272f47639d5323e2375"
+    },
+    "conflicts": [
+      {
+        "joint": "joint4",
+        "agx_arm_urdf_rad": [
+          -2.2165681,
+          2.2165681
+        ],
+        "agx_arm_sim_rad": [
+          -1.7453292,
+          1.7453292
+        ]
+      },
+      {
+        "joint": "joint5",
+        "agx_arm_urdf_rad": [
+          -1.5620696,
+          1.5620696
+        ],
+        "agx_arm_sim_rad": [
+          -1.2217304,
+          1.2217304
+        ]
+      }
+    ],
+    "execution_limits_rad": {
+      "joint1": [
+        -2.6179938,
+        2.6179938
+      ],
+      "joint2": [
+        0.0,
+        3.1415926
+      ],
+      "joint3": [
+        -2.9670597,
+        0.0
+      ],
+      "joint4": [
+        -1.7453292,
+        1.7453292
+      ],
+      "joint5": [
+        -1.2217304,
+        1.2217304
+      ],
+      "joint6": [
+        -2.0943951,
+        2.0943951
+      ]
+    },
+    "policy": "intersection_of_pinned_urdf_limits",
+    "planning_enforcement": "Pending MoveIt integration: apply the execution limits to MoveIt before enabling trajectory execution. The official MoveIt xacro uses agx_arm_urdf, whose joint4/joint5 position limits are wider; its joint_limits.yaml only changes dynamics."
+  },
+  "gripper": {
+    "logical_master_joint": {
+      "name": "gripper",
+      "type": "prismatic",
+      "axis": [
+        0.0,
+        0.0,
+        1.0
+      ],
+      "opening_range_m": [
+        0.0,
+        0.1
+      ],
+      "child_link": "gripper_link",
+      "child_link_has_geometry": false,
+      "present_in_pinned_submodule": true,
+      "present_in_composed_urdf": false,
+      "source": {
+        "path": "ros_ws/src/agx_arm_ros/src/agx_arm_description/agx_arm_urdf/piper_l/urdf/piper_l_with_gripper_description.xacro",
+        "sha256": "8136b85f30043421fffbde0299806e652ac283a28f5ce7485d52903eb4aa4c4c"
+      }
+    },
+    "fingers": [
+      {
+        "name": "gripper_joint1",
+        "type": "prismatic",
+        "axis": [
+          0.0,
+          0.0,
+          1.0
+        ],
+        "limit": {
+          "lower": 0.0,
+          "upper": 0.05,
+          "effort": 10.0,
+          "velocity": 3.0
+        },
+        "mimic": {
+          "joint": "gripper",
+          "multiplier": 0.5,
+          "offset": 0.0
+        },
+        "parent_link": "gripper_base",
+        "child_link": "gripper_link1",
+        "origin_xyz": [
+          0.0,
+          0.0,
+          0.138
+        ],
+        "source": {
+          "path": "ros_ws/src/agx_arm_ros/src/agx_arm_description/agx_arm_urdf/piper_l/urdf/piper_l_with_gripper_description.xacro",
+          "sha256": "8136b85f30043421fffbde0299806e652ac283a28f5ce7485d52903eb4aa4c4c"
+        }
+      },
+      {
+        "name": "gripper_joint2",
+        "type": "prismatic",
+        "axis": [
+          0.0,
+          0.0,
+          -1.0
+        ],
+        "limit": {
+          "lower": -0.05,
+          "upper": 0.0,
+          "effort": 10.0,
+          "velocity": 3.0
+        },
+        "mimic": {
+          "joint": "gripper",
+          "multiplier": -0.5,
+          "offset": 0.0
+        },
+        "parent_link": "gripper_base",
+        "child_link": "gripper_link2",
+        "origin_xyz": [
+          0.0,
+          0.0,
+          0.138
+        ],
+        "source": {
+          "path": "ros_ws/src/agx_arm_ros/src/agx_arm_description/agx_arm_urdf/piper_l/urdf/piper_l_with_gripper_description.xacro",
+          "sha256": "8136b85f30043421fffbde0299806e652ac283a28f5ce7485d52903eb4aa4c4c"
+        }
+      }
+    ],
+    "logical_to_finger_mapping": {
+      "rule": "finger1_m = +0.5 * opening_m ; finger2_m = -0.5 * opening_m",
+      "opening_range_m": [
+        0.0,
+        0.1
+      ],
+      "finger_ranges_m": {
+        "gripper_joint1": [
+          0.0,
+          0.05
+        ],
+        "gripper_joint2": [
+          -0.05,
+          0.0
+        ]
+      },
+      "implementation": "rocobrick.gripper.logical_gripper_to_fingers",
+      "inverse": "rocobrick.gripper.fingers_to_logical_gripper"
+    }
+  },
+  "usd": {
+    "stage_file": {
+      "path": "robot_assets/piper_l/USD/piper_l_gripper_d435.usd",
+      "sha256": "a781d52f9d55291fca9c8f2695abf9e311640d996314d272f47639d5323e2375"
+    },
+    "configuration_layers": [
+      {
+        "path": "robot_assets/piper_l/USD/configuration/piper_l_gripper_d435_base.usd",
+        "sha256": "14b24829e7ec1179fe437f89222a9a7f586369e56b1ed010772b5887c3663b50"
+      },
+      {
+        "path": "robot_assets/piper_l/USD/configuration/piper_l_gripper_d435_physics.usd",
+        "sha256": "7cd338a94a00d50d3f799ca39f66d1fad515b280dcca5b1b893dbe4953e35888"
+      },
+      {
+        "path": "robot_assets/piper_l/USD/configuration/piper_l_gripper_d435_robot.usd",
+        "sha256": "41660f0300863d9bd8a675937afec9a62ecd174fc789c4c7a5d3553741b48f00"
+      },
+      {
+        "path": "robot_assets/piper_l/USD/configuration/piper_l_gripper_d435_sensor.usd",
+        "sha256": "5fbd085f92be9940d861a16a5b31ccacbb031f196695c07e6764b35a8c3011fb"
+      }
+    ],
+    "extraction": {
+      "status": "ok",
+      "method": "pxr_usd_python",
+      "source": "isaacsim==5.1.0 extscache omni.usd.libs (pinned wheel, offline)",
+      "requires_runtime": false
+    },
+    "composed_stage_facts": {
+      "default_prim": "/agx_arm",
+      "up_axis": "Z",
+      "meters_per_unit": 1.0,
+      "used_layers": [
+        "/home/mzictt/RoCo_Piper/robot_assets/piper_l/USD/configuration/piper_l_gripper_d435_base.usd",
+        "/home/mzictt/RoCo_Piper/robot_assets/piper_l/USD/configuration/piper_l_gripper_d435_physics.usd",
+        "/home/mzictt/RoCo_Piper/robot_assets/piper_l/USD/configuration/piper_l_gripper_d435_robot.usd",
+        "/home/mzictt/RoCo_Piper/robot_assets/piper_l/USD/configuration/piper_l_gripper_d435_sensor.usd",
+        "/home/mzictt/RoCo_Piper/robot_assets/piper_l/USD/piper_l_gripper_d435.usd"
+      ],
+      "articulation_root_prims": [
+        "/agx_arm/root_joint"
+      ]
+    },
+    "evidenced_movable_joints": [
+      {
+        "name": "joint1",
+        "usd_path": "/agx_arm/joints/joint1",
+        "usd_type": "PhysicsRevoluteJoint",
+        "axis": "Z",
+        "lower_limit": -149.99998474121094,
+        "upper_limit": 149.99998474121094,
+        "units": "deg",
+        "drive": {
+          "stiffness": 200.0,
+          "damping": 100.0,
+          "max_force": 100.0
+        },
+        "execution_urdf": {
+          "path": "isaac/vendor/agx_arm_sim/agx_arm_description/urdf/piper_l_gripper_d435.urdf",
+          "sha256": "8a5e4a77c53947e234f7f8a15db14e30ca85eb2c9f7ae3dc1784f07057626b0d"
+        },
+        "lower_limit_rad": -2.6179936116753852,
+        "upper_limit_rad": 2.6179936116753852,
+        "matches_execution_urdf_limits": true,
+        "planning_urdf_limits_rad": [
+          -2.6179938,
+          2.6179938
+        ],
+        "within_planning_urdf_limits": true
+      },
+      {
+        "name": "joint2",
+        "usd_path": "/agx_arm/joints/joint2",
+        "usd_type": "PhysicsRevoluteJoint",
+        "axis": "Z",
+        "lower_limit": 0.0,
+        "upper_limit": 179.99998474121094,
+        "units": "deg",
+        "drive": {
+          "stiffness": 170.0,
+          "damping": 60.0,
+          "max_force": 100.0
+        },
+        "execution_urdf": {
+          "path": "isaac/vendor/agx_arm_sim/agx_arm_description/urdf/piper_l_gripper_d435.urdf",
+          "sha256": "8a5e4a77c53947e234f7f8a15db14e30ca85eb2c9f7ae3dc1784f07057626b0d"
+        },
+        "lower_limit_rad": 0.0,
+        "upper_limit_rad": 3.1415923872736844,
+        "matches_execution_urdf_limits": true,
+        "planning_urdf_limits_rad": [
+          0.0,
+          3.1415926
+        ],
+        "within_planning_urdf_limits": true
+      },
+      {
+        "name": "joint3",
+        "usd_path": "/agx_arm/joints/joint3",
+        "usd_type": "PhysicsRevoluteJoint",
+        "axis": "Z",
+        "lower_limit": -169.99998474121094,
+        "upper_limit": 0.0,
+        "units": "deg",
+        "drive": {
+          "stiffness": 120.0,
+          "damping": 70.0,
+          "max_force": 100.0
+        },
+        "execution_urdf": {
+          "path": "isaac/vendor/agx_arm_sim/agx_arm_description/urdf/piper_l_gripper_d435.urdf",
+          "sha256": "8a5e4a77c53947e234f7f8a15db14e30ca85eb2c9f7ae3dc1784f07057626b0d"
+        },
+        "lower_limit_rad": -2.967059462074251,
+        "upper_limit_rad": 0.0,
+        "matches_execution_urdf_limits": true,
+        "planning_urdf_limits_rad": [
+          -2.9670597,
+          0.0
+        ],
+        "within_planning_urdf_limits": true
+      },
+      {
+        "name": "joint4",
+        "usd_path": "/agx_arm/joints/joint4",
+        "usd_type": "PhysicsRevoluteJoint",
+        "axis": "Z",
+        "lower_limit": -99.99998474121094,
+        "upper_limit": 99.99998474121094,
+        "units": "deg",
+        "drive": {
+          "stiffness": 80.0,
+          "damping": 24.0,
+          "max_force": 100.0
+        },
+        "execution_urdf": {
+          "path": "isaac/vendor/agx_arm_sim/agx_arm_description/urdf/piper_l_gripper_d435.urdf",
+          "sha256": "8a5e4a77c53947e234f7f8a15db14e30ca85eb2c9f7ae3dc1784f07057626b0d"
+        },
+        "lower_limit_rad": -1.7453289856782206,
+        "upper_limit_rad": 1.7453289856782206,
+        "matches_execution_urdf_limits": true,
+        "planning_urdf_limits_rad": [
+          -2.2165681,
+          2.2165681
+        ],
+        "within_planning_urdf_limits": true
+      },
+      {
+        "name": "joint5",
+        "usd_path": "/agx_arm/joints/joint5",
+        "usd_type": "PhysicsRevoluteJoint",
+        "axis": "Z",
+        "lower_limit": -69.99999237060547,
+        "upper_limit": 69.99999237060547,
+        "units": "deg",
+        "drive": {
+          "stiffness": 50.0,
+          "damping": 20.0,
+          "max_force": 100.0
+        },
+        "execution_urdf": {
+          "path": "isaac/vendor/agx_arm_sim/agx_arm_description/urdf/piper_l_gripper_d435.urdf",
+          "sha256": "8a5e4a77c53947e234f7f8a15db14e30ca85eb2c9f7ae3dc1784f07057626b0d"
+        },
+        "lower_limit_rad": -1.2217303432379762,
+        "upper_limit_rad": 1.2217303432379762,
+        "matches_execution_urdf_limits": true,
+        "planning_urdf_limits_rad": [
+          -1.5620696,
+          1.5620696
+        ],
+        "within_planning_urdf_limits": true
+      },
+      {
+        "name": "joint6",
+        "usd_path": "/agx_arm/joints/joint6",
+        "usd_type": "PhysicsRevoluteJoint",
+        "axis": "Z",
+        "lower_limit": -120.0,
+        "upper_limit": 120.0,
+        "units": "deg",
+        "drive": {
+          "stiffness": 20.0,
+          "damping": 10.0,
+          "max_force": 100.0
+        },
+        "execution_urdf": {
+          "path": "isaac/vendor/agx_arm_sim/agx_arm_description/urdf/piper_l_gripper_d435.urdf",
+          "sha256": "8a5e4a77c53947e234f7f8a15db14e30ca85eb2c9f7ae3dc1784f07057626b0d"
+        },
+        "lower_limit_rad": -2.0943951023931953,
+        "upper_limit_rad": 2.0943951023931953,
+        "matches_execution_urdf_limits": true,
+        "planning_urdf_limits_rad": [
+          -2.0943951,
+          2.0943951
+        ],
+        "within_planning_urdf_limits": true
+      },
+      {
+        "name": "gripper_joint1",
+        "usd_path": "/agx_arm/joints/gripper_joint1",
+        "usd_type": "PhysicsPrismaticJoint",
+        "axis": "Z",
+        "lower_limit": 0.0,
+        "upper_limit": 0.05000000074505806,
+        "units": "m",
+        "drive": {
+          "stiffness": 800.0,
+          "damping": 20.0,
+          "max_force": 10.0
+        },
+        "official_urdf": {
+          "path": "ros_ws/src/agx_arm_ros/src/agx_arm_description/agx_arm_urdf/piper_l/urdf/piper_l_with_gripper_description.xacro",
+          "sha256": "8136b85f30043421fffbde0299806e652ac283a28f5ce7485d52903eb4aa4c4c"
+        },
+        "matches_official_urdf_limits": true
+      },
+      {
+        "name": "gripper_joint2",
+        "usd_path": "/agx_arm/joints/gripper_joint2",
+        "usd_type": "PhysicsPrismaticJoint",
+        "axis": "Z",
+        "lower_limit": -0.05000000074505806,
+        "upper_limit": 0.0,
+        "units": "m",
+        "drive": {
+          "stiffness": 800.0,
+          "damping": 20.0,
+          "max_force": 10.0
+        },
+        "official_urdf": {
+          "path": "ros_ws/src/agx_arm_ros/src/agx_arm_description/agx_arm_urdf/piper_l/urdf/piper_l_with_gripper_description.xacro",
+          "sha256": "8136b85f30043421fffbde0299806e652ac283a28f5ce7485d52903eb4aa4c4c"
+        },
+        "matches_official_urdf_limits": true
+      }
+    ],
+    "expected_dof_order": [
+      "joint1",
+      "joint2",
+      "joint3",
+      "joint4",
+      "joint5",
+      "joint6",
+      "gripper_joint1",
+      "gripper_joint2"
+    ],
+    "expected_dof_order_evidence": {
+      "urdf_movable_declaration_order": [
+        "joint1",
+        "joint2",
+        "joint3",
+        "joint4",
+        "joint5",
+        "joint6",
+        "gripper_joint1",
+        "gripper_joint2"
+      ],
+      "config_joint_order": {
+        "piper_0": [
+          "joint1",
+          "joint2",
+          "joint3",
+          "joint4",
+          "joint5",
+          "joint6",
+          "gripper_joint1",
+          "gripper_joint2"
+        ],
+        "piper_1": [
+          "joint1",
+          "joint2",
+          "joint3",
+          "joint4",
+          "joint5",
+          "joint6",
+          "gripper_joint1",
+          "gripper_joint2"
+        ]
+      },
+      "runtime_verification": "src/rocobrick/isaac_scene.py compares articulation.dof_names with the configured order at bootstrap; the USD file itself does not store DOF order."
+    },
+    "runtime_dof_order": {
+      "stored_in_usd": false,
+      "authoritative_source": "articulation.dof_names at bootstrap",
+      "note": "The expected 8-DOF order is an expectation derived from the evidence above, not a value read from the USD."
+    }
+  },
+  "planning": {
+    "srdf": {
+      "path": "isaac/vendor/agx_arm_sim/Moveit2/piper_l_gripper_moveit_config/config/piper_l.srdf",
+      "sha256": "8f0610c725213e5d0e2765c2d27b1c39ed575149fa763113c137fa2a91eff33c"
+    },
+    "robot_name": "piper_l",
+    "groups": {
+      "arm": {
+        "joints": [
+          "joint1",
+          "joint2",
+          "joint3",
+          "joint4",
+          "joint5",
+          "joint6"
+        ],
+        "chains": [
+          {
+            "base_link": "base_link",
+            "tip_link": "link6"
+          }
+        ]
+      },
+      "gripper": {
+        "joints": [
+          "gripper_joint1",
+          "gripper_joint2"
+        ],
+        "chains": []
+      }
+    },
+    "group_states": {
+      "arm": {
+        "zero": {
+          "joint1": 0.0,
+          "joint2": 0.0,
+          "joint3": 0.0,
+          "joint4": 0.0,
+          "joint5": 0.0,
+          "joint6": 0.0
+        }
+      },
+      "gripper": {
+        "close": {
+          "gripper_joint1": 0.0,
+          "gripper_joint2": 0.0
+        },
+        "open": {
+          "gripper_joint1": 0.05,
+          "gripper_joint2": -0.05
+        }
+      }
+    },
+    "isaac_bridge_topics": {
+      "hardware_plugin": "topic_based_ros2_control/TopicBasedSystem",
+      "joint_states": "/isaac_joint_states",
+      "joint_commands": "/isaac_joint_command",
+      "message_type": "sensor_msgs/JointState",
+      "source": {
+        "path": "isaac/vendor/agx_arm_sim/Moveit2/piper_l_gripper_moveit_config/config/piper_l.ros2_control.xacro",
+        "sha256": "6e82dcc075cbc6032cbea9b6ce369a91686fa45d1d0495e0002abd53f9c31818"
+      }
+    },
+    "moveit_controllers": {
+      "moveit_controller_manager": "moveit_simple_controller_manager/MoveItSimpleControllerManager",
+      "moveit_simple_controller_manager": {
+        "controller_names": [
+          "arm_controller",
+          "gripper_controller"
+        ],
+        "arm_controller": {
+          "type": "FollowJointTrajectory",
+          "action_ns": "follow_joint_trajectory",
+          "default": true,
+          "joints": [
+            "joint1",
+            "joint2",
+            "joint3",
+            "joint4",
+            "joint5",
+            "joint6"
+          ]
+        },
+        "gripper_controller": {
+          "type": "FollowJointTrajectory",
+          "action_ns": "follow_joint_trajectory",
+          "default": true,
+          "joints": [
+            "gripper_joint1",
+            "gripper_joint2"
+          ]
+        }
+      }
+    },
+    "ros2_controllers": {
+      "controller_manager": {
+        "ros__parameters": {
+          "update_rate": 100,
+          "arm_controller": {
+            "type": "joint_trajectory_controller/JointTrajectoryController"
+          },
+          "gripper_controller": {
+            "type": "joint_trajectory_controller/JointTrajectoryController"
+          },
+          "joint_state_broadcaster": {
+            "type": "joint_state_broadcaster/JointStateBroadcaster"
+          }
+        }
+      },
+      "arm_controller": {
+        "ros__parameters": {
+          "joints": [
+            "joint1",
+            "joint2",
+            "joint3",
+            "joint4",
+            "joint5",
+            "joint6"
+          ],
+          "command_interfaces": [
+            "position"
+          ],
+          "state_interfaces": [
+            "position",
+            "velocity"
+          ]
+        }
+      },
+      "gripper_controller": {
+        "ros__parameters": {
+          "joints": [
+            "gripper_joint1",
+            "gripper_joint2"
+          ],
+          "command_interfaces": [
+            "position"
+          ],
+          "state_interfaces": [
+            "position",
+            "velocity"
+          ]
+        }
+      }
+    },
+    "joint_limits_overrides": {
+      "default_velocity_scaling_factor": 0.1,
+      "default_acceleration_scaling_factor": 0.1,
+      "joint_limits": {
+        "gripper_joint1": {
+          "has_velocity_limits": true,
+          "max_velocity": 3.0,
+          "has_acceleration_limits": false,
+          "max_acceleration": 1.0
+        },
+        "gripper_joint2": {
+          "has_velocity_limits": true,
+          "max_velocity": 3.0,
+          "has_acceleration_limits": false,
+          "max_acceleration": 1.0
+        },
+        "joint1": {
+          "has_velocity_limits": true,
+          "max_velocity": 5.0,
+          "has_acceleration_limits": false,
+          "max_acceleration": 1.0
+        },
+        "joint2": {
+          "has_velocity_limits": true,
+          "max_velocity": 5.0,
+          "has_acceleration_limits": false,
+          "max_acceleration": 1.0
+        },
+        "joint3": {
+          "has_velocity_limits": true,
+          "max_velocity": 5.0,
+          "has_acceleration_limits": false,
+          "max_acceleration": 1.0
+        },
+        "joint4": {
+          "has_velocity_limits": true,
+          "max_velocity": 5.0,
+          "has_acceleration_limits": false,
+          "max_acceleration": 1.0
+        },
+        "joint5": {
+          "has_velocity_limits": true,
+          "max_velocity": 5.0,
+          "has_acceleration_limits": false,
+          "max_acceleration": 1.0
+        },
+        "joint6": {
+          "has_velocity_limits": true,
+          "max_velocity": 5.0,
+          "has_acceleration_limits": false,
+          "max_acceleration": 1.0
+        }
+      }
+    },
+    "kinematics_solver": {
+      "arm": {
+        "kinematics_solver": "kdl_kinematics_plugin/KDLKinematicsPlugin",
+        "kinematics_solver_search_resolution": 0.005,
+        "kinematics_solver_timeout": 0.005
+      },
+      "gripper": {
+        "kinematics_solver": "kdl_kinematics_plugin/KDLKinematicsPlugin",
+        "kinematics_solver_search_resolution": 0.005,
+        "kinematics_solver_timeout": 0.005
+      }
+    },
+    "initial_positions": {
+      "initial_positions": {
+        "gripper_joint1": 0,
+        "gripper_joint2": 0,
+        "joint1": 0,
+        "joint2": 0,
+        "joint3": 0,
+        "joint4": 0,
+        "joint5": 0,
+        "joint6": 0
+      }
+    }
+  },
+  "tcp": {
+    "status": "unresolved",
+    "facts": [
+      "The official URDF defines no tool0 or dedicated TCP frame; the deepest tool-flange link is link6.",
+      "The fork uses EE_Frames=['link6'] in config/user_config.json, so IK targets land on link6, not on a documented TCP.",
+      "The pinned submodule adds flange_link (identity from link6) and gripper_base (+0.0045 m from flange_link), but no TCP frame is declared in either variant.",
+      "Finger frames are prismatic, so a finger-midpoint TCP would move with the gripper command and is not defined anywhere official.",
+      "Manipulation offsets in config/user_config.json (Grasp_TCP_Top_Offset=-0.0053 m, Gripper_Open_Clearance, Pregrasp_Clearance) are locally tuned values, not documented official TCP parameters.",
+      "Distance from link6 to the finger contact surfaces differs between the robot_assets snapshot (0.1358 m finger origin) and the pinned submodule (0.0045 + 0.138 m), so a link6-referenced grasp offset cannot be validated against a single official number yet."
+    ],
+    "resolution_target": "Resolve before P1 grasp execution work."
+  },
+  "license": {
+    "caveat": "Model data licensing is not fully confirmed. The pinned agx_arm_ros checkout and the agx_arm_urdf submodule carry an MIT LICENSE whose copyright holder is 'aalicecc' (2026), a name that does not match the agilexrobotics organization the repositories are fetched from. The agx_arm_sim checkout has no LICENSE file; its README claims 'MIT License' without a full license text, and third_party/manifest.lock.yaml still records assets_license_confirmed: false pending re-audit. URDFs are auto-generated by the SolidWorks to URDF exporter. Redistribution of the URDF/mesh/USD model data therefore remains blocked until upstream licensing is confirmed.",
+    "agx_arm_ros_license": {
+      "id": "MIT",
+      "source_path": "LICENSE",
+      "sha256": "247944c63de1573653722ba784f96123da267105b7b48577e0c8826a24b809f6",
+      "copyright_holder_observed": "aalicecc (2026)"
+    },
+    "agx_arm_urdf_license": {
+      "id": "MIT",
+      "sha256": "247944c63de1573653722ba784f96123da267105b7b48577e0c8826a24b809f6"
+    },
+    "agx_arm_sim_license": {
+      "standalone_license_file": false,
+      "license_claim_source": "README.md '## License' section",
+      "sha256": "b91918f2972101eee621cba9badbc90e6057b9c5269c0bb7ae00f84195d31399",
+      "assets_license_confirmed": false
+    }
+  }
+}

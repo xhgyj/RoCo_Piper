@@ -5,6 +5,7 @@ import pytest
 from rocobrick.adapters.moveit.contact_trajectory import (
     CONTACT_CARTESIAN_SPEED_MPS,
     contact_minimum_duration_s,
+    contact_speed_for_mode,
     contact_trajectory_timing,
 )
 
@@ -20,6 +21,21 @@ def test_short_trajectory_slows_without_shortening_or_skipping_points():
 def test_long_trajectory_is_never_accelerated():
     """An already slow path retains its original timing."""
     assert contact_trajectory_timing((0.0, 0.5, 1.0)).scale == 1.0
+
+
+def test_only_upward_insertion_uses_faster_speed():
+    """A continuous 34.5 mm rise takes 6.9 s; support/recovery stay slow."""
+    assert contact_speed_for_mode("insert_up") == 0.005
+    assert contact_minimum_duration_s(0.0345, speed_mps=0.005) == pytest.approx(6.9)
+    for mode in ("support_top", "insert", "unload", "unload_up", "probe"):
+        assert contact_speed_for_mode(mode) == 0.001
+
+
+@pytest.mark.parametrize("speed", [0, -0.01, 0.01, True, float("nan")])
+def test_invalid_speed_is_rejected(speed):
+    """No unbounded contact speed is admitted."""
+    with pytest.raises(ValueError):
+        contact_minimum_duration_s(0.03, speed_mps=speed)
 
 
 @pytest.mark.parametrize(

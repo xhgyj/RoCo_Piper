@@ -40,7 +40,7 @@ from rocobrick.tcp_contract import (
 ROOT = Path(__file__).parents[1]
 ARTIFACT = ROOT / "artifacts/model-audit/piper_l_tcp_binding_contract.json"
 MODEL_CONTRACT = ROOT / "artifacts/model-audit/piper_l_model_contract.json"
-PLAN = ROOT / "runs/example1-compound-pick-20260915T130000Z/generated-plan.json"
+PLAN = ROOT / "tests/fixtures/assembly_plans/example1-compound-pick.json"
 TASK_START = ROOT / "tasks/type1/example1/structure_start.json"
 TASK_GOAL = ROOT / "tasks/type1/example1/structure_goal.json"
 VENDOR_URDF = (
@@ -732,6 +732,49 @@ def test_artifact_declares_schema_and_offline_audit(artifact: dict):
     assert artifact["offline"] is True
 
 
+def _artifact_source_path(original: str, artifact: dict) -> Path:
+    """Resolve only declared audit inputs, including retired byte objects.
+
+    Returns:
+        The validated current file or immutable historical byte object.
+    """
+    declared = {
+        entry["path"]
+        for group in ("pinned_files", "local_files", "example1_files")
+        for entry in artifact["inputs"][group]
+    } | {entry["source"] for entry in artifact["evidence"]}
+    if original not in declared:
+        raise ValueError("undeclared provenance path")
+    directory = ROOT / "tests/fixtures/historical_provenance"
+    index = json.loads((directory / "index.json").read_text(encoding="utf-8"))
+    if original in index:
+        entry = index[original]
+        path = directory / entry["object"]
+        if path.parent != directory or path.name != entry["sha256"] + ".bin":
+            raise ValueError("invalid provenance object path")
+        if sha256(path.read_bytes()).hexdigest() != entry["sha256"]:
+            raise ValueError("provenance object digest mismatch")
+        return path
+    if original.startswith("runs/") or original == "run/pregrasp_v2.py":
+        raise ValueError("historical provenance mapping missing")
+    return ROOT / original
+
+
+def test_provenance_resolver_rejects_undeclared_paths(artifact: dict):
+    """Unknown provenance names must fail rather than escape the audit map."""
+    with pytest.raises(ValueError, match="undeclared"):
+        _artifact_source_path("../unknown", artifact)
+
+
+def test_historical_evidence_hashes_match_archived_bytes(artifact: dict):
+    """Keep historical source bytes independently verifiable after retirement."""
+    for entry in artifact["evidence"]:
+        if entry["source"].startswith("runs/"):
+            assert sha256(
+                _artifact_source_path(entry["source"], artifact).read_bytes()
+            ).hexdigest() == entry["source_sha256"]
+
+
 def test_artifact_input_hashes_match_disk(artifact: dict):
     recorded = (
         artifact["inputs"]["pinned_files"]
@@ -740,7 +783,8 @@ def test_artifact_input_hashes_match_disk(artifact: dict):
     )
     assert recorded
     for entry in recorded:
-        digest = sha256((ROOT / entry["path"]).read_bytes()).hexdigest()
+        data = _artifact_source_path(entry["path"], artifact).read_bytes()
+        digest = sha256(data).hexdigest()
         assert entry["sha256"] == digest
 
 
@@ -776,9 +820,8 @@ def test_artifact_classifies_legacy_offset_as_legacy_assumption(artifact: dict):
     assert len(legacy) == 1
     assert legacy[0]["kind"] == "legacy_assumption"
     assert legacy[0]["translation_m"] == [0.0, 0.0, 0.1358]
-    assert sha256((ROOT / "run/pregrasp_v2.py").read_bytes()).hexdigest() == legacy[0][
-        "source_sha256"
-    ]
+    data = _artifact_source_path("run/pregrasp_v2.py", artifact).read_bytes()
+    assert sha256(data).hexdigest() == legacy[0]["source_sha256"]
 
 
 def test_artifact_compares_required_frames_and_legacy_offset(artifact: dict):

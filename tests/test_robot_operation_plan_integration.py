@@ -43,17 +43,17 @@ from pathlib import Path
 import pytest
 
 from rocobrick import piper_run
-from rocobrick.piper_run import main
-from rocobrick.robot_operation_executor import (
+from rocobrick.execution.robot_operation_executor import (
     REASON_CAPABILITY_UNAVAILABLE,
     SkillOperationExecutor,
 )
+from rocobrick.piper_run import main
 
 ROOT = Path(__file__).parents[1]
 SRC = ROOT / "src/rocobrick"
 PIPER_RUN_SOURCE = SRC / "piper_run.py"
 TASK_DIR = ROOT / "tasks/type1/example1"
-STAP_PLAN = ROOT / "runs/scene-smoke-20260914T093942Z/input/plan.json"
+STAP_PLAN = ROOT / "tests/fixtures/assembly_plans/example1-scene-smoke.json"
 OPERATION_PLAN = (
     ROOT / "tests/fixtures/robot_operation_plans/example1-robot-operation-plan.json"
 )

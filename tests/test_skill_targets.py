@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import math
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -13,7 +14,7 @@ from rocobrick.moveit_contract import (
     TCP_LINK,
     TCP_STATUS_CALIBRATED_PROJECT,
 )
-from rocobrick.skill_targets import (
+from rocobrick.skills.targets import (
     PickTargets,
     RobotBaseFrame,
     SkillParams,
@@ -37,9 +38,7 @@ USER_CONFIG_JSON = ROOT / "config" / "user_config.json"
 
 HASH_A = "a" * 64
 HASH_B = "b" * 64
-PROVENANCE = TcpProvenance(
-    runtime_model_sha256=HASH_A, source_sha256=HASH_B
-)
+PROVENANCE = TcpProvenance(runtime_model_sha256=HASH_A, source_sha256=HASH_B)
 SQRT_HALF = math.sqrt(0.5)  # 1e-9-exact sqrt(2)/2 for the pinned orientations
 
 # A 2x4 brick footprint: dx = 0.032 > dy = 0.016 -> closing yaw 0, span dy.
@@ -250,18 +249,20 @@ def test_pick_targets_heights_windows_and_provenance() -> None:
     )
     assert targets.reach_expected_window_m == pytest.approx(
         (
-            0.016 + params.open_extra_m - PIPER_L_PAD_SEPARATION_INTERCEPT_M
+            0.016
+            + params.open_extra_m
+            - PIPER_L_PAD_SEPARATION_INTERCEPT_M
             - params.free_window_slop_m,
-            0.016 + params.open_extra_m - PIPER_L_PAD_SEPARATION_INTERCEPT_M
+            0.016
+            + params.open_extra_m
+            - PIPER_L_PAD_SEPARATION_INTERCEPT_M
             + params.free_window_slop_m,
         )
     )
     assert targets.close_expected_window_m == pytest.approx(
         (
-            0.016 - PIPER_L_PAD_SEPARATION_INTERCEPT_M
-            - params.contact_window_slop_m,
-            0.016 - PIPER_L_PAD_SEPARATION_INTERCEPT_M
-            + params.contact_window_slop_m,
+            0.016 - PIPER_L_PAD_SEPARATION_INTERCEPT_M - params.contact_window_slop_m,
+            0.016 - PIPER_L_PAD_SEPARATION_INTERCEPT_M + params.contact_window_slop_m,
         )
     )
     for pose in (targets.pregrasp, targets.approach, targets.lift):
@@ -272,9 +273,7 @@ def test_pick_targets_heights_windows_and_provenance() -> None:
         assert pose.source_sha256 == HASH_B
         assert pose.position_tolerance_m == params.position_tolerance_m
         assert pose.orientation_tolerance_rad == params.orientation_tolerance_rad
-        assert pose.orientation_xyzw == pytest.approx(
-            grasp_orientation_xyzw(0.0)
-        )
+        assert pose.orientation_xyzw == pytest.approx(grasp_orientation_xyzw(0.0))
 
 
 def test_pick_targets_rejects_a_brick_too_narrow_to_squeeze() -> None:
@@ -284,9 +283,7 @@ def test_pick_targets_rejects_a_brick_too_narrow_to_squeeze() -> None:
     narrow_min = (1.0, 1.0, 0.0)
     narrow_max = (1.032, 1.003, 0.016)
     with pytest.raises(ValueError, match="graspable range"):
-        pick_targets(
-            narrow_min, narrow_max, IDENTITY_BASE, PROVENANCE, SkillParams()
-        )
+        pick_targets(narrow_min, narrow_max, IDENTITY_BASE, PROVENANCE, SkillParams())
 
 
 def test_pick_targets_xy_follows_the_rotated_base_frame() -> None:
@@ -320,6 +317,8 @@ def test_skill_params_defaults_match_the_pinned_values() -> None:
     assert params.gripper_duration_s == 4.0
     assert params.gripper_goal_tolerance == 0.002
     assert params.wait_duration_s == 2.0
+    assert params.support_press_m == 0.001
+    assert params.support_approach_gap_m == 0.01
     assert params.position_tolerance_m == 0.005
     assert params.orientation_tolerance_rad == 0.015
     assert params.follow_orientation_tolerance_rad == 0.05
@@ -341,6 +340,8 @@ def test_skill_params_defaults_match_the_pinned_values() -> None:
         {"gripper_duration_s": 0.0},
         {"gripper_goal_tolerance": -0.5},
         {"wait_duration_s": 0.0},
+        {"support_approach_gap_m": 0.0},
+        {"support_approach_gap_m": 0.06},
         {"position_tolerance_m": 0.0},
         {"position_tolerance_m": 0.02},
         {"orientation_tolerance_rad": 0.0},
@@ -365,9 +366,7 @@ def test_skill_params_rejects_non_finite_and_non_numeric() -> None:
 
 
 def test_load_skill_params_round_trips_a_valid_document(tmp_path: Path) -> None:
-    defaults = {
-        name: getattr(SkillParams(), name) for name in vars(SkillParams())
-    }
+    defaults = {name: getattr(SkillParams(), name) for name in vars(SkillParams())}
     document = {**defaults, "pregrasp_standoff_m": 0.05, "wait_duration_s": 0.25}
     path = tmp_path / "params.json"
     path.write_text(json.dumps(document), encoding="utf-8")
@@ -419,14 +418,50 @@ def test_load_skill_params_rejects_unreadable_and_non_finite(tmp_path: Path) -> 
         load_skill_params(nonfinite)
 
 
-def test_config_skill_params_json_equals_the_defaults() -> None:
+def test_config_skill_params_json_selects_bounded_support_lean() -> None:
     assert SKILL_PARAMS_JSON.is_file()
     params = load_skill_params(SKILL_PARAMS_JSON)
-    assert params == SkillParams()
+    # The support station is leaned to the top of both bounds: the place-up
+    # rise of the carrier's wrist crosses the supporting wrist's band, and the
+    # 13g run showed the shipped 5 deg / 20 mm station leaves the two
+    # gripper-base hulls 9.78 mm apart at the pre-place (floor 15 mm) and
+    # interpenetrating 6.5 mm at the seat.  Bounds re-checked in
+    # test_skill_params_rejects_out_of_bounds_values; the station search tool
+    # (tools/task_c_support_station_search.py) measured the leaned station in
+    # the arbiter geometry before this value was pinned.
+    configured = replace(
+        SkillParams(),
+        support_press_m=0.0001,
+        support_target_force_n=1.5,
+        support_radial_tilt_deg=10.0,
+        support_surface_bias_m=0.024,
+        support_approach_gap_m=0.025,
+        top_offset_pick_tilt_deg=30.0,
+        place_up_standoff_m=0.03,
+        place_up_regrip_closing_m=0.0,
+        place_up_feedback_step_m=0.0,
+    )
+    assert params == configured
+    # The closing overshoot stays at its 4 mm default: raising it to 6 mm to
+    # stiffen the insertion's grip shoved the picked brick 26 mm sideways
+    # during the close instead of holding it (task-c-top-offset13n-headless).
+    assert params.squeeze_m == SkillParams().squeeze_m
+    # The pre-insert regrip stays disabled: pressing the already-gripped pads
+    # harder made the brick slip EARLIER (task-c-top-offset13q-headless: 3.2 mm
+    # of slide within 6 mm of ascent), because this grasp's leaned pad faces
+    # already sit at the friction limit.
+    assert params.place_up_regrip_closing_m == 0.0
+    # The staging gap must outrun the arrival tracking error measured on the
+    # 13h run (0.0119 rad of joint3, ~3.5 mm at the wrist, against the shipped
+    # 10 mm default): the brushed jaw dragged the whole stack 6.46 mm.
+    assert params.support_approach_gap_m >= 0.02
+    # The press depth sits at the shallow end of its bound: the 13i force
+    # trace deflected the upper brick ~0.6 deg per newton (2.9 deg at 4.76 N)
+    # while the support's own disturbance gates hold 3.0 deg / 2.86 deg, so
+    # the 1 mm design depth (~6 N, ~3.8 deg) could never reach the gates.
+    assert params.support_press_m <= 0.0002
     document = json.loads(SKILL_PARAMS_JSON.read_text(encoding="utf-8"))
-    expected = {
-        name: getattr(SkillParams(), name) for name in vars(SkillParams())
-    }
+    expected = {name: getattr(configured, name) for name in vars(configured)}
     assert document == expected
     assert SKILL_PARAMS_JSON.read_text(encoding="utf-8").endswith("\n")
 

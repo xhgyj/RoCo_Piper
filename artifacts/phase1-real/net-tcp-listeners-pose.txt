@@ -1,0 +1,2 @@
+# LISTEN rows of /proc/net/tcp(+6) inside the container (must be empty)
+   0: 0100007F:2D40 00000000:0000 0A 00000000:00000000 00:00000000 00000000     0        0 97282877 1 0000000000000000 100 0 0 10 0                  

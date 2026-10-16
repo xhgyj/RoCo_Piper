@@ -108,6 +108,15 @@ def validate_guard(document: object) -> Mapping[str, object]:
     mode = document.get("mode")
     if mode == "support_top":
         expected = SUPPORT_GUARD_KEYS
+        if "target_force_n" in document:
+            expected = expected | {"target_force_n"}
+            target_force = document["target_force_n"]
+            if (
+                type(target_force) not in (int, float)
+                or not math.isfinite(target_force)
+                or not 0 < target_force <= 3.0
+            ):
+                raise ValueError("support target force must be in (0, 3] N")
         poses = ("supported_pose",)
         numbers = ("supported_position_m", "supported_angle_rad", "force_limit_n")
     elif mode in UP_MODES:
@@ -254,6 +263,38 @@ def _inspect_upward(sample, scene, guard):
             exact = distance <= 1e-5 and angle <= 1e-4
             conflict = not exact
     force = _pair_force(pair)
+    # Compare in the LIVE supported interface frame, not world-Z AABB extrema.
+    live_seat = compose(
+        compose(sample.upper.object_pose, inverse(supported_pose)),
+        _pose(guard["desired_lower"], "desired lower"),
+    )
+    seat_delta = compose(inverse(live_seat), sample.lower.object_pose)
+    _, seat_angle = pose_error(sample.lower.object_pose, live_seat)
+    native = sample.interfaces.get("diagnostics", [])
+    if not isinstance(native, list):
+        raise ValueError("native assembly diagnostics must be a list")
+    native_pair = [
+        dict(item)
+        for item in native
+        if isinstance(item, Mapping)
+        and item.get("stud_path") == pair.get("stud_path")
+        and item.get("hole_path") == pair.get("hole_path")
+        and item.get("stud_interface") == pair.get("stud_interface")
+        and item.get("hole_interface") == pair.get("hole_interface")
+    ]
+    report = scene.get("pad_object_contacts", {})
+    carrier_contacts = (
+        [
+            dict(item)
+            for item in report.get("contacts", [])
+            if isinstance(item, Mapping)
+            and item.get("robot_id") == guard["robot_id"]
+            and item.get("physical_instance_id")
+            in (guard["lower_id"], guard["upper_id"])
+        ]
+        if isinstance(report, Mapping)
+        else []
+    )
     dynamics = scene.get("robots", {}).get(guard["robot_id"], {}).get("dynamics")
     measurements = {
         "dynamics": dynamics,
@@ -267,6 +308,16 @@ def _inspect_upward(sample, scene, guard):
         "exact_connection": exact,
         "contact_force_n": force,
         "contact_gap_m": _interface_gap_m(sample),
+        "contact_gap_source": "world_z_aabb",
+        "seat_error_xyz_m": list(seat_delta.position_xyz),
+        "seat_axial_error_m": seat_delta.position_xyz[2],
+        "seat_lateral_error_m": math.hypot(*seat_delta.position_xyz[:2]),
+        "seat_angle_rad": seat_angle,
+        "native_assembly_diagnostics": native_pair,
+        "native_assembly_diagnostics_available": bool(native_pair),
+        "native_assembly_thresholds": dict(sample.interfaces.get("thresholds", {})),
+        "interface_force_available": force is not None,
+        "carrier_pad_contacts": carrier_contacts,
         "upper_pose": asdict(sample.upper.object_pose),
         "lower_pose": asdict(sample.lower.object_pose),
         "tcp_pose": asdict(sample.upper.tcp_pose),
@@ -379,7 +430,18 @@ def inspect_contact(scene: Mapping[str, object], guard: Mapping[str, object]):
                 manifest_sha256=guard["manifest_sha256"],
             )
             measured["support_contact"] = contact
-            return "support_contact_confirmed", measured
+            measured["support_contact_established"] = True
+            if "target_force_n" in guard and force >= guard["target_force_n"]:
+                return "support_contact_confirmed", measured
+        # A support descent is a controlled PRESS: touching the top surface is
+        # the expected condition, not a terminal one. Stopping here left the
+        # pads hovering above the surface with the designed press (the contact
+        # target sits support_press_m below it) never executed, so no
+        # maintained contact existed to prove and SUPPORT_TOP failed (live
+        # evidence, task-c-top-offset13f 2026-10-14: one 0.12 N graze at
+        # sim 90.22 s, pads settled 0.9 mm ABOVE the surface, then "no measured
+        # top-surface contact"). The descent runs to its endpoint; the force
+        # limit above and the upper-brick tolerance before it stay the stops.
         return None, measured
     sample = parse_place_observation(
         scene,

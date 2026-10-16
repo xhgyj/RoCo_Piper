@@ -67,13 +67,12 @@ src/rocobrick/
 ├── skills/
 │   ├── programs.py                      # phase definitions
 │   ├── targets.py                       # target geometry and TCP provenance
-│   ├── phase_backend.py                 # compatibility phase backend
-│   ├── wait.py                          # planned dedicated WAIT handler
-│   ├── transit.py                       # planned dedicated TRANSIT handler
-│   ├── pick.py                          # planned dedicated PICK handler
-│   ├── place_down.py                    # planned dedicated PLACE_DOWN handler
-│   ├── observation.py                   # planned identity/freshness/following checks
-│   └── contracts.py                     # planned skill context/result protocols
+│   ├── wait.py                          # dedicated WAIT handler
+│   ├── transit.py                       # dedicated TRANSIT handler
+│   ├── pick.py                          # dedicated PICK handler
+│   ├── place_down.py                    # dedicated PLACE_DOWN handler
+│   ├── observation.py                   # identity/freshness/following checks
+│   └── contracts.py                     # skill context/result protocols
 ├── adapters/moveit/
 │   ├── transit.py                       # current TRANSIT target/action adapter
 │   ├── motion.py                        # planned shared action lifecycle adapter
@@ -85,10 +84,15 @@ src/rocobrick/
 └── moveit_execution.py                  # MoveIt execution contracts
 ```
 
-Top-level files with matching names such as `execution.py`, `skills.py`,
-`skill_targets.py`, `skill_execution.py`, `structure_scene.py`, and
-`transit_adapter.py` are compatibility forwarding modules. New production
-logic belongs in the classified packages above.
+The old top-level compatibility forwarding modules and same-named shadow files
+have been retired. Import the classified owning packages directly. The root
+package and skills package no longer eagerly re-export legacy APIs.
+
+The old gRPC planner, pregrasp/playback, phase backend, isolated single-session
+and legacy launch/fake-controller paths are retired. The sole dispatch entry
+remains piper-run with an external robot operation plan. Standalone validate/demo
+and maintenance tools remain pending separate retirement; do not mistake their
+continued presence for a production dispatch dependency.
 
 Current capability boundary:
 
@@ -97,10 +101,12 @@ Current capability boundary:
   stable.
 - Empty TRANSIT to a measured part target is implemented through the MoveIt
   adapter and final TCP feedback gates.
-- TRANSIT with carrying, TRANSIT to a connection, PICK, and PLACE_DOWN remain
-  fail-closed until their required scene, action, and physical evidence paths
-  are complete. A carrying request must be rejected before motion unless the
-  ledger already confirms the requested holding state.
+- Keep all formal skill branches: WAIT, TRANSIT, PICK, PLACE_DOWN, HANDOVER,
+  SUPPORT_TOP and PLACE_UP. Their implementation and fail-closed evidence gates
+  define capability; a Task C trajectory is not proof that other skills are dead.
+  A carrying request must be rejected before motion unless the ledger confirms
+  the requested holding state. Runtime success requires fresh physical evidence;
+  the cleanup tests do not certify that every live skill succeeds.
 - `PICK` must keep pregrasp, approach, gripper feedback, grasp, lift, and
   holding evidence separate. Gripper opening or brick height change alone does
   not prove holding.

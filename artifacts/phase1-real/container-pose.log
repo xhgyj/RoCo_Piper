@@ -1,0 +1,2 @@
+[p1-real-pose-inner] move_group precondition ready=1
+[p1-real-pose-inner] probe_status=0

@@ -269,7 +269,7 @@ def interface_place_up_targets(
     low = max(0.0, release - min(params.free_window_slop_m, params.open_extra_m * 0.25))
     high = min(0.1, release + params.free_window_slop_m)
     targets = PlaceTargets(
-        preplace=target(-params.place_standoff_m),
+        preplace=target(-params.place_up_standoff_m),
         contact=target(params.place_press_m),
         retreat=target(-params.place_retreat_height_m),
         release_opening_m=release,
@@ -311,8 +311,6 @@ def support_top_target(sample, base, provenance, params, *, approach: bool):
         (sample.aabb_min[1] + sample.aabb_max[1]) / 2,
         sample.aabb_max[2],
     )
-    offset = 0.005211 + (0.01 if approach else -params.support_press_m)
-    world = tuple(surface[i] + normal[i] * offset for i in range(3))
     # Support is not a grasp: leave the opening untouched, but align the
     # separated fingertips with the long top dimension so neither tip is
     # deliberately parked outside a narrow face (Task C's 64 x 32 mm upper).
@@ -324,6 +322,20 @@ def support_top_target(sample, base, provenance, params, *, approach: bool):
         sum(abs(axis[i]) * (sample.aabb_max[i] - sample.aabb_min[i]) for i in range(3))
         for axis in axes
     ]
+    if params.support_surface_bias_m:
+        long_axis = 0 if spans[0] >= spans[1] else 1
+        axis = axes[long_axis]
+        # Leave both separated distal pads inside the long top dimension.
+        # Eight millimetres reserves distal-pad footprint and measurement error.
+        available = spans[long_axis] / 2 - sample.opening_m / 2 - 0.008
+        if available <= 0:
+            raise ValueError("SUPPORT_TOP has no interior pad support strip")
+        distance = min(params.support_surface_bias_m, available)
+        toward_base = sum(
+            axis[i] * (base.position_xyz[i] - surface[i]) for i in range(3)
+        )
+        direction = 1.0 if toward_base >= 0 else -1.0
+        surface = tuple(surface[i] + direction * axis[i] * distance for i in range(3))
     yaw = math.pi / 2 if spans[0] >= spans[1] else 0.0
     orientations = []
     for angle in (yaw, yaw + math.pi):
@@ -336,6 +348,32 @@ def support_top_target(sample, base, provenance, params, *, approach: bool):
             Pose((0.0, 0.0, 0.0), value),
             Pose((0.0, 0.0, 0.0), sample.tcp_pose.orientation_xyzw),
         )[1],
+    )
+    if params.support_radial_tilt_deg:
+        radial = tuple(surface[i] - base.position_xyz[i] for i in range(3))
+        projection = sum(radial[i] * normal[i] for i in range(3))
+        tangent = tuple(radial[i] - projection * normal[i] for i in range(3))
+        length = math.sqrt(sum(value * value for value in tangent))
+        if length <= 1e-9:
+            raise ValueError("SUPPORT_TOP radial tilt requires a surface tangent")
+        tangent = tuple(value / length for value in tangent)
+        axis = (
+            normal[1] * tangent[2] - normal[2] * tangent[1],
+            normal[2] * tangent[0] - normal[0] * tangent[2],
+            normal[0] * tangent[1] - normal[1] * tangent[0],
+        )
+        half_angle = -math.radians(params.support_radial_tilt_deg) / 2
+        lean = (
+            *tuple(value * math.sin(half_angle) for value in axis),
+            math.cos(half_angle),
+        )
+        orientation = _normalize_quat(_quat_mul(lean, orientation))
+    # Keep the calibrated distal reference over the SAME support point when
+    # leaning. The normal gap/press is independent of tool-axis displacement.
+    tool_axis = _quat_rotate_vector(orientation, (0.0, 0.0, 1.0))
+    gap = params.support_approach_gap_m if approach else -params.support_press_m
+    world = tuple(
+        surface[i] - tool_axis[i] * 0.005211 + normal[i] * gap for i in range(3)
     )
     return _tcp_pose_target(
         world_position_to_base(world, base),

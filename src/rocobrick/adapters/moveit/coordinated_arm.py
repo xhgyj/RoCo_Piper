@@ -26,7 +26,19 @@ from rocobrick.moveit_contract import ARM_JOINT_NAMES
 ACCEPT_TIMEOUT_S = 5.0
 RESULT_MARGIN_S = 10.0
 START_MATCH_TOLERANCE_RAD = 0.01
-ARRIVAL_TOLERANCE_RAD = 0.015
+# Endpoint tolerance this participant asks of its arm controller (the
+# FollowJointTrajectory goal tolerance) and the supervisor's arrival bound,
+# which is that same tolerance plus one sampling margin: the arrival sample is
+# taken after the terminal result and can catch the drive still settling, so it
+# may legitimately sit a little outside the tolerance the controller verified.
+# The supervisor must NEVER demand a tighter endpoint than the controller was
+# asked for, or an action that legitimately succeeded inside its own goal
+# tolerance is rejected by us: live evidence, task-c-top-offset13d (2026-10-14),
+# piper_1 reported SUCCEEDED at 0.0157 rad against the 0.02 rad goal tolerance
+# while the old 0.015 rad arrival gate failed the whole support pre-phase (the
+# same motion had passed at 0.0119 rad one run earlier).
+GOAL_TOLERANCE_RAD = 0.02
+ARRIVAL_SAMPLE_MARGIN_RAD = 0.005
 
 
 class CoordinatedArmParticipant:
@@ -46,6 +58,22 @@ class CoordinatedArmParticipant:
         self._monitor: SynchronizedFeedbackMonitor | None = None
         self._prepared_barrier: float | None = None
         self._send_uncertain = False
+
+    def _endpoint_tolerance_rad(self) -> float:
+        """The endpoint tolerance this participant's controller is asked for.
+
+        It is the exact FollowJointTrajectory goal tolerance sent in
+        :meth:`prepare`, so the arrival bound in :meth:`start` can be derived
+        from the same value instead of contradicting it. With a synchronization
+        policy the controller is asked for the policy's tracking bound and the
+        arrival bound follows it.
+
+        Returns:
+            The end-position tolerance in radians.
+        """
+        if self._policy is None:
+            return GOAL_TOLERANCE_RAD
+        return float(self._policy.max_tracking_error_rad)
 
     def prepare(
         self,
@@ -147,9 +175,7 @@ class CoordinatedArmParticipant:
         for name in trajectory.joint_names:
             tolerance = factories.joint_tolerance_factory()
             tolerance.name = name
-            tolerance.position = (
-                0.02 if self._policy is None else self._policy.max_tracking_error_rad
-            )
+            tolerance.position = self._endpoint_tolerance_rad()
             tolerance.velocity = 0.05
             goal.goal_tolerance.append(tolerance)
         goal.goal_time_tolerance = runtime._duration_message(5.0, factories)
@@ -288,15 +314,11 @@ class CoordinatedArmParticipant:
                 and sample["age_s"] <= self._policy.max_feedback_gap_s
                 and sample["sim_time_s"] >= start_at_sim_time_s + duration
             )
+        arrival_tolerance = self._endpoint_tolerance_rad() + ARRIVAL_SAMPLE_MARGIN_RAD
         if final and fresh:
             final_error = max(
                 abs(final[canonical] - end_point.positions[index])
                 for index, canonical in enumerate(ARM_JOINT_NAMES)
-            )
-            arrival_tolerance = (
-                ARRIVAL_TOLERANCE_RAD
-                if self._policy is None
-                else min(ARRIVAL_TOLERANCE_RAD, self._policy.max_tracking_error_rad)
             )
             arrival = final_error <= arrival_tolerance
         terminal = succeeded or canceled
@@ -312,6 +334,8 @@ class CoordinatedArmParticipant:
             "safe": safe,
             "arrival_confirmed": arrival,
             "final_joint_error_rad": final_error,
+            "goal_tolerance_rad": self._endpoint_tolerance_rad(),
+            "arrival_tolerance_rad": arrival_tolerance,
             "final_joint_state": dict(final) if final else None,
             "command_messages": getattr(runtime, "_command_count", 0) - send_commands,
             "waypoints": len(self._trajectory.points),

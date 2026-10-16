@@ -2,6 +2,7 @@
 
 import asyncio
 import copy
+import math
 from dataclasses import replace
 from types import SimpleNamespace
 
@@ -26,7 +27,12 @@ from rocobrick.skills.placement_geometry import (
 from rocobrick.skills.pre_phase_targets import derive_pre_phase_targets
 from rocobrick.skills.support_evidence import verify_support_contact
 from rocobrick.skills.support_top import SupportTopHandler
-from rocobrick.skills.targets import _quat_rotate_vector, pick_targets
+from rocobrick.skills.targets import (
+    RobotBaseFrame,
+    SkillParams,
+    _quat_rotate_vector,
+    pick_targets,
+)
 from rocobrick.unified_runtime_facade import UnifiedDualArmRuntimeFacade
 
 
@@ -196,7 +202,9 @@ class Motion:
         if item.request_id.endswith(":release"):
             self.scene.data["robots"][robot]["opening_m"] = item.payload["opening_m"]
         return {
-            "motion_sent": item.request_id.endswith((":insert_up", ":release")),
+            "motion_sent": item.request_id.endswith(
+                (":insert_up", ":release", ":regrip")
+            ),
             "result": {
                 "passed": True,
                 "execution": {
@@ -270,6 +278,79 @@ def test_support_targets_are_downward_and_separate_approach_from_contact():
     )
     assert targets["piper_0"].get("maintain_pose") is not True
     assert targets["piper_1"]["tcp_pose"]["position"] == approach.position
+
+
+@pytest.mark.parametrize("base_yaw", [0.0, math.pi / 2])
+def test_support_lean_preserves_distal_surface_point_and_normal_gap(base_yaw):
+    """A base rotation cannot change the selected world support geometry."""
+    scene = Scene()
+    shared = asyncio.run(scene.observe("piper_1"))
+    sample = parse_pick_observation(
+        shared,
+        robot_id="piper_1",
+        physical_instance_id="brick-upper",
+        session_id="session-1",
+        manifest_sha256="a" * 64,
+    )
+    ctx = context()
+    base = RobotBaseFrame(
+        (-0.35, -0.3, 0.0),
+        (0.0, 0.0, math.sin(base_yaw / 2), math.cos(base_yaw / 2)),
+    )
+    params = replace(ctx.params, support_radial_tilt_deg=5.0)
+    targets = [
+        support_top_target(sample, base, ctx.provenance, params, approach=approach)
+        for approach in (True, False)
+    ]
+    assert targets[0].orientation_xyzw == targets[1].orientation_xyzw
+    for target, gap in zip(
+        targets, (params.support_approach_gap_m, -params.support_press_m)
+    ):
+        tool_axis_base = _quat_rotate_vector(target.orientation_xyzw, (0, 0, 1))
+        distal_base = tuple(
+            target.position[i] + tool_axis_base[i] * 0.005211 for i in range(3)
+        )
+        distal_rotated = _quat_rotate_vector(base.orientation_xyzw, distal_base)
+        distal_world = tuple(base.position_xyz[i] + distal_rotated[i] for i in range(3))
+        assert distal_world == pytest.approx(
+            (
+                (sample.aabb_min[0] + sample.aabb_max[0]) / 2,
+                (sample.aabb_min[1] + sample.aabb_max[1]) / 2,
+                sample.aabb_max[2] + gap,
+            )
+        )
+        tool_axis_world = _quat_rotate_vector(base.orientation_xyzw, tool_axis_base)
+        assert tool_axis_world[2] == pytest.approx(-math.cos(math.radians(5)))
+        radial = tuple(distal_world[i] - base.position_xyz[i] for i in range(2))
+        assert sum(tool_axis_world[i] * radial[i] for i in range(2)) > 0
+
+
+def test_support_bias_stays_inside_the_long_top_face():
+    """The support reference reserves pad separation and an eight-mm edge margin."""
+    scene = Scene()
+    shared = asyncio.run(scene.observe("piper_1"))
+    sample = parse_pick_observation(
+        shared,
+        robot_id="piper_1",
+        physical_instance_id="brick-upper",
+        session_id="session-1",
+        manifest_sha256="a" * 64,
+    )
+    ctx = context()
+    base = replace(ctx.base, position_xyz=(-0.35, -0.3, 0.0))
+    params = replace(ctx.params, support_surface_bias_m=0.02)
+    target = support_top_target(sample, base, ctx.provenance, params, approach=True)
+    rotated = _quat_rotate_vector(base.orientation_xyzw, target.position)
+    world = tuple(base.position_xyz[i] + rotated[i] for i in range(3))
+    assert sample.aabb_min[0] + 0.008 <= world[0] <= sample.aabb_max[0] - 0.008
+    assert sample.aabb_min[1] <= world[1] <= sample.aabb_max[1]
+
+
+@pytest.mark.parametrize("angle", [-1.0, 10.01, float("nan"), True])
+def test_support_lean_rejects_unbounded_or_non_numeric_angles(angle):
+    """The support tilt is bounded rather than a free orientation tolerance."""
+    with pytest.raises(ValueError):
+        SkillParams(support_radial_tilt_deg=angle)
 
 
 @pytest.mark.parametrize("defect", ["no_contact", "stale", "side_contact", "foreign"])
@@ -359,6 +440,159 @@ def test_place_up_requires_real_release_and_retreat_before_confirmation():
     assert ledger.owner_of_object("brick-lower") is None
     assert ledger.observe("piper_1", "supporting:brick-upper") is None
     assert ledger.observe("piper_0", "placed:brick-lower") is not None
+
+
+def test_insert_guard_reads_the_shared_scene_not_the_executor_slice():
+    """The 13j regression: the peer's support proof needs a dual-robot read.
+
+    Live 2026-10-14 (``runs/task-c-top-offset13j-headless-*``): the support was
+    pressing at 5.21 N on piper_1's own slice, yet PLACE_UP stopped before any
+    insertion motion with ``support_contact_lost``.  The up-mode contact guard
+    proves the SUPPORT robot's pad reaction, but it was evaluated against the
+    executor's robot-scoped observation, which by design carries only the
+    executor's own contact records.  The guard now reads the shared multi-robot
+    scene; this test drives the whole pre-insert path with a sliced observation
+    transport and asserts the insertion actually runs.
+    """
+    scene = Scene()
+    ledger = OperationStateLedger(("piper_0", "piper_1"))
+    ledger.confirm_holding("piper_0", "brick-lower", {"holding_confirmed": True})
+    ledger.confirm("piper_1", "supporting:brick-upper", {"confirmed": True})
+
+    class SlicedObservations:
+        """One robot-scoped observation transport (this robot's own contacts)."""
+
+        async def observe(self, robot_id):
+            """Return one robot-scoped answer, as the A5 envelope slices it."""
+            document = await scene.observe(robot_id)
+            document["pad_object_contacts"]["contacts"] = [
+                entry
+                for entry in document["pad_object_contacts"]["contacts"]
+                if entry["robot_id"] == robot_id
+            ]
+            return document
+
+    free, motion = FreeSpace(scene), Motion(scene)
+    handler = PlaceUpHandler(
+        SlicedObservations(),
+        ledger,
+        session_id="session-1",
+        manifest_sha256="a" * 64,
+        motion_transport=motion,
+        free_space_transport=free,
+        context=context(),
+        poll_interval_s=0,
+    )
+    result = asyncio.run(handler.execute(upward_operation()))
+    assert result.passed, result.reason
+    assert "insertion_up" in result.evidence
+    assert any(call.request_id.endswith(":insert_up") for call in motion.calls)
+
+    # Control: the same proof fails on the executor's own slice, which is why
+    # the guard must not be evaluated against it.
+    sliced = asyncio.run(SlicedObservations().observe("piper_0"))
+    assert sliced["pad_object_contacts"]["contacts"] == []
+    with pytest.raises(ValueError, match="no measured top-surface contact"):
+        verify_support_contact(
+            sliced,
+            robot_id="piper_1",
+            upper_id="brick-upper",
+            session_id="session-1",
+            manifest_sha256="a" * 64,
+        )
+
+
+def test_place_up_regrips_the_held_brick_before_the_insertion():
+    """The 13l/13p regression: the insertion's grip is stiffened first.
+
+    Live 2026-10-14 (``runs/task-c-top-offset13l/13p-headless-*``): the upward
+    insertion carries its whole load through pad friction, and the support's
+    press transfers to the held brick at the stud engagement, so the brick slid
+    3.0-3.2 mm in the jaws and the guard stopped the insertion.  The skill now
+    presses the already-gripping pads harder before the insertion; the one-shot
+    close is untouched, so the brick cannot be ejected during the close.
+    """
+    scene = Scene()
+    ledger = OperationStateLedger(("piper_0", "piper_1"))
+    ledger.confirm_holding("piper_0", "brick-lower", {"holding_confirmed": True})
+    ledger.confirm("piper_1", "supporting:brick-upper", {"confirmed": True})
+    free, motion = FreeSpace(scene), Motion(scene)
+    ctx = context()
+    # The regrip target is derived from the opening the gripper holds the brick
+    # with, captured before the flow (the release later changes the reading).
+    held_opening = scene.data["robots"]["piper_0"]["opening_m"]
+    tightened = replace(
+        ctx, params=replace(ctx.params, place_up_regrip_closing_m=0.002)
+    )
+    handler = PlaceUpHandler(
+        scene,
+        ledger,
+        session_id="session-1",
+        manifest_sha256="a" * 64,
+        motion_transport=motion,
+        free_space_transport=free,
+        context=tightened,
+        poll_interval_s=0,
+    )
+    result = asyncio.run(handler.execute(upward_operation()))
+    assert result.passed, result.reason
+    assert "regrip" in result.evidence
+    ids = [call.request_id.rsplit(":", 1)[1] for call in motion.calls]
+    assert ids.index("regrip") < ids.index("insert_up")
+    measured = held_opening
+    regrip = next(call for call in motion.calls if call.request_id.endswith(":regrip"))
+    assert regrip.payload["opening_m"] == pytest.approx(measured - 0.002)
+    assert regrip.payload["expected_opening_m"][0] < measured
+    assert regrip.payload["expected_opening_m"][1] > measured
+
+    # The default stays a one-shot close: no regrip without the parameter.
+    default_scene = Scene()
+    default_ledger = OperationStateLedger(("piper_0", "piper_1"))
+    default_ledger.confirm_holding(
+        "piper_0", "brick-lower", {"holding_confirmed": True}
+    )
+    default_ledger.confirm("piper_1", "supporting:brick-upper", {"confirmed": True})
+    free_default, motion_default = FreeSpace(default_scene), Motion(default_scene)
+    default_handler = PlaceUpHandler(
+        default_scene,
+        default_ledger,
+        session_id="session-1",
+        manifest_sha256="a" * 64,
+        motion_transport=motion_default,
+        free_space_transport=free_default,
+        context=context(),
+        poll_interval_s=0,
+    )
+    assert asyncio.run(default_handler.execute(upward_operation())).passed
+    assert not any(call.request_id.endswith(":regrip") for call in motion_default.calls)
+
+
+def test_continuous_insertion_retains_the_feedback_trial_slip_bounds():
+    """Removing per-step pauses does not relax custody or force protection."""
+    scene = Scene()
+    ledger = OperationStateLedger(("piper_0", "piper_1"))
+    ledger.confirm_holding("piper_0", "brick-lower", {"holding_confirmed": True})
+    ledger.confirm("piper_1", "supporting:brick-upper", {"confirmed": True})
+    free, motion = FreeSpace(scene), Motion(scene)
+    handler = PlaceUpHandler(
+        scene,
+        ledger,
+        session_id="session-1",
+        manifest_sha256="a" * 64,
+        motion_transport=motion,
+        free_space_transport=free,
+        context=context(),
+        poll_interval_s=0,
+    )
+    result = asyncio.run(handler.execute(upward_operation()))
+    assert result.passed, result.reason
+    guard = result.evidence["contact_guard"]
+    assert "insertion_feedback" not in result.evidence
+    assert guard["grasp_position_m"] == pytest.approx(0.003)
+    assert guard["grasp_angle_rad"] == pytest.approx(math.radians(3))
+    assert guard["force_limit_n"] == pytest.approx(8.0)
+    assert guard["supported_position_m"] == pytest.approx(0.002)
+    assert guard["supported_angle_rad"] == pytest.approx(math.radians(3))
 
 
 def test_pre_phase_cancel_uses_real_session_boundary():
@@ -488,8 +722,15 @@ def test_single_support_successor_does_not_steal_carrier_resources():
 
 
 @pytest.mark.parametrize("mode", ["empty", "contact", "force", "deflected", "stale"])
-def test_support_guard_stops_on_actual_contact_or_physical_safety_limit(mode):
-    """An empty fresh contact frame admits descent; excessive load stops it."""
+def test_support_guard_presses_through_contact_and_stops_on_safety_limits(mode):
+    """A support descent presses through contact; only its limits stop it.
+
+    Touching the top surface is the expected condition of the controlled press
+    (the contact target sits ``support_press_m`` below the surface), so a
+    measured contact keeps the descent running and is recorded as evidence.
+    Stopping there left the pads hovering above the surface with the press
+    unexecuted (live evidence, task-c-top-offset13f 2026-10-14).
+    """
     shared = asyncio.run(Scene().observe("piper_1"))
     guard = {
         "robot_id": "piper_1",
@@ -504,7 +745,7 @@ def test_support_guard_stops_on_actual_contact_or_physical_safety_limit(mode):
     }
     expected = {
         "empty": None,
-        "contact": "support_contact_confirmed",
+        "contact": None,
         "force": "support_force_exceeded",
         "deflected": "supported_upper_disturbed",
     }
@@ -519,8 +760,13 @@ def test_support_guard_stops_on_actual_contact_or_physical_safety_limit(mode):
         with pytest.raises(ValueError, match="stale"):
             inspect_contact(shared, guard)
         return
-    stop, _ = inspect_contact(shared, guard)
+    stop, measured = inspect_contact(shared, guard)
     assert stop == expected[mode]
+    if mode == "contact":
+        # The measured contact is recorded even though the press continues.
+        assert measured["support_force_n"] > 0
+        assert measured["support_contact_established"] is True
+        assert measured["support_contact"]["confirmed"] is True
     assert allows_recovery("support_contact_confirmed")
 
 

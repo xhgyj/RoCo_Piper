@@ -144,6 +144,10 @@ IK_SEARCH_TIMEOUT_S = 0.5
 IK_ATTEMPT_TIMEOUT_S = 0.05
 IK_SEED_ATTEMPTS = 24
 COMBINED_ROBOT_DESCRIPTION_TOPIC = "/dual_arm/robot_description"
+# The single MoveGroup action of a dual-arm session: one combined MoveIt node
+# hosts both participants' prefixed groups, so no participant runtime owns a
+# planning client of its own.
+SHARED_DUAL_ARM_MOVE_GROUP = "/dual_arm/move_action"
 
 
 def ik_seed_candidates(
@@ -307,7 +311,7 @@ def runtime_services_for_profile(profile: RobotRuntimeProfile) -> RuntimeService
     """
     root = (
         "/dual_arm"
-        if profile.move_group_action == "/dual_arm/move_action"
+        if profile.move_group_action == SHARED_DUAL_ARM_MOVE_GROUP
         else robot_endpoint_root(profile)
     )
     return RuntimeServices(
@@ -316,7 +320,7 @@ def runtime_services_for_profile(profile: RobotRuntimeProfile) -> RuntimeService
         compute_fk=profile.compute_fk,
         compute_ik=(
             "/dual_arm/compute_ik"
-            if profile.move_group_action == "/dual_arm/move_action"
+            if profile.move_group_action == SHARED_DUAL_ARM_MOVE_GROUP
             else ""
         ),
         apply_planning_scene=root + SERVICE_APPLY_PLANNING_SCENE,
@@ -528,7 +532,57 @@ def robot_scene_view(
         view["tcp_pose"] = block["tcp_pose"]
     if "placement_interfaces" in document:
         view["placement_interfaces"] = document["placement_interfaces"]
+    contacts = robot_pad_object_contacts(document, robot_id)
+    if contacts is not None:
+        view["pad_object_contacts"] = contacts
     return view
+
+
+def robot_pad_object_contacts(
+    document: Mapping[str, object], robot_id: str
+) -> dict[str, object] | None:
+    """This robot's own part of the A4 pad/object PhysX contact report.
+
+    The host bridge reports actual pad/object contacts as one global block (it
+    is one PhysX report across all robots), so a robot-scoped view may carry it
+    only with this robot's own entries: the provenance keys are copied verbatim
+    and every contact record owned by another robot is dropped. SUPPORT_TOP and
+    PLACE_UP prove their support from exactly this block, and a sliced answer
+    that dropped it entirely made that proof impossible (live evidence,
+    task-c-top-offset13e 2026-10-14: the press itself confirmed
+    ``support_contact_confirmed`` from the global document, then the robot
+    scoped re-read failed with "SUPPORT_TOP actual contact report unavailable").
+
+    A document without the block (an older host, or nothing in contact) yields
+    None, and the view then simply carries no contact report.
+
+    Returns:
+        The robot's own contact report, or None when the document has none.
+    """
+    report = document.get("pad_object_contacts")
+    if not isinstance(report, Mapping):
+        return None
+    contacts = report.get("contacts")
+    if not isinstance(contacts, list):
+        return None
+    filtered: dict[str, object] = {
+        key: report[key]
+        for key in (
+            "schema",
+            "source",
+            "session_id",
+            "manifest_sha256",
+            "sequence",
+            "sim_time_s",
+        )
+        if key in report
+    }
+    filtered["contacts"] = [
+        dict(entry)
+        for entry in contacts
+        if isinstance(entry, Mapping) and entry.get("robot_id") == robot_id
+    ]
+    return filtered
 
 
 @dataclass(frozen=True)
@@ -986,6 +1040,11 @@ class RosMoveItRuntime:
         self._arm_client: Any = None
         self._move_group_client: Any = None
         self._combined_ready: Callable[[], bool] = lambda: False
+        # In a dual-arm session this runtime owns no MoveGroup client of its
+        # own (its planning groups live only in the combined model); the single
+        # shared ``/dual_arm/move_action`` client is injected here by
+        # :class:`RosMoveItRobotSession`.
+        self._combined_move_group_client: Callable[[], object | None] = lambda: None
         self._gripper_client: Any = None
         self._active_handle: Any = None
         # Keep both futures so a timeout can handle late goal acceptance and
@@ -1254,7 +1313,7 @@ class RosMoveItRuntime:
                 node, factories.follow_joint_trajectory_type(), self.actions.arm_follow
             )
         if (
-            self.actions.move_group != "/dual_arm/move_action"
+            self.actions.move_group != SHARED_DUAL_ARM_MOVE_GROUP
             and self._move_group_client is None
         ):
             self._move_group_client = factories.action_client_factory(
@@ -1471,6 +1530,26 @@ class RosMoveItRuntime:
         except Exception:
             return False
 
+    def planning_action_client(self) -> object | None:
+        """The MoveGroup action client that owns this robot's planning groups.
+
+        A dual-arm session's per-robot runtime deliberately registers no
+        client of its own: the robot's groups (``<robot>_arm``,
+        ``<robot>_arm_tcp``) exist only in the combined MoveIt model, whose
+        single ``/dual_arm/move_action`` client is owned by the coordinated
+        runtime and injected as ``_combined_move_group_client``. A runtime
+        that owns neither client returns None so every caller fails closed
+        instead of dereferencing None.
+
+        Returns:
+            The action client that can plan this robot's groups, or None.
+        """
+        if self._move_group_client is not None:
+            return self._move_group_client
+        if self.actions.move_group == SHARED_DUAL_ARM_MOVE_GROUP:
+            return self._combined_move_group_client()
+        return None
+
     def readiness_snapshot(self) -> ReadinessSnapshot:
         """Aggregate the R1 pure predicates plus transport readiness flags."""
         isaac = self.latest_isaac_state()
@@ -1488,7 +1567,7 @@ class RosMoveItRuntime:
             arm_action_ready=self._action_ready(self._arm_client),
             move_group_action_ready=self._action_ready(self._move_group_client)
             or (
-                self.actions.move_group == "/dual_arm/move_action"
+                self.actions.move_group == SHARED_DUAL_ARM_MOVE_GROUP
                 and self._combined_ready()
             ),
             compute_fk_ready=self._service_ready(self._fk_client),
@@ -3181,6 +3260,34 @@ class RosMoveItRuntime:
                 safe_to_release=True,
                 action_status="REJECTED",
             )
+        decision = strict_action_admission(target)
+        if not decision.accepted:
+            return ExecutionResult(
+                status=ExecutionStatus.REJECTED,
+                details={
+                    "error": "contact target admission refused",
+                    "admission_reason": decision.reason,
+                },
+                terminal=True,
+                safe_to_release=True,
+            )
+        # A short completed step can leave the Isaac/broadcaster subscriptions
+        # at adjacent ticks. Re-synchronize every predicate before capturing
+        # the next start state; never waive readiness or send a retry goal.
+        if (
+            not self.readiness_snapshot().passed
+            and not self.wait_until_ready(min(1.0, float(timeout_s)))
+        ):
+            snapshot = self.readiness_snapshot()
+            return ExecutionResult(
+                status=ExecutionStatus.REJECTED,
+                details={
+                    "error": "contact readiness did not converge",
+                    "readiness": asdict(snapshot),
+                },
+                terminal=True,
+                safe_to_release=True,
+            )
         goal = self._build_pose_goal(target, self._resolve_factories())
         goal.planning_options.plan_only = True
         goal.request.pipeline_id = "pilz_industrial_motion_planner"
@@ -3201,16 +3308,22 @@ class RosMoveItRuntime:
             goal.request.start_state.joint_state.name = list(combined)
             goal.request.start_state.joint_state.position = list(combined.values())
         goal.request.start_state.joint_state.velocity = []
-        decision = strict_action_admission(target)
-        if not decision.accepted or not self.readiness_snapshot().passed:
+        client = self.planning_action_client()
+        if client is None:
             return ExecutionResult(
-                status=ExecutionStatus.REJECTED,
-                details={"error": "contact admission/readiness refused"},
+                status=ExecutionStatus.FAILED,
+                details={
+                    "error": (
+                        "no MoveGroup action client can plan this contact: the "
+                        "runtime has no client of its own and the combined "
+                        "planner is not registered"
+                    )
+                },
                 terminal=True,
                 safe_to_release=True,
             )
         deadline = self._clock_fn() + float(timeout_s)
-        future = self._move_group_client.send_goal_async(goal)
+        future = client.send_goal_async(goal)  # type: ignore[attr-defined]
         self._active_goal_future = future
         if not self._wait_future(future, deadline):
             lifecycle = self.cancel_active()
@@ -3289,8 +3402,8 @@ class RosMoveItRuntime:
             Monitored terminal action evidence; no endpoint completion retry.
         """
         from rocobrick.adapters.moveit.contact_trajectory import (
-            CONTACT_CARTESIAN_SPEED_MPS,
             contact_minimum_duration_s,
+            contact_speed_for_mode,
             contact_trajectory_timing,
         )
         from rocobrick.skills.observation import Pose
@@ -3325,8 +3438,12 @@ class RosMoveItRuntime:
         if start_fk is None:
             raise RuntimeError("contact trajectory requires a measured TCP start pose")
         contact_distance_m = math.dist(start_fk[0], tuple(target.position))
+        speed_mps = contact_speed_for_mode(guard["mode"])
         timing = contact_trajectory_timing(
-            times, minimum_duration_s=contact_minimum_duration_s(contact_distance_m)
+            times,
+            minimum_duration_s=contact_minimum_duration_s(
+                contact_distance_m, speed_mps=speed_mps
+            ),
         )
         goal = factories.follow_joint_trajectory_goal_factory()
         goal.trajectory.joint_names = list(trajectory.joint_names)
@@ -3382,7 +3499,7 @@ class RosMoveItRuntime:
             "planned_waypoints": count,
             "execution_transport": "arm_follow",
             "contact_cartesian_distance_m": contact_distance_m,
-            "contact_speed_cap_mps": CONTACT_CARTESIAN_SPEED_MPS,
+            "contact_speed_cap_mps": speed_mps,
             "planned_joint_start": dict(
                 zip(trajectory.joint_names, trajectory.points[0].positions)
             ),
@@ -3458,7 +3575,7 @@ class RosMoveItRuntime:
         *,
         contact_guard: Mapping[str, object] | None = None,
     ) -> ExecutionResult:
-        if self.actions.move_group == "/dual_arm/move_action":
+        if self.actions.move_group == SHARED_DUAL_ARM_MOVE_GROUP:
             return ExecutionResult(
                 status=ExecutionStatus.REJECTED,
                 details={
@@ -4556,11 +4673,18 @@ class RosMoveItRobotSession:
         if self._coordinated_runtime is not None:
             for participant in self.runtimes.values():
                 participant._combined_ready = self._coordinated_runtime.ready
+                # A participant's guarded contact plans on the combined model
+                # (its own groups live only there); the shared client is the
+                # only legal planning transport for it.
+                participant._combined_move_group_client = (
+                    self._coordinated_runtime.move_group_client
+                )
         from rocobrick.unified_scene import UnifiedSceneBinding
 
         self._scene_binding = UnifiedSceneBinding(self.runtimes[ids[0]])
         self._planning_lock = threading.Lock()
         self._joint_limits_cache: dict[str, tuple[float, float]] | None = None
+        self._robot_description_cache: str | None = None
         self._unified_runtime = (
             UnifiedDualArmRuntime(self, self._coordinated_runtime)
             if self._coordinated_runtime is not None
@@ -4889,22 +5013,19 @@ class RosMoveItRobotSession:
         evidence["start_barrier_sim_time_s"] = barrier
         return evidence
 
-    def unified_joint_limits(
-        self, timeout_s: float = 5.0
-    ) -> dict[str, tuple[float, float]]:
-        """Read combined arm joint limits from the live robot description.
+    def unified_robot_description(self, timeout_s: float = 5.0) -> str:
+        """Return the latched combined robot description the planner uses.
 
         Subscribes once to the latched ``/dual_arm/robot_description`` the
-        combined launch publishes, parses the per-joint limits of every
-        participant arm and caches them for the session.
+        combined launch publishes and caches the document for the session.
+        This is the very model MoveIt planned on, so the clearance gate never
+        disagrees with the planner about kinematics.
 
         Returns:
-            Wire-named arm joint limits of both participants.
+            The combined URDF document text.
         """
-        if self._joint_limits_cache is not None:
-            return dict(self._joint_limits_cache)
-        import xml.etree.ElementTree as ET
-
+        if self._robot_description_cache is not None:
+            return self._robot_description_cache
         from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
         from std_msgs.msg import String
 
@@ -4932,13 +5053,32 @@ class RosMoveItRobotSession:
             raise RuntimeError(
                 f"{COMBINED_ROBOT_DESCRIPTION_TOPIC} did not answer within {timeout_s}s"
             )
+        self._robot_description_cache = received["urdf"]
+        return self._robot_description_cache
+
+    def unified_joint_limits(
+        self, timeout_s: float = 5.0
+    ) -> dict[str, tuple[float, float]]:
+        """Read combined arm joint limits from the live robot description.
+
+        Parses the per-joint limits of every participant arm out of the latched
+        combined description and caches them for the session.
+
+        Returns:
+            Wire-named arm joint limits of both participants.
+        """
+        if self._joint_limits_cache is not None:
+            return dict(self._joint_limits_cache)
+        import xml.etree.ElementTree as ET
+
+        document = self.unified_robot_description(timeout_s)
         arm_joints = {
             f"{robot_id}_joint{index}"
             for robot_id in self.robot_ids
             for index in range(1, 7)
         }
         limits: dict[str, tuple[float, float]] = {}
-        for joint in ET.fromstring(received["urdf"]).findall("joint"):
+        for joint in ET.fromstring(document).findall("joint"):
             name = joint.get("name")
             limit = joint.find("limit")
             if (
@@ -5307,6 +5447,26 @@ class RosMoveItRobotSession:
         if tuple(request.robots) != self.robot_ids:
             raise ValueError("coordinated request robots do not match session")
         readiness = self.unified_readiness(request)
+        deadline = (
+            self._clock_fn() + min(1.0, float(request.timeout_s))
+            if not readiness.passed else 0.0
+        )
+        while (
+            not readiness.passed
+            and not readiness.combined_joint_state_complete
+            and readiness.clock_increasing
+            and readiness.scene_snapshot_fresh
+            and readiness.scene_digest_match
+            and readiness.combined_move_group_ready
+            and all(readiness.controllers_ready.values())
+            and self._clock_fn() < deadline
+        ):
+            # Both namespaced subscriptions must converge on complete matching
+            # state. Retry observation only; the scene binding and every other
+            # admission predicate remain unchanged.
+            self._spin_fn()
+            self._sleep_fn(0.02)
+            readiness = self.unified_readiness(request)
         if not readiness.passed:
             components = {
                 "clock_increasing": readiness.clock_increasing,
@@ -5404,7 +5564,7 @@ class RosMoveItRobotSession:
         the session readiness gate uses.
         """
         if probe_scene and any(
-            profile.move_group_action == "/dual_arm/move_action"
+            profile.move_group_action == SHARED_DUAL_ARM_MOVE_GROUP
             for profile in self.profiles.values()
         ):
             try:

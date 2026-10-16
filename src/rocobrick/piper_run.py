@@ -39,7 +39,7 @@ contract libraries and a future execution backend. Every invocation:
 7. With a READY session the plan runs through
    :class:`rocobrick.robot_operation_runner.OperationPlanRunner` in strict
    mode (``allow_legacy_results=False``) over
-   :class:`rocobrick.robot_operation_executor.SkillOperationExecutor`, which
+   :class:`rocobrick.execution.robot_operation_executor.SkillOperationExecutor`, which
    observes the real scene through the session's read-only ``observe``
    transport. WAIT, TRANSIT, PICK and PLACE_DOWN use their evidence backends;
    PLACE_DOWN proves connection, release and retreat separately before any
@@ -1408,7 +1408,7 @@ def _robot_operation_plan_phase(
         load_transit_contexts,
     )
     from rocobrick.execution.operation_state_ledger import OperationStateLedger
-    from rocobrick.robot_operation_executor import SkillOperationExecutor
+    from rocobrick.execution.robot_operation_executor import SkillOperationExecutor
     from rocobrick.robot_operation_runner import (
         RUN_SCHEMA,
         OperationPlanRunner,

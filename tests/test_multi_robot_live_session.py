@@ -36,6 +36,7 @@ from rocobrick.isaac_backend import (
 from rocobrick.moveit_contract import JOINT_NAMES
 from rocobrick.ros_moveit_runtime import RobotCapabilityReadiness, robot_scene_view
 from rocobrick.skills.observation import parse_pick_observation
+from rocobrick.skills.support_evidence import verify_support_contact
 from rocobrick.ros_session_entry import (
     SCENE_STATE_SCHEMA,
     SESSION_REQUEST_KEYS,
@@ -1516,6 +1517,115 @@ def test_pick_pose_observation_survives_robot_scoped_scene_query() -> None:
     assert set(rebuilt["bricks"]) == {"brick-alpha"}
 
 
+def _pad_contacts_document() -> dict:
+    """One A4 dual document with session provenance and a pad contact report.
+
+    Returns:
+        The global scene-state document.
+    """
+    document = global_scene_document()
+    document.update(session_id="session-1", manifest_sha256="a" * 64, sequence=7)
+    document["bricks"]["brick-alpha"]["pose"] = {
+        "position_xyz": [0.0, 0.0, 0.01],
+        "orientation_xyzw": [0.0, 0.0, 0.0, 1.0],
+    }
+    for robot_id, x in (("piper_0", 0.0), ("piper_1", 0.5)):
+        document["robots"][robot_id]["sequence"] = 7
+        document["robots"][robot_id]["tcp_pose"] = {
+            "position_xyz": [x, 0.0, 0.03],
+            "orientation_xyzw": [0.0, 0.0, 0.0, 1.0],
+        }
+    document["pad_object_contacts"] = {
+        "schema": "rocobrick-pad-object-contacts/v1",
+        "source": "physx_contact_report",
+        "session_id": "session-1",
+        "manifest_sha256": "a" * 64,
+        "sequence": 7,
+        "sim_time_s": SIM_TIME_S,
+        "contacts": [
+            {
+                "robot_id": "piper_0",
+                "pad_link": "piper_0_gripper_link1",
+                "physical_instance_id": "brick-beta",
+                "position_world_m": [0.0, 0.0, 0.0],
+                "normal_world": [1.0, 0.0, 0.0],
+                "normal_force_n": 1.5,
+            },
+            {
+                "robot_id": "piper_1",
+                "pad_link": "piper_1_gripper_link1",
+                "physical_instance_id": "brick-alpha",
+                "position_world_m": [0.0, 0.0, 0.02],
+                "normal_world": [0.0, 0.0, -1.0],
+                "normal_force_n": 0.4,
+            },
+        ],
+    }
+    return document
+
+
+def _stale_contact_block(view: dict) -> None:
+    """One contact report whose provenance does not match the answer."""
+    view["sequence"] = 7
+    view["pad_object_contacts"] = {"contacts": [], "sequence": 1}
+
+
+def test_support_contact_proof_survives_robot_scoped_scene_query():
+    """The 13e regression: a sliced answer still proves the actual support.
+
+    Live 2026-10-14 (task-c-top-offset13e): the support press itself stopped on
+    ``support_contact_confirmed`` from the global document, then SUPPORT_TOP's
+    own re-read of the robot-scoped answer failed with "actual contact report
+    unavailable" because the slice dropped the global PhysX report entirely.
+    After that fix the answer carries this robot's own records, and the proof
+    succeeds on the rebuilt A4 document.
+    """
+    document = _pad_contacts_document()
+    view = robot_scene_view(
+        document, "piper_1", joint_names=DEVICE_JOINTS["piper_1"]
+    )
+    filtered = filter_scene_state(
+        view,
+        {
+            "brick_physical_instance_ids": ["brick-alpha"],
+            "connection_pairs": [],
+            "include_gripper": True,
+        },
+    )
+    rebuilt = build_global_scene_document("piper_1", filtered)
+    sample, proof = verify_support_contact(
+        rebuilt,
+        robot_id="piper_1",
+        upper_id="brick-alpha",
+        session_id="session-1",
+        manifest_sha256="a" * 64,
+    )
+    assert sample.physical_instance_id == "brick-alpha"
+    assert proof["confirmed"] is True
+    assert [item["pad_link"] for item in proof["contacts"]] == [
+        "piper_1_gripper_link1"
+    ]
+    assert "piper_0" not in json.dumps(rebuilt["pad_object_contacts"])
+
+    # Another robot's contact is never presented as this robot's support.
+    document["pad_object_contacts"]["contacts"] = [
+        document["pad_object_contacts"]["contacts"][0]
+    ]
+    view = robot_scene_view(
+        document, "piper_1", joint_names=DEVICE_JOINTS["piper_1"]
+    )
+    rebuilt = build_global_scene_document("piper_1", view)
+    assert rebuilt["pad_object_contacts"]["contacts"] == []
+    with pytest.raises(ValueError, match="no measured top-surface contact"):
+        verify_support_contact(
+            rebuilt,
+            robot_id="piper_1",
+            upper_id="brick-alpha",
+            session_id="session-1",
+            manifest_sha256="a" * 64,
+        )
+
+
 @pytest.mark.parametrize(
     "change, message",
     [
@@ -1528,6 +1638,12 @@ def test_pick_pose_observation_survives_robot_scoped_scene_query() -> None:
         (lambda view: view.update(opening_m="wide"), "opening_m"),
         (lambda view: view.update(connections={"brick-alpha|brick-beta": 1}),
          "connections"),
+        (lambda view: view.update(
+            pad_object_contacts={"contacts": [{"robot_id": "piper_0"}]}),
+         "owned by"),
+        (_stale_contact_block, "stale or foreign"),
+        (lambda view: view.update(pad_object_contacts={"contacts": None}),
+         "no contact list"),
     ],
 )
 def test_build_global_scene_document_rejects_any_deviation(change, message):
@@ -1538,6 +1654,119 @@ def test_build_global_scene_document_rejects_any_deviation(change, message):
     change(view)
     with pytest.raises(ValueError, match=message):
         build_global_scene_document("piper_1", view)
+
+
+def test_observe_carries_this_robots_own_contact_report(tmp_path):
+    """The whole observe path hands the support proof its contact records."""
+    runner = make_runner(tmp_path, scene=_pad_contacts_document())
+    session = make_session(tmp_path, runner)
+    session.start()
+    document = session.observe_sync("piper_1")
+    report = document["pad_object_contacts"]
+    assert report["sequence"] == 7
+    assert report["manifest_sha256"] == "a" * 64
+    assert [item["pad_link"] for item in report["contacts"]] == [
+        "piper_1_gripper_link1"
+    ]
+    assert "piper_0" not in json.dumps(report)
+    _, proof = verify_support_contact(
+        document,
+        robot_id="piper_1",
+        upper_id="brick-alpha",
+        session_id="session-1",
+        manifest_sha256="a" * 64,
+    )
+    assert proof["confirmed"] is True
+
+
+# The 13h press at its last recorded feedback sample: 2.49 deg of brick tilt
+# had put the pad's reaction 2.96 mm below the brick's world-AABB top, so the
+# AABB-corner proof was one sample away from rejecting a genuine top-face
+# press ("SUPPORT_TOP has no measured top-surface contact", the actual stop of
+# task-c-top-offset13h).
+SUPPORT_PRESS_13H = {
+    "pose": {
+        "position_xyz": [-0.04107756, -0.03328168, 0.11801429],
+        "orientation_xyzw": [
+            -0.0171735417, -0.0129235284, 0.9997656941, 0.0026030031,
+        ],
+    },
+    "aabb_min": [-0.07380332, -0.04994483, 0.11650572],
+    "aabb_max": [-0.00907089, -0.01715675, 0.14040355],
+    "contact": {
+        "position_world_m": [-0.07292009, -0.04406672, 0.13744554],
+        "normal_world": [-0.01335343, -0.01255543, 0.99983201],
+        "normal_force_n": 4.20814694756239,
+    },
+}
+
+
+def _support_press_document(contact: dict, *, brick: str = "brick-alpha") -> dict:
+    """One scene answer carrying a pad press on the tilted 13h upper brick.
+
+    Returns:
+        The A4 document with this brick's pose, AABB and pad reaction.
+    """
+    document = _pad_contacts_document()
+    document["bricks"][brick]["pose"] = dict(SUPPORT_PRESS_13H["pose"])
+    document["bricks"][brick]["aabb_min"] = list(SUPPORT_PRESS_13H["aabb_min"])
+    document["bricks"][brick]["aabb_max"] = list(SUPPORT_PRESS_13H["aabb_max"])
+    document["pad_object_contacts"]["contacts"] = [
+        {
+            "robot_id": "piper_1",
+            "pad_link": "piper_1_gripper_link2",
+            "physical_instance_id": brick,
+            **contact,
+        }
+    ]
+    return document
+
+
+def test_support_proof_follows_the_tilted_top_face():
+    """The 13h regression: a tilted brick's top face is still its top face.
+
+    The upper brick leans a couple of degrees under the support press, and its
+    world AABB top is then the far high corner: comparing the reaction against
+    that corner rejects a real press (measured 2.96 mm of corner offset at
+    2.49 deg of tilt, the last sample before SUPPORT_TOP failed).  The proof
+    now measures against the brick's own top-face plane, recovered from the
+    pose frame and the observed AABB.
+    """
+    contact = dict(SUPPORT_PRESS_13H["contact"])
+    corner_offset = (
+        SUPPORT_PRESS_13H["aabb_max"][2] - contact["position_world_m"][2]
+    ) * 1000
+    assert corner_offset == pytest.approx(2.958, abs=2e-3)
+    _, proof = verify_support_contact(
+        _support_press_document(contact),
+        robot_id="piper_1",
+        upper_id="brick-alpha",
+        session_id="session-1",
+        manifest_sha256="a" * 64,
+    )
+    assert proof["confirmed"] is True
+    assert [item["pad_link"] for item in proof["contacts"]] == [
+        "piper_1_gripper_link2"
+    ]
+
+
+def test_support_proof_rejects_a_vertical_reaction_on_the_side_face():
+    """A vertical reaction at mid-height is a side hit, not a top press."""
+    side = dict(SUPPORT_PRESS_13H["contact"])
+    side["position_world_m"] = [
+        SUPPORT_PRESS_13H["contact"]["position_world_m"][0],
+        SUPPORT_PRESS_13H["contact"]["position_world_m"][1],
+        SUPPORT_PRESS_13H["pose"]["position_xyz"][2] + 0.010,
+    ]
+    side["normal_world"] = [0.0, 0.0, -1.0]
+    with pytest.raises(ValueError, match="no measured top-surface contact"):
+        verify_support_contact(
+            _support_press_document(side),
+            robot_id="piper_1",
+            upper_id="brick-alpha",
+            session_id="session-1",
+            manifest_sha256="a" * 64,
+        )
 
 
 def test_build_global_scene_document_rejects_a_sibling_robot_id():

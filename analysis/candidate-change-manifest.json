@@ -1,0 +1,1258 @@
+[
+  {
+    "path": "AGENTS.md",
+    "action": "migrate",
+    "before_sha256": "0327bd8c74b4bfd241ceda64989140e4123fcd99622a7a0d15605880349385f3",
+    "after_sha256": "01048ee1aa69f823192916f623a05368027efb55cc6e8b8a888a48945a9e7e76",
+    "before_bytes": 8363,
+    "after_bytes": 8750
+  },
+  {
+    "path": "README.md",
+    "action": "migrate",
+    "before_sha256": "81d0e82c0c8dd8ba3bd35df0b56d7f0731cd1c42e814c4d3b7d1fe5b17916f21",
+    "after_sha256": "da775a2d45f84cb3ab76502ccc511770eec219eb09aea67022838ed4a66f9736",
+    "before_bytes": 6884,
+    "after_bytes": 8784
+  },
+  {
+    "path": "docker/planner-entrypoint.sh",
+    "action": "remove",
+    "before_sha256": "fbbedb97b5dc2d9baa0555feaf931ae841bc2a2cf4b916bb35a1ab208af3ecab",
+    "after_sha256": null,
+    "before_bytes": 191,
+    "after_bytes": 0
+  },
+  {
+    "path": "docker/planner.Dockerfile",
+    "action": "remove",
+    "before_sha256": "0c2a31bc950a5d28b93921b9626c32b70f039f3e33efc27649e6a6c771dfe323",
+    "after_sha256": null,
+    "before_bytes": 1260,
+    "after_bytes": 0
+  },
+  {
+    "path": "isaac/p05_host_bridge.py",
+    "action": "migrate",
+    "before_sha256": "9237eb192c5a244677ac994272e03341fda3d9ba7225dcaf29cbb744435fa533",
+    "after_sha256": "8812eba88cf43e1c110efb00168244b0f79104d5bee3f672613800d15c9cc42e",
+    "before_bytes": 136607,
+    "after_bytes": 136612
+  },
+  {
+    "path": "planner_ws/UPSTREAM.json",
+    "action": "remove",
+    "before_sha256": "0893fbfb03053aab7ba40ceebc5350aa2988f4625c0b1c771c92cddbe64833f8",
+    "after_sha256": null,
+    "before_bytes": 399,
+    "after_bytes": 0
+  },
+  {
+    "path": "planner_ws/src/agx_arm_description/CMakeLists.txt",
+    "action": "remove",
+    "before_sha256": "7f5f4e1d3c3a48f90cd5abe27865f04b8a9d753902fe8d203586e037bf532932",
+    "after_sha256": null,
+    "before_bytes": 1145,
+    "after_bytes": 0
+  },
+  {
+    "path": "planner_ws/src/agx_arm_description/agx_arm_urdf/LICENSE",
+    "action": "remove",
+    "before_sha256": "247944c63de1573653722ba784f96123da267105b7b48577e0c8826a24b809f6",
+    "after_sha256": null,
+    "before_bytes": 1065,
+    "after_bytes": 0
+  },
+  {
+    "path": "planner_ws/src/agx_arm_description/agx_arm_urdf/piper_l/meshes/base_link.stl",
+    "action": "remove",
+    "before_sha256": "fd4c7563638901bd4167246a3b6eae33cfceff8c7fc59e585f297a88a5752bac",
+    "after_sha256": null,
+    "before_bytes": 1821884,
+    "after_bytes": 0
+  },
+  {
+    "path": "planner_ws/src/agx_arm_description/agx_arm_urdf/piper_l/meshes/dae/base_link.dae",
+    "action": "remove",
+    "before_sha256": "0e9d7d5533d69c02e7b8a71d457b9a634d1ec15c7d5875f4ddb2ea7a188a3227",
+    "after_sha256": null,
+    "before_bytes": 3025180,
+    "after_bytes": 0
+  },
+  {
+    "path": "planner_ws/src/agx_arm_description/agx_arm_urdf/piper_l/meshes/dae/flange.dae",
+    "action": "remove",
+    "before_sha256": "421c3e20c6109df3c96c5ce18ff0b2609b6604135ff790e4bfc1d9a281b0701a",
+    "after_sha256": null,
+    "before_bytes": 285243,
+    "after_bytes": 0
+  },
+  {
+    "path": "planner_ws/src/agx_arm_description/agx_arm_urdf/piper_l/meshes/dae/gripper_base.dae",
+    "action": "remove",
+    "before_sha256": "aaea10ec06709d6a3343dd3378553eee3df40b43ee276df10c5b68ac7f61bae2",
+    "after_sha256": null,
+    "before_bytes": 2721338,
+    "after_bytes": 0
+  },
+  {
+    "path": "planner_ws/src/agx_arm_description/agx_arm_urdf/piper_l/meshes/dae/gripper_link1.dae",
+    "action": "remove",
+    "before_sha256": "b4aaf0e024d09eb0454e70e0c5092638edcf7da7c253d1effdeeaec46f76427b",
+    "after_sha256": null,
+    "before_bytes": 176476,
+    "after_bytes": 0
+  },
+  {
+    "path": "planner_ws/src/agx_arm_description/agx_arm_urdf/piper_l/meshes/dae/gripper_link2.dae",
+    "action": "remove",
+    "before_sha256": "0da1350898b2787b76b84698253aeb1efd2ddb6360b2fa2ae03ecff389883af8",
+    "after_sha256": null,
+    "before_bytes": 176476,
+    "after_bytes": 0
+  },
+  {
+    "path": "planner_ws/src/agx_arm_description/agx_arm_urdf/piper_l/meshes/dae/link1.dae",
+    "action": "remove",
+    "before_sha256": "4e6f3ab3f63f03616926d67d38e87824850f6fecc60e9ad2d3870ae45d7770ab",
+    "after_sha256": null,
+    "before_bytes": 2012473,
+    "after_bytes": 0
+  },
+  {
+    "path": "planner_ws/src/agx_arm_description/agx_arm_urdf/piper_l/meshes/dae/link2.dae",
+    "action": "remove",
+    "before_sha256": "5c77ff7d570544a1550aef83aa89b5c1b886a258ca0c7ff270b484a32baa7b5a",
+    "after_sha256": null,
+    "before_bytes": 6672336,
+    "after_bytes": 0
+  },
+  {
+    "path": "planner_ws/src/agx_arm_description/agx_arm_urdf/piper_l/meshes/dae/link3.dae",
+    "action": "remove",
+    "before_sha256": "fe20123b83a2e0024280505c66017c69a9bd10f9c39f6b7b8a7bf37ffd2729c3",
+    "after_sha256": null,
+    "before_bytes": 3635124,
+    "after_bytes": 0
+  },
+  {
+    "path": "planner_ws/src/agx_arm_description/agx_arm_urdf/piper_l/meshes/dae/link4.dae",
+    "action": "remove",
+    "before_sha256": "7d07ffd61374ceea1de23a058e04f8725142cc543dda157a448175eb837826e9",
+    "after_sha256": null,
+    "before_bytes": 2177276,
+    "after_bytes": 0
+  },
+  {
+    "path": "planner_ws/src/agx_arm_description/agx_arm_urdf/piper_l/meshes/dae/link5.dae",
+    "action": "remove",
+    "before_sha256": "a019c6ebd61251e9b42c6d4df767181f18e134e880b5f21f5a227338f082ccaf",
+    "after_sha256": null,
+    "before_bytes": 2167613,
+    "after_bytes": 0
+  },
+  {
+    "path": "planner_ws/src/agx_arm_description/agx_arm_urdf/piper_l/meshes/dae/link6.dae",
+    "action": "remove",
+    "before_sha256": "42d54ac2d771ddad379fd1603edd0d86c74f9b602958337b2c408bc89421a868",
+    "after_sha256": null,
+    "before_bytes": 234372,
+    "after_bytes": 0
+  },
+  {
+    "path": "planner_ws/src/agx_arm_description/agx_arm_urdf/piper_l/meshes/flange.stl",
+    "action": "remove",
+    "before_sha256": "f9ce752f93a6598858a779e3d8755a09e466b588efcffc3a1c3953773753a22b",
+    "after_sha256": null,
+    "before_bytes": 204584,
+    "after_bytes": 0
+  },
+  {
+    "path": "planner_ws/src/agx_arm_description/agx_arm_urdf/piper_l/meshes/gripper_base.stl",
+    "action": "remove",
+    "before_sha256": "0b839dc0bcb7d94e3422c74f6396b54a0441ba4836448ab5586e7f372d1bdbf3",
+    "after_sha256": null,
+    "before_bytes": 1837884,
+    "after_bytes": 0
+  },
+  {
+    "path": "planner_ws/src/agx_arm_description/agx_arm_urdf/piper_l/meshes/gripper_link1.stl",
+    "action": "remove",
+    "before_sha256": "475a7d8db056524d7659fadf5a2c307d62791047b6214d733dfc7846ed1c613d",
+    "after_sha256": null,
+    "before_bytes": 104384,
+    "after_bytes": 0
+  },
+  {
+    "path": "planner_ws/src/agx_arm_description/agx_arm_urdf/piper_l/meshes/gripper_link2.stl",
+    "action": "remove",
+    "before_sha256": "3f88d534a85e28a33ef7d2061adacbd1d25214aa9325f9e464aad0f9e4b74606",
+    "after_sha256": null,
+    "before_bytes": 104384,
+    "after_bytes": 0
+  },
+  {
+    "path": "planner_ws/src/agx_arm_description/agx_arm_urdf/piper_l/meshes/link1.stl",
+    "action": "remove",
+    "before_sha256": "84d753cd2a9dceac19c6870b0d3078a6abf44ea7ca7360fc5a2e8b1fd0b427cf",
+    "after_sha256": null,
+    "before_bytes": 1156284,
+    "after_bytes": 0
+  },
+  {
+    "path": "planner_ws/src/agx_arm_description/agx_arm_urdf/piper_l/meshes/link2.stl",
+    "action": "remove",
+    "before_sha256": "4d15e9870d8a3e9223fba8b304a508842acfc7cf69c4fc74bb3e9c1bf07260c0",
+    "after_sha256": null,
+    "before_bytes": 2639184,
+    "after_bytes": 0
+  },
+  {
+    "path": "planner_ws/src/agx_arm_description/agx_arm_urdf/piper_l/meshes/link3.stl",
+    "action": "remove",
+    "before_sha256": "4581c9901c0aec55f4f02ddd1a4327404344b0a193cd13b383aaa23429dd9ae2",
+    "after_sha256": null,
+    "before_bytes": 1786784,
+    "after_bytes": 0
+  },
+  {
+    "path": "planner_ws/src/agx_arm_description/agx_arm_urdf/piper_l/meshes/link4.stl",
+    "action": "remove",
+    "before_sha256": "c296926ec78349c963ee6f02098cbd7ef460ec14ba6bc5d4a4577c35176c3bbd",
+    "after_sha256": null,
+    "before_bytes": 1263184,
+    "after_bytes": 0
+  },
+  {
+    "path": "planner_ws/src/agx_arm_description/agx_arm_urdf/piper_l/meshes/link5.stl",
+    "action": "remove",
+    "before_sha256": "de4e3c27a806fd4a60232760dfcf584dd20942ac941e0e0705ef23ecef923d2b",
+    "after_sha256": null,
+    "before_bytes": 1235184,
+    "after_bytes": 0
+  },
+  {
+    "path": "planner_ws/src/agx_arm_description/agx_arm_urdf/piper_l/meshes/link6.stl",
+    "action": "remove",
+    "before_sha256": "91c70e84f44eb685c65d96ff13d66dc9a894eb14460f0dfaa02be45bdb100f6d",
+    "after_sha256": null,
+    "before_bytes": 121584,
+    "after_bytes": 0
+  },
+  {
+    "path": "planner_ws/src/agx_arm_description/agx_arm_urdf/piper_l/urdf/piper_l_description.urdf",
+    "action": "remove",
+    "before_sha256": "d289652c494017ca8d50152343fdbd02fd25c4f1ac3bb80d59d1f2f3cfab6fda",
+    "after_sha256": null,
+    "before_bytes": 7847,
+    "after_bytes": 0
+  },
+  {
+    "path": "planner_ws/src/agx_arm_description/agx_arm_urdf/piper_l/urdf/piper_l_with_gripper_description.xacro",
+    "action": "remove",
+    "before_sha256": "8136b85f30043421fffbde0299806e652ac283a28f5ce7485d52903eb4aa4c4c",
+    "after_sha256": null,
+    "before_bytes": 5211,
+    "after_bytes": 0
+  },
+  {
+    "path": "planner_ws/src/agx_arm_description/agx_arm_urdf/piper_l/urdf/piper_l_with_left_revo2_description.xacro",
+    "action": "remove",
+    "before_sha256": "d38ff4ee2f10d91f155a687cb0408a88f38f75ed769e9057f3500e6d2d4cf505",
+    "after_sha256": null,
+    "before_bytes": 1873,
+    "after_bytes": 0
+  },
+  {
+    "path": "planner_ws/src/agx_arm_description/agx_arm_urdf/piper_l/urdf/piper_l_with_right_revo2_description.xacro",
+    "action": "remove",
+    "before_sha256": "8520d96fc6e393ff739ae494f1e9d6cc4f17852e7073d89768aa8cbc52dbc336",
+    "after_sha256": null,
+    "before_bytes": 1875,
+    "after_bytes": 0
+  },
+  {
+    "path": "planner_ws/src/agx_arm_description/launch/display.launch.py",
+    "action": "remove",
+    "before_sha256": "61fd38c822b4ff6f1fa21449801acbf82c8e10e96a3c1082ca22d05379bec67a",
+    "after_sha256": null,
+    "before_bytes": 10049,
+    "after_bytes": 0
+  },
+  {
+    "path": "planner_ws/src/agx_arm_description/package.xml",
+    "action": "remove",
+    "before_sha256": "723aac06351e5b0437437f75f2c214cdab3265438205c54a68c33bff7fca7ceb",
+    "after_sha256": null,
+    "before_bytes": 903,
+    "after_bytes": 0
+  },
+  {
+    "path": "planner_ws/src/agx_arm_description/rviz/display.rviz",
+    "action": "remove",
+    "before_sha256": "98e2744b7571d1c6319336f0518976099912848b203dbaf8c2167817d87dcce2",
+    "after_sha256": null,
+    "before_bytes": 6514,
+    "after_bytes": 0
+  },
+  {
+    "path": "planner_ws/src/agx_arm_moveit/CMakeLists.txt",
+    "action": "remove",
+    "before_sha256": "24e87f7e0c296275b7291a422918a14406e7e11b33627c98e3db736930ad6242",
+    "after_sha256": null,
+    "before_bytes": 265,
+    "after_bytes": 0
+  },
+  {
+    "path": "planner_ws/src/agx_arm_moveit/README.md",
+    "action": "remove",
+    "before_sha256": "10b78226003da8acf4147808a997ffaf8574fa74f76b0133061dcf14453a3866",
+    "after_sha256": null,
+    "before_bytes": 15675,
+    "after_bytes": 0
+  },
+  {
+    "path": "planner_ws/src/agx_arm_moveit/README_EN.md",
+    "action": "remove",
+    "before_sha256": "0d8cab017ea630dd02c0a3e1100bb4377aa3496705772db3e072d08fcb2ce58b",
+    "after_sha256": null,
+    "before_bytes": 16316,
+    "after_bytes": 0
+  },
+  {
+    "path": "planner_ws/src/agx_arm_moveit/assets/pictures/piper_moveit.png",
+    "action": "remove",
+    "before_sha256": "07c24c13b12955d9c44b8c49d3b28186fda9cf8364ccaa74c9caedebfa70301d",
+    "after_sha256": null,
+    "before_bytes": 447144,
+    "after_bytes": 0
+  },
+  {
+    "path": "planner_ws/src/agx_arm_moveit/config/agx_arm.ros2_control.xacro",
+    "action": "remove",
+    "before_sha256": "ce846c35053787381c66fe35cb7bb2246cf301f9bcfb17ac12cc04b79c79402a",
+    "after_sha256": null,
+    "before_bytes": 6295,
+    "after_bytes": 0
+  },
+  {
+    "path": "planner_ws/src/agx_arm_moveit/config/agx_arm.srdf",
+    "action": "remove",
+    "before_sha256": "3c8043a066e7225a5191fd98abf1e2fd19a8423fa3a67d554b62846886bfd0db",
+    "after_sha256": null,
+    "before_bytes": 442,
+    "after_bytes": 0
+  },
+  {
+    "path": "planner_ws/src/agx_arm_moveit/config/agx_arm.srdf.xacro",
+    "action": "remove",
+    "before_sha256": "6780a019069957044dfc2e03e013b2e78885156dd43e408d5889ac48718f3d06",
+    "after_sha256": null,
+    "before_bytes": 29695,
+    "after_bytes": 0
+  },
+  {
+    "path": "planner_ws/src/agx_arm_moveit/config/agx_arm.urdf.xacro",
+    "action": "remove",
+    "before_sha256": "ab4b8b16f8ce532a9a448f4032befc3cce85377671a55e2bc560bad74d817443",
+    "after_sha256": null,
+    "before_bytes": 2054,
+    "after_bytes": 0
+  },
+  {
+    "path": "planner_ws/src/agx_arm_moveit/config/initial_positions.yaml",
+    "action": "remove",
+    "before_sha256": "7b58ace078698e6f0fb4de7a6e74ea71fd4fa6e85e2a6d0263e54873cbbe46e5",
+    "after_sha256": null,
+    "before_bytes": 538,
+    "after_bytes": 0
+  },
+  {
+    "path": "planner_ws/src/agx_arm_moveit/config/joint_limits.yaml",
+    "action": "remove",
+    "before_sha256": "e88ab639f70befb7f573c426c3cb853f22889ce1c2096d385d83226bdf4a57ff",
+    "after_sha256": null,
+    "before_bytes": 1070,
+    "after_bytes": 0
+  },
+  {
+    "path": "planner_ws/src/agx_arm_moveit/config/kinematics.yaml",
+    "action": "remove",
+    "before_sha256": "45decb66f2b4b1e26378f3f1fffb4854e8acc18a929dc04602f1acefc286f394",
+    "after_sha256": null,
+    "before_bytes": 148,
+    "after_bytes": 0
+  },
+  {
+    "path": "planner_ws/src/agx_arm_moveit/config/moveit.rviz",
+    "action": "remove",
+    "before_sha256": "95e6b0cfe58fdc9e754ccfe648ea6ee630596c2c0114bb5b3304771b9b93b0f8",
+    "after_sha256": null,
+    "before_bytes": 2006,
+    "after_bytes": 0
+  },
+  {
+    "path": "planner_ws/src/agx_arm_moveit/config/moveit_controllers_gripper.yaml",
+    "action": "remove",
+    "before_sha256": "a2d55027329e5d4d05b38d0820dc229fa02b701b563cf8e8d2587b29573c7192",
+    "after_sha256": null,
+    "before_bytes": 541,
+    "after_bytes": 0
+  },
+  {
+    "path": "planner_ws/src/agx_arm_moveit/config/moveit_controllers_none.yaml",
+    "action": "remove",
+    "before_sha256": "95b895d5882291361b36574e2bf18824290d21000f2c3f64469cc71d89d7f019",
+    "after_sha256": null,
+    "before_bytes": 376,
+    "after_bytes": 0
+  },
+  {
+    "path": "planner_ws/src/agx_arm_moveit/config/moveit_controllers_revo2_left.yaml",
+    "action": "remove",
+    "before_sha256": "32e5fc84284476e578684632574002f9f900534c02cd1a0125d41dc40a25ed50",
+    "after_sha256": null,
+    "before_bytes": 735,
+    "after_bytes": 0
+  },
+  {
+    "path": "planner_ws/src/agx_arm_moveit/config/moveit_controllers_revo2_right.yaml",
+    "action": "remove",
+    "before_sha256": "d7458f4762fa62eaff95300d9177f4a079ea4db7417b427ab07f2929b158dd74",
+    "after_sha256": null,
+    "before_bytes": 743,
+    "after_bytes": 0
+  },
+  {
+    "path": "planner_ws/src/agx_arm_moveit/config/pilz_cartesian_limits.yaml",
+    "action": "remove",
+    "before_sha256": "fed80b213b77f13fb7b913d703609a66caa72ccb0617b41e83d3057e31749047",
+    "after_sha256": null,
+    "before_bytes": 133,
+    "after_bytes": 0
+  },
+  {
+    "path": "planner_ws/src/agx_arm_moveit/config/ros2_controllers.yaml",
+    "action": "remove",
+    "before_sha256": "6726663eb55efb4685e3b43cefdbe4156a8911e845e4a8f39c31c2ce76d749b1",
+    "after_sha256": null,
+    "before_bytes": 1838,
+    "after_bytes": 0
+  },
+  {
+    "path": "planner_ws/src/agx_arm_moveit/config/ros2_controllers_nero.yaml",
+    "action": "remove",
+    "before_sha256": "c7db7ffeec222e81f7ab9c901e3d5b9a2fd8508363b01e8f7bd5f94c3cca1012",
+    "after_sha256": null,
+    "before_bytes": 1853,
+    "after_bytes": 0
+  },
+  {
+    "path": "planner_ws/src/agx_arm_moveit/config/sensors_3d.yaml",
+    "action": "remove",
+    "before_sha256": "f847bb31631495d913ec41f95a736d339cc73004ae31c48669707dc5baf9b8f1",
+    "after_sha256": null,
+    "before_bytes": 308,
+    "after_bytes": 0
+  },
+  {
+    "path": "planner_ws/src/agx_arm_moveit/launch/_moveit_config_builder.py",
+    "action": "remove",
+    "before_sha256": "22028a0705703965fb25439cc81c6e788bbf446e7dafbf733c297206912a7666",
+    "after_sha256": null,
+    "before_bytes": 4162,
+    "after_bytes": 0
+  },
+  {
+    "path": "planner_ws/src/agx_arm_moveit/launch/demo.launch.py",
+    "action": "remove",
+    "before_sha256": "ca60e75909f49460710687825d2acd6343eae523b996cfbe60c9c8f50d1e0d17",
+    "after_sha256": null,
+    "before_bytes": 9755,
+    "after_bytes": 0
+  },
+  {
+    "path": "planner_ws/src/agx_arm_moveit/launch/move_group.launch.py",
+    "action": "remove",
+    "before_sha256": "22e077994ad9dfe3d30eaf6f41d59d7fec295b1a0ff852a3c8913613a2092d77",
+    "after_sha256": null,
+    "before_bytes": 3603,
+    "after_bytes": 0
+  },
+  {
+    "path": "planner_ws/src/agx_arm_moveit/launch/moveit_rviz.launch.py",
+    "action": "remove",
+    "before_sha256": "5b52ea10de0635fecbcb7624f451b3481690a185fef446183deb27702c355c55",
+    "after_sha256": null,
+    "before_bytes": 1388,
+    "after_bytes": 0
+  },
+  {
+    "path": "planner_ws/src/agx_arm_moveit/launch/rsp.launch.py",
+    "action": "remove",
+    "before_sha256": "59e9fc23df7d1bd0d772cabb0153f13efe5efecc2257e6540ef74aaa2a994626",
+    "after_sha256": null,
+    "before_bytes": 1142,
+    "after_bytes": 0
+  },
+  {
+    "path": "planner_ws/src/agx_arm_moveit/launch/spawn_controllers.launch.py",
+    "action": "remove",
+    "before_sha256": "d8ddbf913726e4de075138a6b9975e1e1c7feaaf3206d913f61788e3855350c4",
+    "after_sha256": null,
+    "before_bytes": 592,
+    "after_bytes": 0
+  },
+  {
+    "path": "planner_ws/src/agx_arm_moveit/launch/static_virtual_joint_tfs.launch.py",
+    "action": "remove",
+    "before_sha256": "180c255437239a69a2c407dde3e83127093c5217e3ec35e98b3e5d02e97fd143",
+    "after_sha256": null,
+    "before_bytes": 606,
+    "after_bytes": 0
+  },
+  {
+    "path": "planner_ws/src/agx_arm_moveit/launch/warehouse_db.launch.py",
+    "action": "remove",
+    "before_sha256": "6531907c3f49a3cf128a8cbe8c49a3ef11b61014bf1033c586148c40fbe400fb",
+    "after_sha256": null,
+    "before_bytes": 582,
+    "after_bytes": 0
+  },
+  {
+    "path": "planner_ws/src/agx_arm_moveit/package.xml",
+    "action": "remove",
+    "before_sha256": "ae2e0703bdf62c90f9ef9c1e3cacb333bbd53f397f88bfff163512241708ad98",
+    "after_sha256": null,
+    "before_bytes": 1659,
+    "after_bytes": 0
+  },
+  {
+    "path": "planner_ws/src/agx_arm_moveit/scripts/agx_arm_control_gate",
+    "action": "remove",
+    "before_sha256": "5dd444e1f686355939faad14b8e613489227378858442b16c9e90358a4d3887e",
+    "after_sha256": null,
+    "before_bytes": 2805,
+    "after_bytes": 0
+  },
+  {
+    "path": "planner_ws/src/rocobrick_moveit_config/CMakeLists.txt",
+    "action": "remove",
+    "before_sha256": "9df835096d35174cfaea3290d82f38366e13d3f71a4a758c17eca46344b028aa",
+    "after_sha256": null,
+    "before_bytes": 268,
+    "after_bytes": 0
+  },
+  {
+    "path": "planner_ws/src/rocobrick_moveit_config/config/joint_limits.yaml",
+    "action": "remove",
+    "before_sha256": "8d195f78c77f2895f4fa7472bd0d9774e503c361026b7a11233daaa0a75adcc2",
+    "after_sha256": null,
+    "before_bytes": 1520,
+    "after_bytes": 0
+  },
+  {
+    "path": "planner_ws/src/rocobrick_moveit_config/config/kinematics.yaml",
+    "action": "remove",
+    "before_sha256": "edc0e231483d453d94021c2e5401e27fde6755dc62f1c7ba05cb104c45549843",
+    "after_sha256": null,
+    "before_bytes": 310,
+    "after_bytes": 0
+  },
+  {
+    "path": "planner_ws/src/rocobrick_moveit_config/launch/planning_only.launch.py",
+    "action": "remove",
+    "before_sha256": "e4d10b1c312879c9c8893fad25faf25cb1862c24e167be4281105c4986dfb88f",
+    "after_sha256": null,
+    "before_bytes": 1513,
+    "after_bytes": 0
+  },
+  {
+    "path": "planner_ws/src/rocobrick_moveit_config/package.xml",
+    "action": "remove",
+    "before_sha256": "1d07d0c6affc5c1c91a5711436c2a586f6021bd475b468d1ae12e97b21d54081",
+    "after_sha256": null,
+    "before_bytes": 542,
+    "after_bytes": 0
+  },
+  {
+    "path": "planner_ws/src/rocobrick_moveit_config/scripts/generate_dual_model.py",
+    "action": "remove",
+    "before_sha256": "ccbe3178b119f5d77963e1f1553388bc0b4e3624d77efa3d8cfa59d9030f420d",
+    "after_sha256": null,
+    "before_bytes": 6628,
+    "after_bytes": 0
+  },
+  {
+    "path": "planner_ws/src/rocobrick_planner/CMakeLists.txt",
+    "action": "remove",
+    "before_sha256": "faa36fba9e1096fa6ad126b1ad0126e8191d1291e913a0d273b8923fa4183ad0",
+    "after_sha256": null,
+    "before_bytes": 1927,
+    "after_bytes": 0
+  },
+  {
+    "path": "planner_ws/src/rocobrick_planner/package.xml",
+    "action": "remove",
+    "before_sha256": "0a8b4519f77ae948fa213caf5987fc870fce6ace52a15b6c69ee34873bc7a1fc",
+    "after_sha256": null,
+    "before_bytes": 636,
+    "after_bytes": 0
+  },
+  {
+    "path": "planner_ws/src/rocobrick_planner/proto/planner.proto",
+    "action": "remove",
+    "before_sha256": "357ff124469a3d715ac6d0590a14e0aca0a0e89b077c4b4a6792323eefed751c",
+    "after_sha256": null,
+    "before_bytes": 1964,
+    "after_bytes": 0
+  },
+  {
+    "path": "planner_ws/src/rocobrick_planner/src/planner_server.cpp",
+    "action": "remove",
+    "before_sha256": "8aef8c59fee2685b36d0bddaa2552243b98390157032d77664d55c0d9abbfe4d",
+    "after_sha256": null,
+    "before_bytes": 17252,
+    "after_bytes": 0
+  },
+  {
+    "path": "proto/planner/v1/planner.proto",
+    "action": "remove",
+    "before_sha256": "9c2e5896ae7bf24fc7be6a7d966b475195c257486b4b0b7615b96fc72d1f04a8",
+    "after_sha256": null,
+    "before_bytes": 1944,
+    "after_bytes": 0
+  },
+  {
+    "path": "ros_ws/src/rocobrick_piper_l_moveit_config/CMakeLists.txt",
+    "action": "migrate",
+    "before_sha256": "f122d7ee21e5b26e3795d60fa136996e4f16d70642b0718b2c2b599ede76140b",
+    "after_sha256": "4ed42429dcc76fa8f2e66b1a3cb07b0b5a57f61b5a754dae2eb1a84f527b1d63",
+    "before_bytes": 1299,
+    "after_bytes": 1248
+  },
+  {
+    "path": "ros_ws/src/rocobrick_piper_l_moveit_config/launch/dual_arm_move_group.launch.py",
+    "action": "migrate",
+    "before_sha256": "76b2824d4d34488cf734df4e15b290edf2a7ff6ae797899685030e027278f84e",
+    "after_sha256": "fbe7f6cc829015368503dc595a7c9a046da169dd1de3bd2fa0656b9e1669b407",
+    "before_bytes": 7005,
+    "after_bytes": 6924
+  },
+  {
+    "path": "ros_ws/src/rocobrick_piper_l_moveit_config/launch/dual_move_group.launch.py",
+    "action": "remove",
+    "before_sha256": "c48fae8568adb0738ac8edd95118102c17dc48d7d49e8e0093ec19103dc0fccf",
+    "after_sha256": null,
+    "before_bytes": 8863,
+    "after_bytes": 0
+  },
+  {
+    "path": "ros_ws/src/rocobrick_piper_l_moveit_config/launch/move_group.launch.py",
+    "action": "remove",
+    "before_sha256": "d8298a61a8d474fdb0ffb88921ef621a028d4138142a27511dc889270cad61fa",
+    "after_sha256": null,
+    "before_bytes": 4595,
+    "after_bytes": 0
+  },
+  {
+    "path": "ros_ws/src/rocobrick_piper_l_moveit_config/launch/stage4_fake_controllers.launch.py",
+    "action": "remove",
+    "before_sha256": "1e52b09b382823b697be7d735696b0bbbf8aa0733adc680be2f3b5395bb3640b",
+    "after_sha256": null,
+    "before_bytes": 583,
+    "after_bytes": 0
+  },
+  {
+    "path": "ros_ws/src/rocobrick_piper_l_moveit_config/scripts/stage4_fake_arm_controller.py",
+    "action": "remove",
+    "before_sha256": "87575440eef999b77070a857c5dd96e915cda66f2b3343742456e838545146a1",
+    "after_sha256": null,
+    "before_bytes": 3800,
+    "after_bytes": 0
+  },
+  {
+    "path": "run/pregrasp_v2.py",
+    "action": "remove",
+    "before_sha256": "4ad96b12a359d2d4a75210486fbb837f7ccebbbf0e9be1beb489a619aeaaed67",
+    "after_sha256": null,
+    "before_bytes": 30136,
+    "after_bytes": 0
+  },
+  {
+    "path": "src/rocobrick/__init__.py",
+    "action": "migrate",
+    "before_sha256": "20f895efddc1c641635f8a3ee9cf7bc2d36e9bd2497a11a5781a1dfe78066789",
+    "after_sha256": "a10cbd143ded027b68ec9bf1cc7bff6439c10a48331d201b64e46650e7880953",
+    "before_bytes": 267,
+    "after_bytes": 181
+  },
+  {
+    "path": "src/rocobrick/adapters/moveit/transit.py",
+    "action": "migrate",
+    "before_sha256": "bd22a8d628bb08473f6d1528fa91ea47a6346f20aa79544669f4887a9db54a61",
+    "after_sha256": "46105036edf928ab2db48036356cb9bc456ef6338d057f8bc6bf39289e03c7ed",
+    "before_bytes": 13295,
+    "after_bytes": 13296
+  },
+  {
+    "path": "src/rocobrick/bricksim_backend.py",
+    "action": "remove",
+    "before_sha256": "bafb8609cfa37effd6005366bc4fd191cd5ad8ecddbd77f289f7f1e557da2a89",
+    "after_sha256": null,
+    "before_bytes": 5792,
+    "after_bytes": 0
+  },
+  {
+    "path": "src/rocobrick/execution.py",
+    "action": "remove",
+    "before_sha256": "bf9655a85f614f5bb19ca837867b33652162edcb22171eb9ccce6b99ca4f3c0b",
+    "after_sha256": null,
+    "before_bytes": 348,
+    "after_bytes": 0
+  },
+  {
+    "path": "src/rocobrick/execution/robot_operation_executor.py",
+    "action": "migrate",
+    "before_sha256": "0676f167986de85d514fa75a55aa642cfd8ca567142c91f2ec118d9ad6e4e028",
+    "after_sha256": "95982c7501b0a202bcbf5481e785ca5d3f37643f0215b485edcbd846611eebe4",
+    "before_bytes": 68982,
+    "after_bytes": 67101
+  },
+  {
+    "path": "src/rocobrick/generated/__init__.py",
+    "action": "remove",
+    "before_sha256": "b36334839c2590efc8ec1af03ad98fac2670a9f5647bc6dedf656b767877458a",
+    "after_sha256": null,
+    "before_bytes": 42,
+    "after_bytes": 0
+  },
+  {
+    "path": "src/rocobrick/generated/planner_pb2.py",
+    "action": "remove",
+    "before_sha256": "5bf9042a965351259f81045514b6b98c3eafa6e059cbe7a0bfa0a59642de9bd6",
+    "after_sha256": null,
+    "before_bytes": 5875,
+    "after_bytes": 0
+  },
+  {
+    "path": "src/rocobrick/generated/planner_pb2_grpc.py",
+    "action": "remove",
+    "before_sha256": "ce4ef5f6257dda3b0ec0f2de2f92ad6aef6dc8681baa851c0e0b5af2c9b41fd7",
+    "after_sha256": null,
+    "before_bytes": 5008,
+    "after_bytes": 0
+  },
+  {
+    "path": "src/rocobrick/operation_state_ledger.py",
+    "action": "remove",
+    "before_sha256": "91f47c806c1707480d20c6607a4d222c22e690f817390eba4d4d34da1a4dbbc5",
+    "after_sha256": null,
+    "before_bytes": 122,
+    "after_bytes": 0
+  },
+  {
+    "path": "src/rocobrick/piper_run.py",
+    "action": "migrate",
+    "before_sha256": "eeec436f6f06cd931c3f31596fca64b74b7b890497ffee6d596c05151a6df056",
+    "after_sha256": "c4deaaf109ff2de304591288e00b9341730c6ae0c90a3e9bb6286b84e7216854",
+    "before_bytes": 154337,
+    "after_bytes": 154357
+  },
+  {
+    "path": "src/rocobrick/planner_client.py",
+    "action": "remove",
+    "before_sha256": "93ae36d1e6c4a68c57dd88a06712e4f1192f6d9ec6f79a9d2e466eb96322a4bf",
+    "after_sha256": null,
+    "before_bytes": 4709,
+    "after_bytes": 0
+  },
+  {
+    "path": "src/rocobrick/planner_contract.py",
+    "action": "remove",
+    "before_sha256": "f8808d6ae8a91836f81fd552fe8b726cac7aa1e0f4d1572828e4883941983b48",
+    "after_sha256": null,
+    "before_bytes": 1654,
+    "after_bytes": 0
+  },
+  {
+    "path": "src/rocobrick/robot_operation_executor.py",
+    "action": "remove",
+    "before_sha256": "a93e39620a7434c072779b5b8959a0b94074f392b97357f06207e3a8943c3db8",
+    "after_sha256": null,
+    "before_bytes": 124,
+    "after_bytes": 0
+  },
+  {
+    "path": "src/rocobrick/runtime_session.py",
+    "action": "migrate",
+    "before_sha256": "78e4203f8413d5130442f0b1a1a79c6d1ab1a319d8bf78e03af675c207b25248",
+    "after_sha256": "db605e4a4460e30187aabaf23f245f6b4dc840d3aea3d01173cb99fa8cfecadb",
+    "before_bytes": 167332,
+    "after_bytes": 124505
+  },
+  {
+    "path": "src/rocobrick/scene_snapshot_collector.py.orig",
+    "action": "remove",
+    "before_sha256": "b4dc795462d8c0d0dc3928dd43449a40fa6435af4dedc35a79aedf2761fd9a64",
+    "after_sha256": null,
+    "before_bytes": 16320,
+    "after_bytes": 0
+  },
+  {
+    "path": "src/rocobrick/scheduling/__init__.py",
+    "action": "remove",
+    "before_sha256": "0837f4e6b267c9a62ff8bd3711779c11360187b2ef592763d0695e393ae5b0a4",
+    "after_sha256": null,
+    "before_bytes": 26,
+    "after_bytes": 0
+  },
+  {
+    "path": "src/rocobrick/session_phase_backend.py",
+    "action": "remove",
+    "before_sha256": "5962276c85ac88c358b44f3325d2b10339cbfdf34563090a7b20976a84465406",
+    "after_sha256": null,
+    "before_bytes": 107,
+    "after_bytes": 0
+  },
+  {
+    "path": "src/rocobrick/skill_execution.py",
+    "action": "remove",
+    "before_sha256": "39b35381164fd37487afc0fd68a1f730e4e812179f1fc7873ccea0e69af783a0",
+    "after_sha256": null,
+    "before_bytes": 103,
+    "after_bytes": 0
+  },
+  {
+    "path": "src/rocobrick/skill_targets.py",
+    "action": "remove",
+    "before_sha256": "457be00f05aefe710327ad0249b6fb90bb936147d22d9ae58f9b96f7ef7a4f5e",
+    "after_sha256": null,
+    "before_bytes": 169,
+    "after_bytes": 0
+  },
+  {
+    "path": "src/rocobrick/skills.py",
+    "action": "remove",
+    "before_sha256": "52a302fd99ab54d7870ce4797b0a86d51d1210a0eeac9cc9550b4c949d87f8fd",
+    "after_sha256": null,
+    "before_bytes": 285,
+    "after_bytes": 0
+  },
+  {
+    "path": "src/rocobrick/skills/__init__.py",
+    "action": "migrate",
+    "before_sha256": "5439ee0f392667931320e82be58d6d97959c0cc15abd0ad68dec164d1080a831",
+    "after_sha256": "437fbfead0cdd84655a7dc65969be8c345394a89cb49692e6ab7b28ae25d6b12",
+    "before_bytes": 144,
+    "after_bytes": 72
+  },
+  {
+    "path": "src/rocobrick/skills/execution.py",
+    "action": "migrate",
+    "before_sha256": "1ab7cfe143d5e4a86ea437f2ac994103279e43728293b06309bec51e9e21d189",
+    "after_sha256": "08286d0b27117a8ca04436c9c1b3ba1931dc2a2cab488aee7a33e0b966d9b75d",
+    "before_bytes": 4103,
+    "after_bytes": 4112
+  },
+  {
+    "path": "src/rocobrick/skills/handover.py",
+    "action": "remove",
+    "before_sha256": "09fc1db1cf41947fae8a23cd06668b5df14b5474e8f7967ce539f384ef93eb5b",
+    "after_sha256": null,
+    "before_bytes": 22744,
+    "after_bytes": 0
+  },
+  {
+    "path": "src/rocobrick/skills/handover_waypoints.py",
+    "action": "remove",
+    "before_sha256": "8070d4f70a1ac4739e789cd0faac4b6bd627de83ad408faaa37d8cd710945b00",
+    "after_sha256": null,
+    "before_bytes": 2083,
+    "after_bytes": 0
+  },
+  {
+    "path": "src/rocobrick/skills/phase_backend.py",
+    "action": "remove",
+    "before_sha256": "d10d946a27b7f64e490a5880d216cb4b9b11ef01e4d80ba3561439b18700953b",
+    "after_sha256": null,
+    "before_bytes": 24417,
+    "after_bytes": 0
+  },
+  {
+    "path": "src/rocobrick/skills/pick.py",
+    "action": "migrate",
+    "before_sha256": "eacb71622e90e9f2a917632eb379da4fbd57de38fef1ed57dd950e210ad8dc4e",
+    "after_sha256": "47852a847992bd9414ec420c8027e1a3b331572bf063a01745da269cc41dcb19",
+    "before_bytes": 61125,
+    "after_bytes": 61133
+  },
+  {
+    "path": "src/rocobrick/skills/place_down.py",
+    "action": "migrate",
+    "before_sha256": "c68d001954fa85afa023cd2da37377733693327e33ca652a9a08f76423795b44",
+    "after_sha256": "aa5eeac1f536ac51e39a6679da8527f5e6444c6840428b40105b66c7e691691c",
+    "before_bytes": 52817,
+    "after_bytes": 52825
+  },
+  {
+    "path": "src/rocobrick/skills/place_up.py",
+    "action": "migrate",
+    "before_sha256": "30944cd1b0f86287a0b4690b68767a05685371c407ea0c192aba8b0b1e1c5839",
+    "after_sha256": "e7b7aede697bb8f63eadaa06e60f4db107edb802ea7c63211a3fd879ee127571",
+    "before_bytes": 48578,
+    "after_bytes": 48586
+  },
+  {
+    "path": "src/rocobrick/skills/support_top.py",
+    "action": "migrate",
+    "before_sha256": "2a23950270ad55508e2816226e05b8aaa4a68266fd62229c50c2d1623f2fb226",
+    "after_sha256": "7f7c1ca83d9700a3f87f7c620dea72e9b419f7070f5131fd4dced41855e60c0b",
+    "before_bytes": 20402,
+    "after_bytes": 20410
+  },
+  {
+    "path": "src/rocobrick/stap_schedule.py",
+    "action": "remove",
+    "before_sha256": "97c910486b7023381d87a34506b67638686760fead0b0c128900cbcbca44f8a3",
+    "after_sha256": null,
+    "before_bytes": 9092,
+    "after_bytes": 0
+  },
+  {
+    "path": "src/rocobrick/structure_scene.py",
+    "action": "remove",
+    "before_sha256": "999ad67204c4c318acb86e11826913ab446e2bc29ce83937b1380fc1f3673512",
+    "after_sha256": null,
+    "before_bytes": 105,
+    "after_bytes": 0
+  },
+  {
+    "path": "src/rocobrick/supervision.py",
+    "action": "remove",
+    "before_sha256": "ac8ae181062a865f75f8a901440c948060db9876833f8d645c63f93b2ac3fe67",
+    "after_sha256": null,
+    "before_bytes": 1866,
+    "after_bytes": 0
+  },
+  {
+    "path": "src/rocobrick/trajectory_execution.py",
+    "action": "remove",
+    "before_sha256": "f7d0bd64bfbfddba7d9c704f204a6fe9635e93adefbf390f67c39194eae2cc51",
+    "after_sha256": null,
+    "before_bytes": 5984,
+    "after_bytes": 0
+  },
+  {
+    "path": "src/rocobrick/transit_adapter.py",
+    "action": "remove",
+    "before_sha256": "65e0fff681ac3cf4e3bcdcf99b7718db9a7aae550c6c1f4de4ae8fd3ab093da3",
+    "after_sha256": null,
+    "before_bytes": 118,
+    "after_bytes": 0
+  },
+  {
+    "path": "src/rocobrick/verification.py",
+    "action": "remove",
+    "before_sha256": "432a777d5b9c1952c7937210e9e85deb23c44718557f1ebc05a7cc89716ef616",
+    "after_sha256": null,
+    "before_bytes": 1204,
+    "after_bytes": 0
+  },
+  {
+    "path": "tests/b2-handover-safety-migration.md",
+    "action": "add",
+    "before_sha256": null,
+    "after_sha256": "fa10a64e74abb836eb67a5e77f040339cbdc3d167a3caf8822495f557dafd163",
+    "before_bytes": 0,
+    "after_bytes": 6821
+  },
+  {
+    "path": "tests/fixtures/historical_provenance/02b5f86513f1daaf6763b787c5a791b1acd0a7656e8cf0fb1e5420e623f9cae3.bin",
+    "action": "add",
+    "before_sha256": null,
+    "after_sha256": "02b5f86513f1daaf6763b787c5a791b1acd0a7656e8cf0fb1e5420e623f9cae3",
+    "before_bytes": 0,
+    "after_bytes": 3383
+  },
+  {
+    "path": "tests/fixtures/historical_provenance/25acef85d11dd19bd5ab5d53ce68254d11028cb55380b7ec43bd1dc033108724.bin",
+    "action": "add",
+    "before_sha256": null,
+    "after_sha256": "25acef85d11dd19bd5ab5d53ce68254d11028cb55380b7ec43bd1dc033108724",
+    "before_bytes": 0,
+    "after_bytes": 7988
+  },
+  {
+    "path": "tests/fixtures/historical_provenance/4ad96b12a359d2d4a75210486fbb837f7ccebbbf0e9be1beb489a619aeaaed67.bin",
+    "action": "add",
+    "before_sha256": null,
+    "after_sha256": "4ad96b12a359d2d4a75210486fbb837f7ccebbbf0e9be1beb489a619aeaaed67",
+    "before_bytes": 0,
+    "after_bytes": 30136
+  },
+  {
+    "path": "tests/fixtures/historical_provenance/README.md",
+    "action": "add",
+    "before_sha256": null,
+    "after_sha256": "36345dc6428b2257bf477f628aa33d2812d48758429e20cfc36299052c3867b3",
+    "before_bytes": 0,
+    "after_bytes": 457
+  },
+  {
+    "path": "tests/fixtures/historical_provenance/e48b31f7947c5b73ae1d5242afaf75e297bb6b83d1977c512680e0a3b06bedcf.bin",
+    "action": "add",
+    "before_sha256": null,
+    "after_sha256": "e48b31f7947c5b73ae1d5242afaf75e297bb6b83d1977c512680e0a3b06bedcf",
+    "before_bytes": 0,
+    "after_bytes": 6387
+  },
+  {
+    "path": "tests/fixtures/historical_provenance/index.json",
+    "action": "add",
+    "before_sha256": null,
+    "after_sha256": "a39e47f010fca17263823ab94027da2bcd08211fe5452ca4e9f970bd67cecc16",
+    "before_bytes": 0,
+    "after_bytes": 969
+  },
+  {
+    "path": "tests/test_assets.py",
+    "action": "migrate",
+    "before_sha256": "3c1438dbb2f9659bb7005e5579a9df7acc54d33a25bf5440d79c620c2cbcdc76",
+    "after_sha256": "8dd21eb023418cb33724697c9b04c1395560d5d63a6c7add7f59c2c703e66fd3",
+    "before_bytes": 2310,
+    "after_bytes": 772
+  },
+  {
+    "path": "tests/test_bricksim_backend.py",
+    "action": "remove",
+    "before_sha256": "b4862481774e5c04d22e1226ea5c58adfa7719163d0df69d03d0ef2bcc6b1af7",
+    "after_sha256": null,
+    "before_bytes": 2707,
+    "after_bytes": 0
+  },
+  {
+    "path": "tests/test_dual_model_generation.py",
+    "action": "remove",
+    "before_sha256": "df52d54339128be851a7b092c57e63fada0b5472bece2c6b0fbe261527db153e",
+    "after_sha256": null,
+    "before_bytes": 1502,
+    "after_bytes": 0
+  },
+  {
+    "path": "tests/test_dual_robot_profile_launch.py",
+    "action": "migrate",
+    "before_sha256": "7b502677661edac3eaa92353ba75d55252a8164a1845227035f07f1a224717db",
+    "after_sha256": "7f4da9eb77b717309a03e117ef3928cef1bb9564940987f3b4b15ecbd81f03ba",
+    "before_bytes": 25308,
+    "after_bytes": 23315
+  },
+  {
+    "path": "tests/test_handoff_contract.py",
+    "action": "migrate",
+    "before_sha256": "8c0a9fa09ac7be370520f91804662c20f58c98650c3acae72c9fea050711c0e3",
+    "after_sha256": "9b4c878f8cee7c9c7bfb7d0b22cfb78b365dd9485428f111d531943f370b224e",
+    "before_bytes": 10819,
+    "after_bytes": 10339
+  },
+  {
+    "path": "tests/test_handover_runtime_safety.py",
+    "action": "migrate",
+    "before_sha256": "dfda3c9f13ebb51c31965ebdee034153cc4f494db23ba623f6ffa7b622605ce2",
+    "after_sha256": "e5b1cebb07689dfb328edff9f42355b754b1e026645ee236c69928d32d1be9fb",
+    "before_bytes": 16954,
+    "after_bytes": 14648
+  },
+  {
+    "path": "tests/test_operation_state_ledger.py",
+    "action": "migrate",
+    "before_sha256": "447b9988423f018453a3358fe57bf259a7778a54de7a06ce189f138255caa805",
+    "after_sha256": "6c936a5d58061433465866f7cb0caf4c06acfe0a05b49ec677e96eca5490a621",
+    "before_bytes": 6003,
+    "after_bytes": 6013
+  },
+  {
+    "path": "tests/test_p1_moveit_config.py",
+    "action": "migrate",
+    "before_sha256": "3fd333b8282ac520a2ef5d23daf25d5256b950cfb3d498595341ecc18df2fec6",
+    "after_sha256": "9e1acdb6d6771384381d40b98be0099d2ef8db34af97d46c0dabd6291432c280",
+    "before_bytes": 12583,
+    "after_bytes": 12701
+  },
+  {
+    "path": "tests/test_piper_run.py",
+    "action": "migrate",
+    "before_sha256": "a3ed6d8a27c962a7cfa883c755c10adf022aed7e6817e1bc7ec46d5128342944",
+    "after_sha256": "561e12c12707b80516073721b6c28245899dde04efb15b38cf85df819f5c8b43",
+    "before_bytes": 99799,
+    "after_bytes": 99854
+  },
+  {
+    "path": "tests/test_planner_contract.py",
+    "action": "remove",
+    "before_sha256": "a8377a3c85fe62ff9f7596695fbb9491a576743675e74b5dffd0bd56d06786b1",
+    "after_sha256": null,
+    "before_bytes": 1843,
+    "after_bytes": 0
+  },
+  {
+    "path": "tests/test_r2_live_adapter.py",
+    "action": "migrate",
+    "before_sha256": "abcbddd56277d6f970cbda676be5e0ae7c444eeebe5087cbd06e3b2b381b192e",
+    "after_sha256": "1f12e6ba94865289e8ac240a67314b9c70e16fca7412b9a61860e473b20833ed",
+    "before_bytes": 53770,
+    "after_bytes": 53674
+  },
+  {
+    "path": "tests/test_robot_operation_executor.py",
+    "action": "migrate",
+    "before_sha256": "587c780a1106cba404affcb897d4536b4f687d819124b818780290060d3cbfda",
+    "after_sha256": "29d56517121cd843e30772a68fa6a4100d98ccdd2ee783606eeced3384d19e1b",
+    "before_bytes": 34496,
+    "after_bytes": 34506
+  },
+  {
+    "path": "tests/test_robot_operation_plan_binding.py",
+    "action": "migrate",
+    "before_sha256": "a5c25edf54d963897c5dd9fc8e7dfb177bf5221f15e0776827c7e7f07186709a",
+    "after_sha256": "ec268709cb551490856a89ef3e53799a8a73f61f93f6c9ab3ef65193704b5ccc",
+    "before_bytes": 36523,
+    "after_bytes": 36541
+  },
+  {
+    "path": "tests/test_robot_operation_plan_integration.py",
+    "action": "migrate",
+    "before_sha256": "9b22661278e3059bb04b1f0692dd47eda677799acd7ba277c2dbdf6488ea5ac1",
+    "after_sha256": "5542b94055fd46029edbefa64533fe11264791668ae05dcb986868529546ab81",
+    "before_bytes": 37100,
+    "after_bytes": 37110
+  },
+  {
+    "path": "tests/test_runtime_session.py",
+    "action": "migrate",
+    "before_sha256": "d0951000e5f4336002d50103fe1fd4c6ac1cabb7dcc34e0496ba3432ed3b0415",
+    "after_sha256": "220037ac07d1d69b424eaa17ed1b6fde15e8823bc9a94b4c4749807e8d9f97b0",
+    "before_bytes": 76239,
+    "after_bytes": 49613
+  },
+  {
+    "path": "tests/test_scene_manifest_artifact.py",
+    "action": "migrate",
+    "before_sha256": "9f18a1eeeffadb2a1f3234275a14a2e2848981fb1e3259ee4192bc5343031e8d",
+    "after_sha256": "2586a6dbf1aa4cff05349f674381c20b7e8c5abc49af830065f10dba041c95b2",
+    "before_bytes": 3015,
+    "after_bytes": 3016
+  },
+  {
+    "path": "tests/test_session_phase_backend.py",
+    "action": "remove",
+    "before_sha256": "3afe3b8d3a862ca03dd4f2d3fde4b88d859a15c398315d54d01bf13bd1d444ae",
+    "after_sha256": null,
+    "before_bytes": 26394,
+    "after_bytes": 0
+  },
+  {
+    "path": "tests/test_skill_execution.py",
+    "action": "migrate",
+    "before_sha256": "08f6674e09c3b6730a35a54480cbc5be41c981de4bc5280e4b81ebd6fc676217",
+    "after_sha256": "b3161ffa6cb55bb8b2511c8b56c44dcebaa08cda71392c36bc38dc3b5c6d3019",
+    "before_bytes": 2240,
+    "after_bytes": 2250
+  },
+  {
+    "path": "tests/test_skill_targets.py",
+    "action": "migrate",
+    "before_sha256": "03345526b55cdc1ab5007cd0b659e6d2819cf57271b1940fe56649a6380669ef",
+    "after_sha256": "30d84aac787af0f25835d6fd30c338d94354be4471705dd4392183b26c5d975c",
+    "before_bytes": 21694,
+    "after_bytes": 21695
+  },
+  {
+    "path": "tests/test_skills_programs.py",
+    "action": "migrate",
+    "before_sha256": "89088e651187f3b3ae55096fd5b75597e246a45a314afe305bf1d60ebf78e3c7",
+    "after_sha256": "30551ce6ddc7f3926e9491b8d7ce4335ae8d5145e2ab133d228b9b5c356b5f38",
+    "before_bytes": 3882,
+    "after_bytes": 3901
+  },
+  {
+    "path": "tests/test_stap_schedule.py",
+    "action": "remove",
+    "before_sha256": "78616d5e1f7d840364da2d698db5f346c801d4b9562410408bb971328d30de5c",
+    "after_sha256": null,
+    "before_bytes": 13417,
+    "after_bytes": 0
+  },
+  {
+    "path": "tests/test_supervision.py",
+    "action": "remove",
+    "before_sha256": "7edfc2e8d50c1398854031e2f4f4fe3245f21234cea0e1e1ba86e3f1d75f3aa9",
+    "after_sha256": null,
+    "before_bytes": 1089,
+    "after_bytes": 0
+  },
+  {
+    "path": "tests/test_tcp_structural_binding.py",
+    "action": "migrate",
+    "before_sha256": "34446eb321b0b8bc01a845486c1fb0abb73be17e10085f162395c59d04d5aba8",
+    "after_sha256": "f6e3babf3136e1d20e5bc12f5b0cd599962a26c4858043fcdd629239175db5b3",
+    "before_bytes": 36209,
+    "after_bytes": 38189
+  },
+  {
+    "path": "tests/test_third_party_manifest.py",
+    "action": "migrate",
+    "before_sha256": "e6e23529b9b8b64767efd2bb4df135adb288d118ffabdf70405eee85b069a5ff",
+    "after_sha256": "bb9cb067bda14d611cfa22a2a5751511457452575856b3628c418446ab480904",
+    "before_bytes": 11210,
+    "after_bytes": 11349
+  },
+  {
+    "path": "tests/test_trajectory_execution.py",
+    "action": "remove",
+    "before_sha256": "b8af9ba830ea8c406ae41622236fe46ca95c07c4deb8d75ad84bbdca9f8ad0e5",
+    "after_sha256": null,
+    "before_bytes": 2306,
+    "after_bytes": 0
+  },
+  {
+    "path": "tests/test_transit_adapter.py",
+    "action": "migrate",
+    "before_sha256": "764e3cc0138ab7f8f0cc9dfa492f1c533f478e0602c6c0d08c7b49c39678c940",
+    "after_sha256": "d15c2490a18dba8539ce50cc47d0f679a5a4b416440228a93adcc93cbcb44ece",
+    "before_bytes": 10241,
+    "after_bytes": 10249
+  },
+  {
+    "path": "tests/test_verification.py",
+    "action": "remove",
+    "before_sha256": "40b8505123f139ec1da24d90b3e30830f30cadcb0ed5def0aba99fb9660fc83e",
+    "after_sha256": null,
+    "before_bytes": 584,
+    "after_bytes": 0
+  },
+  {
+    "path": "third_party/README.md",
+    "action": "migrate",
+    "before_sha256": "67931ca53561613e933993bb8f85020bdf80b0b2858a23197204a82b84cad0e8",
+    "after_sha256": "9bf60afc9d7ea30ee5e5d09051a5ddc213844166b3f0b1fe1687a559ad778377",
+    "before_bytes": 7226,
+    "after_bytes": 7237
+  },
+  {
+    "path": "tools/generate_python_proto.sh",
+    "action": "remove",
+    "before_sha256": "1ef2d0b3dcbf7b6679cfe79e6c6f76731a8fdfb050d935340fba2422de0884f8",
+    "after_sha256": null,
+    "before_bytes": 487,
+    "after_bytes": 0
+  },
+  {
+    "path": "tools/replay_planning_request.py",
+    "action": "remove",
+    "before_sha256": "0a4086a688d62e31b1acd92515a3742253f21acbf80aed1fc84b48b00df9459c",
+    "after_sha256": null,
+    "before_bytes": 1244,
+    "after_bytes": 0
+  }
+]

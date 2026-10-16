@@ -148,6 +148,13 @@ def test_session_entry_preserves_region_without_outer_ik_or_endpoint_fk(plan_onl
         }
 
     session = SimpleNamespace(
+        # The sim-arbiter clearance gate reads the combined robot description
+        # the planner used.  This double declares no collidable bodies, so the
+        # gate has nothing to measure; the real session serves the latched
+        # /dual_arm/robot_description.
+        unified_robot_description=lambda: '<robot name="dual_stub"><link name="dual_world"/><link name="stub_link"/>'
+        '<joint name="stub_joint" type="fixed"><parent link="dual_world"/>'
+        '<child link="stub_link"/></joint></robot>',
         robot_ids=item.robots,
         coordinated_readiness=lambda value: {
             "coordination_id": value.coordination_id,
@@ -389,6 +396,13 @@ def test_planned_endpoint_fk_rejects_broad_goal_that_is_not_a_grasp():
     """A missing/custom-sampler fallback cannot move toward an invalid grasp."""
     item = query({"piper_0": {"grasp_region": region()}})
     session = SimpleNamespace(
+        # The sim-arbiter clearance gate reads the combined robot description
+        # the planner used.  This double declares no collidable bodies, so the
+        # gate has nothing to measure; the real session serves the latched
+        # /dual_arm/robot_description.
+        unified_robot_description=lambda: '<robot name="dual_stub"><link name="dual_world"/><link name="stub_link"/>'
+        '<joint name="stub_joint" type="fixed"><parent link="dual_world"/>'
+        '<child link="stub_link"/></joint></robot>',
         runtime_for=lambda robot: SimpleNamespace(
             compute_tcp_fk=lambda state, timeout_s: (
                 (0.01, 0.01, 0.01),
@@ -423,6 +437,13 @@ def test_planned_endpoint_fk_filters_mimic_parent_and_preserves_final_joints(rob
         return endpoint().tcp_pose.position_xyz, endpoint().tcp_pose.orientation_xyzw
 
     session = SimpleNamespace(
+        # The sim-arbiter clearance gate reads the combined robot description
+        # the planner used.  This double declares no collidable bodies, so the
+        # gate has nothing to measure; the real session serves the latched
+        # /dual_arm/robot_description.
+        unified_robot_description=lambda: '<robot name="dual_stub"><link name="dual_world"/><link name="stub_link"/>'
+        '<joint name="stub_joint" type="fixed"><parent link="dual_world"/>'
+        '<child link="stub_link"/></joint></robot>',
         runtime_for=lambda owner: SimpleNamespace(compute_tcp_fk=strict_fk)
     )
     result = planned_grasp_endpoints(
@@ -440,6 +461,13 @@ def test_planned_endpoint_fk_rejects_missing_real_joint_without_calling_service(
     state.pop("piper_0_gripper_joint2")
     item = replace(item, start_state=state)
     session = SimpleNamespace(
+        # The sim-arbiter clearance gate reads the combined robot description
+        # the planner used.  This double declares no collidable bodies, so the
+        # gate has nothing to measure; the real session serves the latched
+        # /dual_arm/robot_description.
+        unified_robot_description=lambda: '<robot name="dual_stub"><link name="dual_world"/><link name="stub_link"/>'
+        '<joint name="stub_joint" type="fixed"><parent link="dual_world"/>'
+        '<child link="stub_link"/></joint></robot>',
         runtime_for=lambda owner: SimpleNamespace(
             compute_tcp_fk=lambda *args, **kwargs: pytest.fail(
                 "incomplete FK state must not be sent"

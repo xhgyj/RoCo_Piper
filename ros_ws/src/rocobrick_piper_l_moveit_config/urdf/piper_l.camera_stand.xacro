@@ -1,0 +1,71 @@
+<?xml version="1.0"?>
+<!--
+  Wrist camera overlay for the Piper_L MoveIt model (frames and visuals only).
+
+  The planning model was blind to the gripper-mounted RealSense assembly: the
+  pinned agx_arm_urdf gripper xacro carries no camera chain, while the runtime
+  Isaac asset (robot_assets/piper_l/USD/piper_l_gripper_d435.usd) does.  Live
+  evidence (task-c-top-offset10-lane): the dual-arm SUPPORT_TOP plan routed
+  piper_0's camera stand to 0.77 mm of piper_1's gripper base, both follow
+  actions ABORTED after the physical contact, because MoveIt saw >= 29.7 mm
+  for the modeled bodies alone.
+
+  That collision body is now DISABLED in the simulator as well: the vendor
+  stand's convex hull is a 97 x 48 x 74 mm bracket filling the narrow space
+  over a placement, and no skill, observation or gate consumes wrist-camera
+  images.  Evidence (task-c-top-offset12, 2026-10-14): with the stand
+  colliding, the support pre-phase staged the two wrists interpenetrating by
+  1.87 mm and piper_0's arm controller aborted on goal tolerance; with the
+  camera colliders off the same station clears by more than 25 mm.  The
+  simulator disables them in our own scene bootstrap
+  (rocobrick.isaac_scene._disable_camera_collisions) and records the disabled
+  prims in the session evidence, leaving the vendor USD byte-identical
+  because its SHA-256 is bound by the TCP authorization artifact.
+
+  This overlay therefore keeps the camera CHAIN and its VISUALS (the wrist
+  camera is part of the physical machine and of the published robot
+  description) but carries NO collision geometry, so the planner's model
+  matches what the simulator collides.  Provenance (single authority):
+  robot_assets/piper_l/piper_l_gripper_d435.urdf; every joint origin below is
+  copied verbatim from that URDF, and the stand mesh was verified against the
+  runtime asset numerically (the COLLADA node matrix reproduces the USD
+  collision-mesh bounding box to < 1e-6 m).
+-->
+<robot xmlns:xacro="http://www.ros.org/wiki/xacro">
+  <xacro:macro name="piper_l_camera_stand" params="parent:=gripper_base">
+    <link name="camera_stand_link">
+      <visual>
+        <origin xyz="0 0 0" rpy="-1.57 0 1.57"/>
+        <geometry>
+          <mesh filename="package://rocobrick_piper_l_moveit_config/meshes/realsense_mid_stand.dae"/>
+        </geometry>
+      </visual>
+    </link>
+
+    <!-- Structural frames of the d435 mount chain (no geometry). -->
+    <link name="d435_camera_link"/>
+    <link name="camera_bottom_screw_frame"/>
+    <link name="camera_link"/>
+
+    <joint name="camera_stand_joint" type="fixed">
+      <parent link="${parent}"/>
+      <child link="camera_stand_link"/>
+      <origin xyz="-0.034 -0.001 0.022" rpy="0 0 0"/>
+    </joint>
+    <joint name="d435_camera_joint" type="fixed">
+      <parent link="camera_stand_link"/>
+      <child link="d435_camera_link"/>
+      <origin xyz="-0.031 -0.028 0.0018" rpy="0.0 -1.22 0.0"/>
+    </joint>
+    <joint name="camera_link_joint" type="fixed">
+      <parent link="d435_camera_link"/>
+      <child link="camera_bottom_screw_frame"/>
+      <origin xyz="0.010600000000000002 0.0175 0.0125" rpy="0 0 0"/>
+    </joint>
+    <joint name="camera_joint" type="fixed">
+      <parent link="camera_bottom_screw_frame"/>
+      <child link="camera_link"/>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+    </joint>
+  </xacro:macro>
+</robot>

@@ -1,3 +1,22 @@
+# RoCo_Piper — formal operation-plan runtime
+
+This fork runs the Piper_L multi-robot Isaac/ROS/MoveIt operation-plan platform.
+The upstream challenge documentation below is retained as historical project
+context, not as the current deployment or evaluation interface.
+
+## Current entry and cleanup boundary
+
+- Use `uv sync --locked` for the existing dependency set and `uv run --no-sync piper-run --help` for explicit immutable input flags.
+- `piper-run --robot-operation-plan PATH` is the only production dispatch entry; provide the corresponding structure/STAP, config and authorization inputs. Do not synthesize or reorder the external plan.
+- The live topology is one Isaac host, one ROS container session, the combined `dual_arm_move_group.launch.py`, per-robot namespaced channels, and the persistent ROS worker.
+- Keep all formal skill branches and cancel/terminal/cleanup gates, not just Task C. Static tests and clean builds are not live execution evidence.
+- The old gRPC planner, pregrasp/playback, phase backend, single-session and isolated/fake launch paths have been retired from this candidate. Import classified package owners directly rather than old compatibility forwarding modules.
+- Historical runs are outputs, not deployed startup inputs. Offline fixtures carry exact historical plan bytes; TCP provenance byte objects are test-only audit inputs. The production DDS prerequisite report remains required.
+- Original uncommitted functional changes and immutable model/calibration/plan bytes must be preserved. See `AGENTS.md` for safety and test rules.
+- The old standalone validate/demo entries and maintenance tools have not yet been retired in this batch. Some old diagnostic tools reference retired launch interfaces and are not supported deployment commands. Their migration is a separate batch.
+
+## Historical upstream challenge README (not the current launch contract)
+
 # RoCo-BrickAssembly
 
 Welcome to the official simulation repository for the **Brick Assembly** track of the [RoCo Challenge @ IROS26](https://rocochallenge.github.io/RoCo-IROS2026/). 

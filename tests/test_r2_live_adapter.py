@@ -20,9 +20,9 @@ Three layers are pinned here:
   set and schema rocobrick-r2-live-adapter-smoke/v1.
 * rocobrick/compat.py is the single compatibility seam: it exports only
   ``StrEnum`` (re-exported from enum where available, else a minimal local
-  string-enum base), the seven formal modules import it from there, enum
+  string-enum base), the formal modules import it from there, enum
   value/str/equality semantics stay identical on the host, and the container
-  proof imports all seven modules directly under Python 3.10 without any
+  proof imports the canonical modules directly under Python 3.10 without any
   shim.
 
 The offline functional tests drive the added minimal adapter FK hook
@@ -355,11 +355,9 @@ def test_probe_is_fully_bounded_and_prints_one_line(probe_source: str) -> None:
 
 COMPAT_MODULES = (
     "models",
-    "execution",
-    "skills",
-    "planner_contract",
+    "execution.core",
+    "skills.programs",
     "task_facts",
-    "trajectory_execution",
     "moveit_execution",
 )
 COMPAT_IMAGE = "roco-piper-ros:humble"
@@ -374,11 +372,9 @@ from rocobrick import compat
 assert compat.__all__ == ["StrEnum"]
 assert compat.StrEnum.__module__ == "rocobrick.compat"
 import rocobrick.models
-import rocobrick.execution
-import rocobrick.skills
-import rocobrick.planner_contract
+import rocobrick.execution.core
+import rocobrick.skills.programs
 import rocobrick.task_facts
-import rocobrick.trajectory_execution
 import rocobrick.moveit_execution
 import rocobrick.ros_moveit_runtime
 import rocobrick.ros_moveit_executor
@@ -426,17 +422,16 @@ def test_enum_semantics_are_unchanged_on_the_host() -> None:
     assert SkillType.PICK == "PICK"
 
 
-def test_seven_formal_modules_import_strenum_from_the_seam_only() -> None:
-    """Exactly the seven modules switched; no direct enum.StrEnum import left."""
+def test_formal_modules_import_strenum_from_the_seam_only() -> None:
+    """Exactly the listed formal modules switched; no direct enum.StrEnum import."""
     for name in COMPAT_MODULES:
-        source = (ROOT / "src" / "rocobrick" / f"{name}.py").read_text(
-            encoding="utf-8"
-        )
+        module_path = ROOT / "src" / "rocobrick" / f"{name.replace('.', '/')}.py"
+        source = module_path.read_text(encoding="utf-8")
         assert "from enum import StrEnum" not in source, name
         assert "from rocobrick.compat import StrEnum" in source, name
     remaining = sorted(
-        path.name
-        for path in (ROOT / "src" / "rocobrick").glob("*.py")
+        str(path.relative_to(ROOT))
+        for path in (ROOT / "src" / "rocobrick").rglob("*.py")
         if path.name != "compat.py"
         and "from enum import StrEnum" in path.read_text(encoding="utf-8")
     )
@@ -460,7 +455,7 @@ def _compat_image_available() -> bool:
     reason="ROS Humble container image not available",
 )
 def test_compat_modules_import_directly_in_the_ros_container(tmp_path) -> None:
-    """Live proof: the seven modules import on Python 3.10 with NO shim.
+    """Live proof: the canonical modules import on Python 3.10 with NO shim.
 
     Runs the exact direct form (PYTHONPATH=/workspace/src python3 -c ...)
     plus the semantic snippet against the real ROS Humble container with the
@@ -469,9 +464,9 @@ def test_compat_modules_import_directly_in_the_ros_container(tmp_path) -> None:
     snippet = tmp_path / "compat_proof.py"
     snippet.write_text(CONTAINER_PROOF_SNIPPET, encoding="utf-8")
     direct = (
-        "import rocobrick.models, rocobrick.execution, rocobrick.skills, "
-        "rocobrick.planner_contract, rocobrick.task_facts, "
-        "rocobrick.trajectory_execution, rocobrick.moveit_execution; "
+        "import rocobrick.models, rocobrick.execution.core, "
+        "rocobrick.skills.programs, rocobrick.task_facts, "
+        "rocobrick.moveit_execution; "
         "print('DIRECT_IMPORT_OK')"
     )
     result = subprocess.run(

@@ -13,7 +13,8 @@ from test_ros_moveit_runtime_contract import (
 )
 
 from rocobrick.moveit_contract import TcpPoseTarget
-from rocobrick.ros_moveit_runtime import ARM_JOINT_NAMES
+from rocobrick.moveit_execution import ExecutionStatus
+from rocobrick.ros_moveit_runtime import ARM_JOINT_NAMES, ReadinessSnapshot
 
 
 def contact_target(z: float = 0.028) -> TcpPoseTarget:
@@ -32,6 +33,32 @@ def contact_target(z: float = 0.028) -> TcpPoseTarget:
 def measured_start_tcp(z: float):
     """Return one measured (position, quaternion) start-pose pair."""
     return ((0.32, 0.32, z), (1.0, 0.0, 0.0, 0.0))
+
+
+def test_contact_waits_for_readiness_and_records_nonconvergence_without_motion(
+    monkeypatch,
+):
+    """A transient sample is rechecked, but persistent failure sends no goal."""
+    world = make_world()
+    world.runtime._robot_id = "piper_0"
+    monkeypatch.setattr(
+        "rocobrick.skills.contact.inspect_contact", lambda value, control: (None, {})
+    )
+    monkeypatch.setattr(
+        "rocobrick.ros_moveit_runtime.strict_action_admission",
+        lambda target: SimpleNamespace(accepted=True),
+    )
+    world.runtime.query_scene_state = lambda timeout_s: scene()
+    world.runtime.readiness_snapshot = lambda: ReadinessSnapshot()
+    waits = []
+    world.runtime.wait_until_ready = lambda timeout: waits.append(timeout) or False
+    result = world.runtime.send_guarded_tcp_pose(contact_target(), guard(), 10.0)
+    assert waits == [1.0]
+    assert result.status is ExecutionStatus.REJECTED
+    assert result.command_messages == 0
+    assert result.details["error"] == "contact readiness did not converge"
+    assert result.details["readiness"]["broadcaster_match"] is False
+    assert result.terminal and result.safe_to_release
 
 
 def test_contact_controller_retimes_all_points_and_sets_strict_tolerances():
@@ -152,3 +179,56 @@ def test_controller_abort_is_never_endpoint_success():
     assert result.details["action_status"] == "ABORTED"
     assert result.details["contact_stop_reason"] == "contact_tracking_stopped"
     assert result.terminal is True and result.safe_to_release is True
+
+
+def test_support_press_is_not_cancelled_by_a_measured_contact():
+    """A support descent presses through contact; only its limits stop it.
+
+    Live evidence, task-c-top-offset13f (2026-10-14): the guard stopped the
+    descent at the first measured 0.12 N graze, the designed press
+    (``support_press_m`` below the top surface) never ran, the pads settled
+    about 0.9 mm above the surface and the required maintained contact could
+    not be proved, so SUPPORT_TOP failed. The press must run to its endpoint
+    with the contact recorded as evidence instead of cancelling it.
+    """
+    import asyncio
+    import copy
+
+    from test_task_c_skill_continuation import Scene
+
+    world = make_world()
+    shared = asyncio.run(Scene().observe("piper_1"))
+    support_guard = {
+        "robot_id": "piper_1",
+        "session_id": shared["session_id"],
+        "manifest_sha256": shared["manifest_sha256"],
+        "upper_id": "brick-upper",
+        "supported_pose": copy.deepcopy(shared["bricks"]["brick-upper"]["pose"]),
+        "supported_position_m": 0.002,
+        "supported_angle_rad": 0.05236,
+        "force_limit_n": 8.0,
+        "mode": "support_top",
+    }
+    world.runtime.query_scene_state = lambda timeout_s: shared
+    handle = FakeGoalHandle()
+    handle.result_future.set(
+        SimpleNamespace(
+            status=FAKE_GOAL_STATUS.STATUS_SUCCEEDED,
+            result=SimpleNamespace(error_code=0),
+        )
+    )
+    result = world.runtime._await_guarded_action(
+        handle.result_future,
+        support_guard,
+        world.clock.now + 2,
+        {"execution_transport": "arm_follow"},
+        0,
+    )
+    assert result.status is ExecutionStatus.SUCCEEDED
+    assert result.details["action_status"] == "SUCCEEDED"
+    assert result.details["contact_stop_reason"] is None
+    trace = result.details["contact_trace"]
+    assert trace and trace[0]["support_contact_established"] is True
+    assert trace[0]["support_contact"]["confirmed"] is True
+    # The descent was never cancelled: it owns its own endpoint.
+    assert handle.cancel_calls == 0

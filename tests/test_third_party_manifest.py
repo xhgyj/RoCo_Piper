@@ -185,11 +185,12 @@ def test_readme_requires_license_hash_verification(readme_text: str) -> None:
         assert expected["license_sha256"] in readme_text
 
 
-def test_readme_marks_legacy_vendor_reference_only(readme_text: str) -> None:
-    """README must flag planner_ws copies as legacy, reference-only vendor."""
+def test_readme_declares_retired_planner_and_live_vendor(readme_text: str) -> None:
+    """Retired planner copies must not hide the live runtime asset provenance."""
     assert "planner_ws/src" in readme_text
-    assert "robot_assets" in readme_text
-    assert "仅供参考" in readme_text
+    assert "已退役" in readme_text
+    assert "robot_assets/piper_l 是正式运行资产" in readme_text
+    assert "Git 对象仍用于模型审计" in readme_text
 
 
 def test_readme_sim_license_limitation_and_reaudit(readme_text: str) -> None:
@@ -253,8 +254,8 @@ def test_readme_records_ros_submodule_gitlink(readme_text: str) -> None:
     assert ROS_SUBMODULE_PATH in readme_text
     ros_section = _readme_ros_clone_section(readme_text)
     assert ROS_SUBMODULE_GITLINK in ros_section
-    # Legacy vendor stays reference-only and the P0.4 asset re-audit survives.
-    assert "仅供参考" in readme_text
+    # Retired planner status and the P0.4 asset re-audit both survive.
+    assert "旧 planner_ws/src 链路及其中历史 vendor 拷贝已退役" in readme_text
     assert "P0.4" in readme_text
 
 

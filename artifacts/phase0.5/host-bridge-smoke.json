@@ -1,0 +1,143 @@
+{
+  "articulation_prim_path": "/World/Robot_0/root_joint",
+  "bounded": {
+    "hold_seconds_s": 90.0,
+    "hold_steps": 600,
+    "max_steps": 1000000,
+    "ready_timeout_s": 60.0,
+    "render_steps": false,
+    "time_limit_s": 300.0
+  },
+  "bridge_extension_enabled": false,
+  "cleanup": {
+    "app_close_initiated": true,
+    "rclpy_shutdown": true,
+    "timeline_stopped": true,
+    "world_stopped": true
+  },
+  "clock_published_at_ready": 1,
+  "commands": {
+    "applied": 553,
+    "clamped_to_limits": 0,
+    "received": 553,
+    "unknown_joint_names_ignored": []
+  },
+  "dds_profile": "/home/mzictt/RoCo_Piper/.runtime/dds/fastdds-host.xml",
+  "dof_limits_source": "robot.dof_properties",
+  "elapsed_s": 96.861,
+  "headless": true,
+  "hold": {
+    "seconds_wall": 90.0,
+    "sim_time_final_s": 740.300039,
+    "steps": 44411
+  },
+  "hold_completed": true,
+  "hold_samples": [
+    {
+      "playing": true,
+      "sim_time_s": 2.117,
+      "step": 125,
+      "wall_s": 0.278
+    },
+    {
+      "playing": true,
+      "sim_time_s": 4.117,
+      "step": 245,
+      "wall_s": 0.508
+    },
+    {
+      "playing": true,
+      "sim_time_s": 6.117,
+      "step": 365,
+      "wall_s": 0.858
+    },
+    {
+      "playing": true,
+      "sim_time_s": 8.117,
+      "step": 485,
+      "wall_s": 1.188
+    },
+    {
+      "playing": true,
+      "sim_time_s": 10.117,
+      "step": 605,
+      "wall_s": 1.354
+    },
+    {
+      "playing": true,
+      "sim_time_s": 12.117,
+      "step": 725,
+      "wall_s": 1.467
+    },
+    {
+      "playing": true,
+      "sim_time_s": 14.117,
+      "step": 845,
+      "wall_s": 1.546
+    },
+    {
+      "playing": true,
+      "sim_time_s": 16.117,
+      "step": 965,
+      "wall_s": 1.611
+    },
+    {
+      "playing": true,
+      "sim_time_s": 18.117,
+      "step": 1085,
+      "wall_s": 1.675
+    },
+    {
+      "playing": true,
+      "sim_time_s": 20.117,
+      "step": 1205,
+      "wall_s": 1.742
+    }
+  ],
+  "in_process_rclpy": true,
+  "joint_command_message_type": "sensor_msgs/JointState",
+  "joint_dofs": [
+    "joint1",
+    "joint2",
+    "joint3",
+    "joint4",
+    "joint5",
+    "joint6",
+    "gripper_joint1",
+    "gripper_joint2"
+  ],
+  "joint_states_published_at_ready": 1,
+  "omnigraph_created": false,
+  "passed": true,
+  "phase": "P0.5",
+  "publish_totals": {
+    "clock": 2572,
+    "joint_states": 2572,
+    "joint_states_diag": 2572,
+    "positions_nan": 0
+  },
+  "rclpy_bundled_humble": true,
+  "rclpy_module": "/home/mzictt/RoCo_Piper/.venv/lib/python3.11/site-packages/isaacsim/exts/isaacsim.ros2.bridge/humble/rclpy/rclpy/__init__.py",
+  "rclpy_node_count": 1,
+  "rclpy_node_name": "piper_l0_host_bridge",
+  "rclpy_source": "bundled humble rclpy via tools/isaac-ros-env.sh",
+  "rclpy_started": true,
+  "readiness_marker": "p0.5_host_bridge_ready",
+  "ready": true,
+  "robot_prim_path": "/World/Robot_0",
+  "ros_domain_id": 73,
+  "schema": "rocobrick-host-bridge-smoke/v1",
+  "sim_time_at_ready_s": 0.116667,
+  "steps_to_ready": 5,
+  "steps_total": 44416,
+  "timeline_playing": true,
+  "topics": {
+    "clock": "/clock",
+    "joint_commands": "/isaac_joint_command",
+    "joint_states": "/isaac_joint_states"
+  },
+  "usd": {
+    "path": "/home/mzictt/RoCo_Piper/robot_assets/piper_l/USD/piper_l_gripper_d435.usd",
+    "sha256": "a781d52f9d55291fca9c8f2695abf9e311640d996314d272f47639d5323e2375"
+  }
+}

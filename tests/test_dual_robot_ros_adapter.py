@@ -44,6 +44,7 @@ from rocobrick.moveit_contract import (
     Link6PoseTarget,
     TcpPoseTarget,
 )
+from rocobrick.moveit_execution import ExecutionResult, ExecutionStatus
 from rocobrick.moveit_requests import build_joint_target
 from rocobrick.robot_runtime_profile import RobotRuntimeProfile
 from rocobrick.ros_moveit_executor import RosMoveItExecutor
@@ -245,6 +246,14 @@ class FakeMotionPlanRequest:
         self.max_velocity_scaling_factor = 0.0
         self.max_acceleration_scaling_factor = 0.0
         self.goal_constraints: list = []
+        # The guarded-contact planner names a pipeline and carries the
+        # combined measured start state, so the fake request exposes both.
+        self.pipeline_id = ""
+        self.planner_id = ""
+        self.start_state = SimpleNamespace(
+            is_diff=True,
+            joint_state=SimpleNamespace(name=[], position=[], velocity=[]),
+        )
 
 
 class FakeConstraints:
@@ -920,6 +929,64 @@ def test_robot_scene_view_requires_this_robots_own_block():
         robot_scene_view(broken, ROBOT_1)
 
 
+def pad_contacts_report(entries: list[dict]) -> dict:
+    """One A4-global PhysX pad/object contact report."""
+    return {
+        "schema": "rocobrick-pad-object-contacts/v1",
+        "source": "physx_contact_report",
+        "session_id": "session-1",
+        "manifest_sha256": "b" * 64,
+        "sequence": 81,
+        "sim_time_s": 4.5,
+        "contacts": [dict(entry) for entry in entries],
+    }
+
+
+def pad_contact(robot_id: str, brick_id: str, *, z: float, force: float) -> dict:
+    """One measured pad/object contact record of ``robot_id``."""
+    return {
+        "robot_id": robot_id,
+        "pad_link": f"{robot_id}_gripper_link1",
+        "physical_instance_id": brick_id,
+        "position_world_m": [0.0, 0.0, z],
+        "normal_world": [0.0, 0.0, -1.0],
+        "normal_force_n": force,
+    }
+
+
+def test_robot_scene_view_carries_only_this_robots_contacts():
+    """The global PhysX report reaches a robot view with only its own records.
+
+    SUPPORT_TOP and PLACE_UP prove actual support from this block, so a
+    robot-scoped answer must carry it (live evidence, task-c-top-offset13e
+    2026-10-14: the dropped report failed the post-press confirmation) - and
+    never another robot's contacts.
+    """
+    document = dual_scene_document()
+    document.update(session_id="session-1", manifest_sha256="b" * 64, sequence=81)
+    document["pad_object_contacts"] = pad_contacts_report(
+        [
+            pad_contact(ROBOT_0, "brick-44", z=0.02, force=1.5),
+            pad_contact(ROBOT_1, "brick-44", z=0.02, force=0.4),
+        ]
+    )
+    report = robot_scene_view(document, ROBOT_1)["pad_object_contacts"]
+    assert report["schema"] == "rocobrick-pad-object-contacts/v1"
+    assert report["source"] == "physx_contact_report"
+    assert report["session_id"] == "session-1"
+    assert report["manifest_sha256"] == "b" * 64
+    assert report["sequence"] == 81
+    assert report["sim_time_s"] == 4.5
+    assert [entry["pad_link"] for entry in report["contacts"]] == [
+        f"{ROBOT_1}_gripper_link1"
+    ]
+    assert ROBOT_0 not in json.dumps(report)
+    # A document without the block keeps the shape it always had.
+    assert "pad_object_contacts" not in robot_scene_view(
+        dual_scene_document(), ROBOT_1
+    )
+
+
 def test_robot_scene_view_fails_closed_on_a_foreign_binding():
     document = dual_scene_document()
     document["robots"][ROBOT_1] = dict(
@@ -1367,3 +1434,244 @@ def test_executor_is_robot_keyed_and_refuses_a_mismatch():
         orientation_xyzw=(2.0, 0.0, 0.0, 2.0),
     )
     assert "robot_id" not in legacy.execute_link6_pose(invalid, timeout_s=1.0).details
+
+
+
+# ------------------------------------------------- guarded contact planning
+
+
+def make_unified_world(robot_ids: tuple[str, ...] = (ROBOT_0, ROBOT_1)) -> World:
+    """Production dual-arm session on the unified participant profiles.
+
+    Only state topics, controllers, the arm/gripper actions and the scene
+    Trigger stay per robot; every planning service and the one MoveGroup
+    action are the combined ``/dual_arm/...`` endpoints, exactly as the live
+    session reports them in its readiness evidence.
+    """
+    node = FakeNode()
+    clock = FakeClock()
+    session = RosMoveItRobotSession(
+        node,
+        robot_ids,
+        factories=fake_factories(),
+        profile_factory=RobotRuntimeProfile.unified_participant,
+        qos_state=SimpleNamespace(label="state"),
+        qos_sensor=SimpleNamespace(label="sensor"),
+        clock=clock,
+        sleep=clock.advance,
+    )
+    session.register()
+    return World(node=node, clock=clock, session=session)
+
+
+def prime_unified_robot(world: World, robot_id: str) -> None:
+    """Prime one participant's state, controllers, FK and scene evidence."""
+    prime_states(world, robot_id)
+    for client in world.node.clients(
+        f"/{robot_id}/controller_manager/list_controllers"
+    ):
+        client.response = SimpleNamespace(
+            controller=[
+                SimpleNamespace(name=name, state="active")
+                for name in REQUIRED_CONTROLLERS
+            ]
+        )
+    for client in world.node.clients("/dual_arm/compute_fk"):
+        client.ready = True
+        client.response = FakeFKResponse(pose=identity_pose())
+    for client in world.node.clients(SERVICE_SCENE_STATE):
+        client.ready = True
+        client.response = SimpleNamespace(message=json.dumps(dual_scene_document()))
+
+
+def _guarded_tcp_target():
+    """One admissible calibrated TCP target for the guarded-contact tests.
+
+    Returns:
+        The admitted calibrated TCP pose target.
+    """
+    from rocobrick.moveit_requests import build_tcp_pose_target
+
+    accepted_source_sha256 = (
+        "4e342f2cdf6d34970d741a091a46e671aee2e6da67be4189136260068b19645d"
+    )
+    target, decision = build_tcp_pose_target(
+        frame_id=BASE_FRAME,
+        position=(0.2, -0.1, 0.35),
+        orientation_xyzw=(0.0, 0.0, 0.0, 1.0),
+        runtime_model_sha256=EXPECTED_RUNTIME_MODEL_SHA256,
+        source_sha256=accepted_source_sha256,
+    )
+    assert decision.accepted is True and target is not None
+    return target
+
+
+def _guarded_plan_trajectory(robot_id: str) -> SimpleNamespace:
+    """A device-named three-waypoint arm plan shaped like MoveIt's answer.
+
+    Returns:
+        The fake MoveIt joint-trajectory result.
+    """
+    positions = [float(BASELINE[name]) for name in ARM_JOINT_NAMES]
+    return SimpleNamespace(
+        joint_names=[f"{robot_id}_{name}" for name in ARM_JOINT_NAMES],
+        points=[SimpleNamespace(positions=list(positions)) for _ in range(3)],
+    )
+
+
+class FixedGoalHandle(FakeGoalHandle):
+    """An accepted MoveGroup handle answering one fixed plan result."""
+
+    def __init__(self, wrapper) -> None:
+        super().__init__(True)
+        self._wrapper = wrapper
+        self.cancelled = 0
+
+    def get_result_async(self) -> FakeFuture:
+        return FakeFuture(self._wrapper)
+
+    def cancel_goal_async(self) -> FakeFuture:
+        self.cancelled += 1
+        return FakeFuture(SimpleNamespace(return_code=1))
+
+
+def _patch_contact_inspection(monkeypatch, runtime) -> None:
+    """Neutralize guard validation and scene inspection for transport tests.
+
+    The guard schema and the live scene inspection belong to the contact-skill
+    tests; here they must only let the flow reach the planning transport.
+    """
+    from rocobrick.skills import contact as contact_module
+
+    monkeypatch.setattr(
+        contact_module, "validate_guard", lambda document: dict(document)
+    )
+    monkeypatch.setattr(
+        contact_module, "inspect_contact", lambda scene, guard: (None, {"live": True})
+    )
+    monkeypatch.setattr(runtime, "query_scene_state", lambda timeout_s: {})
+
+
+def test_guarded_contact_plans_through_the_shared_combined_move_group(monkeypatch):
+    """A participant's guarded contact plans on the COMBINED MoveGroup action.
+
+    Live failure, 2026-10-14 (``runs/task-c-top-offset13c-headed-*``): the
+    SUPPORT_TOP press reached its guarded contact and the participant runtime
+    dereferenced its own MoveGroup client, which a dual-arm session never
+    registers (``AttributeError: 'NoneType' object has no attribute
+    'send_goal_async'``). The participant groups (``<robot>_arm``,
+    ``<robot>_arm_tcp``) exist only in the combined model, so the guarded
+    contact must plan through the single shared client while the participant's
+    own arm action executes the admitted trajectory.
+    """
+    world = make_unified_world()
+    runtime = world.runtime(ROBOT_1)
+    prime_unified_robot(world, ROBOT_0)
+    prime_unified_robot(world, ROBOT_1)
+
+    # The participant owns no planning client of its own (deliberate), and the
+    # session injects the combined one at construction.
+    assert runtime._move_group_client is None
+    shared = world.node.actions("/dual_arm/move_action")
+    assert len(shared) == 1
+    assert runtime.planning_action_client() is shared[0]
+
+    wrapper = SimpleNamespace(
+        status=FAKE_GOAL_STATUS.STATUS_SUCCEEDED,
+        result=SimpleNamespace(
+            error_code=SimpleNamespace(val=1),
+            planned_trajectory=SimpleNamespace(
+                joint_trajectory=_guarded_plan_trajectory(ROBOT_1)
+            ),
+        ),
+    )
+    sent: list = []
+
+    def send_goal_async(goal):
+        shared[0].goals.append(goal)
+        sent.append(goal)
+        return FakeFuture(FixedGoalHandle(wrapper))
+
+    monkeypatch.setattr(shared[0], "send_goal_async", send_goal_async)
+    _patch_contact_inspection(monkeypatch, runtime)
+    executed: dict = {}
+
+    def fake_execute(trajectory, target, guard, deadline, count):
+        executed["joint_names"] = list(trajectory.joint_names)
+        executed["waypoints"] = len(trajectory.points)
+        executed["planned_waypoints"] = count
+        return ExecutionResult(
+            status=ExecutionStatus.SUCCEEDED,
+            details={"execution_transport": "arm_follow", "contact_trace": [{}]},
+            terminal=True,
+            safe_to_release=True,
+            action_status="SUCCEEDED",
+        )
+
+    monkeypatch.setattr(runtime, "_execute_contact_trajectory", fake_execute)
+
+    result = runtime.send_guarded_tcp_pose(
+        _guarded_tcp_target(), {"robot_id": ROBOT_1, "mode": "support_top"}, 30.0
+    )
+
+    assert result.status is ExecutionStatus.SUCCEEDED
+    assert executed["waypoints"] == 3
+    assert executed["joint_names"] == [f"{ROBOT_1}_{name}" for name in ARM_JOINT_NAMES]
+    assert executed["planned_waypoints"] == 3
+    # Exactly one planning goal, on the shared combined action, as a LIN
+    # plan-only request for the participant's TCP group with the combined
+    # measured start state.
+    assert len(sent) == 1
+    goal = sent[0]
+    assert goal.planning_options.plan_only is True
+    assert goal.request.group_name == f"{ROBOT_1}_arm_tcp"
+    assert goal.request.pipeline_id == "pilz_industrial_motion_planner"
+    assert goal.request.planner_id == "LIN"
+    expected_names: set[str] = set()
+    for robot_id in (ROBOT_0, ROBOT_1):
+        expected_names.update(device_joint_names(robot_id))
+    assert set(goal.request.start_state.joint_state.name) >= expected_names
+    # No participant MoveGroup client exists, and the participant's own arm
+    # action never carries a plan.
+    assert world.node.actions(f"/{ROBOT_1}/move_action") == []
+    assert world.arm(ROBOT_1).goals == []
+
+
+def test_guarded_contact_fails_closed_when_no_planning_client_is_registered(
+    monkeypatch,
+):
+    """Readiness cannot cover a missing planner: fail closed, send nothing.
+
+    Readiness credits the combined action through ``_combined_ready`` even
+    when the shared client is unavailable, so the guarded contact itself must
+    refuse instead of dereferencing None (the 2026-10-14 AttributeError).
+    """
+    world = make_unified_world()
+    runtime = world.runtime(ROBOT_1)
+    prime_unified_robot(world, ROBOT_0)
+    prime_unified_robot(world, ROBOT_1)
+    # The shared planner cannot be created in this session state.
+    runtime._combined_move_group_client = lambda: None
+    assert runtime.readiness_snapshot().passed is True
+    assert runtime.capability_readiness().passed is True
+    assert runtime.planning_action_client() is None
+
+    sent: list = []
+    for client in world.node.action_clients:
+        monkeypatch.setattr(
+            client,
+            "send_goal_async",
+            lambda goal, _client=client: sent.append((_client.name, goal)),
+        )
+    _patch_contact_inspection(monkeypatch, runtime)
+
+    result = runtime.send_guarded_tcp_pose(
+        _guarded_tcp_target(), {"robot_id": ROBOT_1, "mode": "support_top"}, 30.0
+    )
+
+    assert result.status is ExecutionStatus.FAILED
+    assert result.terminal is True
+    assert result.safe_to_release is True
+    assert result.command_messages == 0
+    assert "no MoveGroup action client" in str(result.details.get("error"))
+    assert sent == []

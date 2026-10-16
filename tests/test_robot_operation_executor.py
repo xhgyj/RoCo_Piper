@@ -15,14 +15,7 @@ import time
 
 import pytest
 
-from rocobrick.multi_robot_scheduler import (
-    CancelEvidence,
-    MultiRobotScheduler,
-    OperationExecution,
-    OperationStatus,
-    is_json_safe,
-)
-from rocobrick.robot_operation_executor import (
+from rocobrick.execution.robot_operation_executor import (
     LABEL_REAL_SCENE_OBSERVATION,
     LABEL_WAIT_DURATION_CONFIRMED,
     REASON_CAPABILITY_UNAVAILABLE,
@@ -37,6 +30,13 @@ from rocobrick.robot_operation_executor import (
     REASON_WAIT_PARAMETERS_INVALID,
     SCENE_STATE_SCHEMA,
     SkillOperationExecutor,
+)
+from rocobrick.multi_robot_scheduler import (
+    CancelEvidence,
+    MultiRobotScheduler,
+    OperationExecution,
+    OperationStatus,
+    is_json_safe,
 )
 from rocobrick.robot_operation_plan import (
     OperationTarget,

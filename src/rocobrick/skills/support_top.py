@@ -14,6 +14,7 @@ from collections.abc import Mapping
 from dataclasses import asdict, dataclass
 from typing import Protocol
 
+from rocobrick.adapters.moveit.transit import TransitContext
 from rocobrick.coordinated_session import (
     FreeSpaceMotionEvidence,
     FreeSpaceMotionRequest,
@@ -34,7 +35,6 @@ from rocobrick.skills.observation import PickObservation, Pose, parse_pick_obser
 from rocobrick.skills.placement_geometry import pose_error, support_top_target
 from rocobrick.skills.successor_motion import contact_scene_payload, move_boundary
 from rocobrick.skills.support_evidence import verify_support_contact
-from rocobrick.transit_adapter import TransitContext
 from rocobrick.unified_dual_arm_runtime import SuccessorPrePhaseEvidence
 
 
@@ -343,6 +343,9 @@ class SupportTopHandler:
                 "force_limit_n": 8.0,
                 "mode": "support_top",
             }
+            target_force = self._context.params.support_target_force_n
+            if target_force > 0:
+                guard["target_force_n"] = target_force
             record = await self._dispatch(
                 operation,
                 "support_contact",
@@ -381,6 +384,12 @@ class SupportTopHandler:
                     raise ValueError("support samples did not advance")
                 samples.append(observed)
                 contacts.append(proof)
+                if target_force > 0:
+                    force = sum(item["normal_force_n"] for item in proof["contacts"])
+                    if not 1.0 <= force <= 3.0:
+                        raise ValueError(
+                            f"bounded support outside 1–3 N: measured {force:.3f} N"
+                        )
             evidence["support_pose_confirmed"] = {
                 "confirmed": True,
                 "samples": contacts,

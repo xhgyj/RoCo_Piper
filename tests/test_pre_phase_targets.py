@@ -70,7 +70,7 @@ def test_pick_target_is_pregrasp_and_other_arm_keeps_measured_tcp():
         > shared["bricks"]["brick-a"]["aabb_max"][2]
     )
     assert targets["piper_0"]["moveit_pose_goal"] is True
-    assert "roll_flip_equivalent" not in targets["piper_0"]
+    assert targets["piper_0"]["roll_flip_equivalent"] is False
 
 
 def test_support_top_carrier_target_defers_without_roll_flip():
@@ -122,7 +122,7 @@ def test_support_top_carrier_target_defers_without_roll_flip():
         support, shared, {robot: context for robot in ("piper_0", "piper_1")}
     )
     assert targets["piper_0"]["moveit_pose_goal"] is True
-    assert "roll_flip_equivalent" not in targets["piper_0"]
+    assert targets["piper_0"]["roll_flip_equivalent"] is False
     assert targets["piper_1"]["moveit_pose_goal"] is True
     assert targets["piper_1"]["roll_flip_equivalent"] is False
     assert "tcp_pose" in targets["piper_1"]

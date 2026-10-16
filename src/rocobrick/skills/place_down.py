@@ -24,6 +24,7 @@ from collections.abc import Mapping
 from dataclasses import asdict, dataclass, replace
 from typing import Protocol
 
+from rocobrick.adapters.moveit.transit import TransitContext
 from rocobrick.coordinated_session import (
     FreeSpaceMotionEvidence,
     FreeSpaceMotionRequest,
@@ -59,7 +60,6 @@ from rocobrick.skills.placement_geometry import (
     pose_error,
 )
 from rocobrick.skills.targets import _quat_rotate_vector, world_position_to_base
-from rocobrick.transit_adapter import TransitContext
 
 
 class PlaceObservationTransport(Protocol):

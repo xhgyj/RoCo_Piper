@@ -24,12 +24,29 @@ class ContactTrajectoryTiming:
 # path tolerance while moving. Live evidence 2026-10-02: at 5 mm/s the
 # descent aborted at 0.024 rad lag; 1 mm/s keeps the worst joint near 0.005.
 CONTACT_CARTESIAN_SPEED_MPS = 0.001
+UPWARD_INSERTION_SPEED_MPS = 0.005
+
+
+def contact_speed_for_mode(mode: str) -> float:
+    """Select insertion speed without accelerating support or recovery.
+
+    Returns:
+        Five mm/s for upward insertion, the original cap for other modes.
+    """
+    return (
+        UPWARD_INSERTION_SPEED_MPS
+        if mode == "insert_up"
+        else CONTACT_CARTESIAN_SPEED_MPS
+    )
+
 
 # Floor so microscopic corrections keep a bounded minimum cycle time.
 CONTACT_MINIMUM_DURATION_S = 0.4
 
 
-def contact_minimum_duration_s(distance_m: float) -> float:
+def contact_minimum_duration_s(
+    distance_m: float, *, speed_mps: float = CONTACT_CARTESIAN_SPEED_MPS
+) -> float:
     """Bound one contact motion's duration by its Cartesian speed cap.
 
     Returns:
@@ -43,9 +60,15 @@ def contact_minimum_duration_s(distance_m: float) -> float:
         or distance_m < 0
     ):
         raise ValueError("contact Cartesian distance must be finite, nonnegative")
+    if (
+        type(speed_mps) not in (int, float)
+        or not math.isfinite(speed_mps)
+        or not 0 < speed_mps <= UPWARD_INSERTION_SPEED_MPS
+    ):
+        raise ValueError("contact speed must be finite and in (0, 0.005] m/s")
     return max(
         CONTACT_MINIMUM_DURATION_S,
-        float(distance_m) / CONTACT_CARTESIAN_SPEED_MPS,
+        float(distance_m) / speed_mps,
     )
 
 

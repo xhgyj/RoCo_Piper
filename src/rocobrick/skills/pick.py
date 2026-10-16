@@ -8,6 +8,7 @@ from collections.abc import Mapping
 from dataclasses import asdict, dataclass, replace
 from typing import Protocol
 
+from rocobrick.adapters.moveit.transit import TransitContext
 from rocobrick.coordinated_session import (
     CoordinatedSessionResult,
     FreeSpaceMotionEvidence,
@@ -36,6 +37,7 @@ from rocobrick.skills.grasp_region import (
 )
 from rocobrick.skills.observation import (
     PickObservation,
+    Pose,
     parse_pick_observation,
     verify_pick_following,
 )
@@ -49,7 +51,6 @@ from rocobrick.skills.top_offset_grasp import (
     top_offset_targets,
     verify_top_offset_arrival,
 )
-from rocobrick.transit_adapter import TransitContext
 
 # The project TCP calibration defines rocobrick_tcp as the midpoint of the
 # two measured distal-finger contact-patch centroids; that frame is already
@@ -64,6 +65,16 @@ PICK_CONTACT_SURFACE_CLEARANCE_M = 0.0035
 FINGER_TIP_BELOW_TCP_M = 0.005211
 FLOOR_CONTACT_MARGIN_M = 0.005
 PICK_APPROACH_EXTRA_OPENING_M = 0.01
+# Two-stage vertical-offset approach.  The combined free-space plan ends at a
+# hover pose this far above the contact pose (same tilted orientation), and
+# the handler owns the final fixed-orientation descent.  Live evidence
+# (task-c-geometry-fix): the sim's joints are soft spring drives (k=20..200,
+# c=10..100), so during the single-plan approach the wrist alignment lagged
+# up to ~8 deg per joint and dragged the finger's base corner through the
+# brick's top edge while MoveIt's ideal-tracking check still showed 15.7 mm.
+# The hover keeps the wrist rotation out of the brick's zone and the short
+# straight descent follows the modeled path closely at low speed.
+PICK_TOPDOWN_HOVER_M = 0.06
 
 
 def _tcp_relative_aabb(
@@ -618,6 +629,8 @@ class PickHandler:
             grasp_region = None
             top_binding = self._top_offset_grasps.get(operation.operation_id)
             top_contact = None
+            top_hover = None
+            top_hover_world = None
             targets = pick_targets(
                 admission.sample.aabb_min,
                 admission.sample.aabb_max,
@@ -739,6 +752,10 @@ class PickHandler:
                 }
             )
             if top_binding is not None:
+                if self._free_space is None:
+                    raise ValueError(
+                        "vertical offset PICK requires the combined free-space lane"
+                    )
                 targets, top_contact, top_proof = top_offset_targets(
                     top_binding, admission.sample, context, targets
                 )
@@ -746,6 +763,24 @@ class PickHandler:
                 evidence["approach_gripper_opening"]["selected_opening_m"] = (
                     targets.reach_opening_m
                 )
+                top_hover_world = Pose(
+                    (
+                        top_contact.position_xyz[0],
+                        top_contact.position_xyz[1],
+                        top_contact.position_xyz[2] + PICK_TOPDOWN_HOVER_M,
+                    ),
+                    top_contact.orientation_xyzw,
+                )
+                top_hover = replace(
+                    targets.precontact_boundary,
+                    position=world_position_to_base(
+                        top_hover_world.position_xyz, context.base
+                    ),
+                )
+                evidence["topdown_split"] = {
+                    "hover_height_m": PICK_TOPDOWN_HOVER_M,
+                    "hover_world_xyz": list(top_hover_world.position_xyz),
+                }
             planning_sample = admission.sample
             planning = planning_scene_operation(
                 self._planning_payload(admission, context, planning_sample),
@@ -762,7 +797,7 @@ class PickHandler:
                     terminal=result.terminal,
                     motion_sent=result.motion_sent,
                 )
-            phases = (
+            phases = [
                 (
                     "open_gripper",
                     gripper_operation(
@@ -779,11 +814,25 @@ class PickHandler:
                 (
                     "precontact_boundary",
                     tcp_pose_operation(
-                        targets.precontact_boundary,
+                        top_hover
+                        if top_hover is not None
+                        else targets.precontact_boundary,
                         60.0,
                         f"{operation.operation_id}:precontact_boundary",
                     ),
                 ),
+            ]
+            if top_hover is not None:
+                # Owner-boundary split: the combined free-space plans above
+                # end at the hover pose; this phase drives the final
+                # fixed-orientation descent to the contact pose.  The
+                # session forbids per-robot planning for its participants
+                # ("participant planning is forbidden; use unified
+                # pre-phase"), so the descent is a second combined
+                # free-space request on the same unified lane, dispatched
+                # by the handler itself.
+                phases.append(("contact_descent", None))
+            phases.append(
                 (
                     "close_gripper",
                     gripper_operation(
@@ -796,7 +845,7 @@ class PickHandler:
                         60.0,
                         f"{operation.operation_id}:close_gripper",
                     ),
-                ),
+                )
             )
             for phase, runtime_operation in phases:
                 if phase == "close_gripper":
@@ -826,6 +875,34 @@ class PickHandler:
                         verify_top_offset_arrival(
                             admission.sample, preclose, top_contact
                         )
+                        # The measured contact arrival (after the handler's
+                        # descent, when split) anchors the lift geometry.
+                        lift_world = (
+                            *preclose.tcp_pose.position_xyz[:2],
+                            preclose.tcp_pose.position_xyz[2]
+                            + context.params.lift_height_m,
+                        )
+                        targets = replace(
+                            targets,
+                            lift=replace(
+                                targets.lift,
+                                position=world_position_to_base(
+                                    lift_world, context.base
+                                ),
+                                orientation_xyzw=world_orientation_to_base(
+                                    preclose.tcp_pose.orientation_xyzw,
+                                    context.base,
+                                ),
+                            ),
+                        )
+                        evidence["lift_geometry"] = {
+                            "source": "measured_vertical_offset_grasp",
+                            "selected_lift_base_position": list(targets.lift.position),
+                            "selected_orientation_xyzw": list(
+                                targets.lift.orientation_xyzw
+                            ),
+                            "lift_height_m": context.params.lift_height_m,
+                        }
                     if grasp_region is not None:
                         admit_grasp_endpoint(grasp_region, preclose)
                     contact_scene = planning_scene_operation(
@@ -848,7 +925,10 @@ class PickHandler:
                             motion_sent=motion_sent,
                         )
                 dispatched_free_space = False
-                if phase == "precontact_boundary" and self._free_space is not None:
+                if (
+                    phase in ("precontact_boundary", "contact_descent")
+                    and self._free_space is not None
+                ):
                     try:
                         (
                             scene,
@@ -857,7 +937,16 @@ class PickHandler:
                         ) = await self._free_space.free_space_context(
                             tuple(operation.participants)
                         )
-                        target_pose = targets.precontact_boundary
+                        if phase == "precontact_boundary":
+                            target_pose = (
+                                top_hover
+                                if top_hover is not None
+                                else targets.precontact_boundary
+                            )
+                        else:
+                            # Handler-owned final descent on the unified
+                            # lane: hover -> contact, fixed orientation.
+                            target_pose = targets.precontact_boundary
                         target = self._free_space_target(
                             operation.executor_robot_id, target_pose
                         )
@@ -940,7 +1029,7 @@ class PickHandler:
                     except Exception as error:
                         return self._failed(
                             operation,
-                            f"PICK_FREE_SPACE_FAILED: {error}",
+                            f"PICK_FREE_SPACE_FAILED: {phase}: {error}",
                             evidence,
                             terminal=False,
                             motion_sent=motion_sent,
@@ -989,6 +1078,10 @@ class PickHandler:
                     and dispatched_free_space
                 ):
                     try:
+                        # The split approach ends at the hover pose; the
+                        # contact-return measurement is taken after the
+                        # handler-owned descent (preclose) and drives the
+                        # lift geometry from the real arrival, not the plan.
                         arrived = parse_pick_observation(
                             await self._observations.observe(admission.robot_id),
                             robot_id=admission.robot_id,
@@ -998,33 +1091,12 @@ class PickHandler:
                         )
                         evidence["vertical_arrival_observation"] = asdict(arrived)
                         verify_top_offset_arrival(
-                            admission.sample, arrived, top_contact
+                            admission.sample,
+                            arrived,
+                            top_hover_world
+                            if top_hover_world is not None
+                            else top_contact,
                         )
-                        lift_world = (
-                            *arrived.tcp_pose.position_xyz[:2],
-                            arrived.tcp_pose.position_xyz[2]
-                            + context.params.lift_height_m,
-                        )
-                        targets = replace(
-                            targets,
-                            lift=replace(
-                                targets.lift,
-                                position=world_position_to_base(
-                                    lift_world, context.base
-                                ),
-                                orientation_xyzw=world_orientation_to_base(
-                                    arrived.tcp_pose.orientation_xyzw, context.base
-                                ),
-                            ),
-                        )
-                        evidence["lift_geometry"] = {
-                            "source": "measured_vertical_offset_grasp",
-                            "selected_lift_base_position": list(targets.lift.position),
-                            "selected_orientation_xyzw": list(
-                                targets.lift.orientation_xyzw
-                            ),
-                            "lift_height_m": context.params.lift_height_m,
-                        }
                     except Exception as error:
                         return self._failed(
                             operation,
@@ -1034,6 +1106,14 @@ class PickHandler:
                             motion_sent=motion_sent,
                         )
                 elif not dispatched_free_space:
+                    if runtime_operation is None:
+                        return self._failed(
+                            operation,
+                            f"{phase} has no dispatchable operation",
+                            evidence,
+                            terminal=not motion_sent,
+                            motion_sent=motion_sent,
+                        )
                     result = await self._dispatch(operation, phase, runtime_operation)
                     evidence.update(result.evidence)
                 motion_sent = motion_sent or result.motion_sent

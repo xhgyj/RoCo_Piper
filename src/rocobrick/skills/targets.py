@@ -121,6 +121,30 @@ class SkillParams:
     # support surface. PhysX contact converts this bounded position demand into
     # downward support force; no gripper action is involved.
     support_press_m: float = 0.001
+    # Zero retains endpoint pressing; positive stops on measured top reaction.
+    support_target_force_n: float = 0.0
+    # Public-space gap of the SUPPORT_TOP staging pose the pre-phase leaves the
+    # empty support tool at; the guarded contact descent consumes it.  It must
+    # exceed the combined arrival tracking error: at task-c-top-offset13h the
+    # 10 mm gap lost 3.5 mm to 0.0119 rad of joint3 tracking (inside the 0.02
+    # rad goal tolerance), the jaw brushed the upper brick's edge and the whole
+    # stack slid 6.46 mm before the press even started.
+    support_approach_gap_m: float = 0.01
+    # Small outward tool lean for top support; zero preserves vertical support.
+    # This changes the commanded orientation, not its acceptance tolerance.
+    support_radial_tilt_deg: float = 0.0
+    support_surface_bias_m: float = 0.0
+    top_offset_pick_tilt_deg: float = 0.0
+    place_up_standoff_m: float = 0.08
+    # Extra closing command for PLACE_UP's pre-insertion grip: the upward
+    # insertion carries its whole load through pad friction, and the support's
+    # press transfers to the held brick at the stud engagement, so the pads are
+    # pressed a further ``place_up_regrip_closing_m`` beyond the measured
+    # opening once that brick is already held.  Zero keeps the one-shot close.
+    place_up_regrip_closing_m: float = 0.0
+    # Zero retains continuous insertion. A positive value enables bounded
+    # measured-object feedback between collision-planned LIN steps.
+    place_up_feedback_step_m: float = 0.0
 
     def __post_init__(self) -> None:
         bounds = {
@@ -147,6 +171,11 @@ class SkillParams:
             "place_align_tolerance_m": (0.0, 0.01),
             "place_interface_align_tolerance_m": (0.0, 0.01),
             "support_press_m": (0.0, 0.005),
+            # The guarded descent travels this gap at CONTACT_CARTESIAN_SPEED_MPS
+            # (1 mm/s) inside a 60 s operation timeout; the 40 mm bound keeps
+            # that budget honest.
+            "support_approach_gap_m": (0.0, 0.04),
+            "place_up_standoff_m": (0.0, 0.08),
         }
         for name, value in vars(self).items():
             if isinstance(value, bool) or not isinstance(value, (int, float)):
@@ -155,12 +184,24 @@ class SkillParams:
             if not math.isfinite(number):
                 raise ValueError(f"{name} must be finite, got {value!r}")
             object.__setattr__(self, name, number)
+        if not 0.0 <= self.place_up_feedback_step_m <= 0.002:
+            raise ValueError("place_up_feedback_step_m must be in [0, 0.002]")
+        if not 0.0 <= self.support_target_force_n <= 3.0:
+            raise ValueError("support_target_force_n must be in [0, 3] N")
         for name, (low, high) in bounds.items():
             value = float(getattr(self, name))
             if not value > low:
                 raise ValueError(f"{name} must be > {low}, got {value!r}")
             if not value <= high:
                 raise ValueError(f"{name} must be <= {high}, got {value!r}")
+        if not 0.0 <= self.support_radial_tilt_deg <= 10.0:
+            raise ValueError("support_radial_tilt_deg must be in [0, 10]")
+        if not 0.0 <= self.support_surface_bias_m <= 0.024:
+            raise ValueError("support_surface_bias_m must be in [0, 0.024]")
+        if not 0.0 <= self.top_offset_pick_tilt_deg <= 35.0:
+            raise ValueError("top_offset_pick_tilt_deg must be in [0, 35]")
+        if not 0.0 <= self.place_up_regrip_closing_m <= 0.01:
+            raise ValueError("place_up_regrip_closing_m must be in [0, 0.01]")
         for name in ("position_tolerance_m", "orientation_tolerance_rad"):
             value = float(getattr(self, name))
             maximum = (
@@ -378,6 +419,7 @@ class PickTargets:
     pregrasp: TcpPoseTarget  # xy = brick center; z = center + standoff
     precontact_boundary: TcpPoseTarget  # final free-space pose before contact
     lift: TcpPoseTarget  # z = center + standoff + lift height
+
     @property
     def approach(self) -> TcpPoseTarget:
         """Compatibility alias for the pre-contact free-space boundary."""

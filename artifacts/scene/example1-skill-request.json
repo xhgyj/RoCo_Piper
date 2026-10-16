@@ -1,0 +1,19 @@
+{
+  "robot_id": "piper_0",
+  "schema": "rocobrick-skill-request/v1",
+  "skill_params_path": "config/skill_params.json",
+  "steps": [
+    {
+      "physical_instance_id": "brick-768de5a17827920c48d4",
+      "skill": "TRANSIT"
+    },
+    {
+      "physical_instance_id": null,
+      "skill": "WAIT"
+    },
+    {
+      "physical_instance_id": "brick-768de5a17827920c48d4",
+      "skill": "PICK"
+    }
+  ]
+}

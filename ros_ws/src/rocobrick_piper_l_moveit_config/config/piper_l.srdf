@@ -99,4 +99,12 @@
     <disable_collisions link1="flange_link" link2="gripper_link" reason="Adjacent"/>
     <disable_collisions link1="flange_link" link2="gripper_link1" reason="Never"/>
     <disable_collisions link1="flange_link" link2="gripper_link2" reason="Never"/>
+    <!--The wrist camera carries no collision geometry any more (see
+        urdf/piper_l.camera_stand.xacro and
+        rocobrick.isaac_scene._disable_camera_collisions: the vendor stand's
+        convex hull filled the narrow space over a placement and staged the
+        offset12 support pre-phase with a 1.87 mm interpenetration).  The
+        camera link pair entries that used to be culled here are gone with the
+        geometry; the simulator disables the same colliders and records them in
+        the session evidence.-->
 </robot>

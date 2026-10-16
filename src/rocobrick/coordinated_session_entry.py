@@ -9,6 +9,101 @@ from rocobrick.coordinated_session import (
     CoordinatedSessionResult,
 )
 from rocobrick.dual_arm_coordinator import DualArmPlanOnlyCoordinator
+from rocobrick.clearance import (
+    ClearanceReport,
+    attachment_box,
+    gate_trajectory,
+)
+
+# Minimal cross-robot separation the simulator's own convex-hull colliders must
+# keep for a commanded combined motion.  The offset12 support pre-phase staged
+# two wrist cameras 1.5 mm apart in that geometry; the soft drives then jammed
+# and piper_0's arm controller aborted on goal tolerance.  MoveIt's concave
+# mesh check reported 3.1 mm for the same pose and accepted it, so the floor
+# must be enforced in the arbiter geometry instead.
+CLEARANCE_FLOOR_M = 0.015
+
+
+def clearance_gate(
+    session: object,
+    request: CoordinatedSessionRequest,
+    raw: Mapping[str, object],
+) -> ClearanceReport:
+    """Measure one planned combined motion in the simulator's hull geometry.
+
+    The model is the very description MoveIt planned on, the hulls are the ones
+    the Isaac bridge collides, and the trajectory is replayed between its
+    returned waypoints.  Any body rigged to a robot (a held brick) participates
+    from the request's attachment facts.
+
+    Returns:
+        The clearance verdict; a not-passed verdict must block dispatch.
+    """
+    description_reader = getattr(session, "unified_robot_description", None)
+    if not callable(description_reader):
+        raise ValueError(
+            "sim-arbiter clearance gate requires the combined robot description"
+        )
+    model_document = description_reader()
+    if not isinstance(model_document, str) or "<robot" not in model_document:
+        raise ValueError("combined robot description is not a URDF document")
+    attached: dict[str, list[object]] = {}
+    for robot_id, facts in (request.physical_facts or {}).items():
+        bodies = []
+        if not isinstance(facts, Mapping):
+            continue
+        for key, fact in facts.items():
+            if not isinstance(key, str) or not key.startswith("holding:"):
+                continue
+            attachment = fact.get("attachment") if isinstance(fact, Mapping) else None
+            if not isinstance(attachment, Mapping):
+                continue
+            link = attachment.get("link_name")
+            minimum = attachment.get("minimum_m")
+            maximum = attachment.get("maximum_m")
+            if not (isinstance(link, str) and minimum and maximum):
+                raise ValueError(f"held body {key} lacks a bound attachment box")
+            bodies.append(
+                attachment_box(
+                    f"{robot_id}_held_brick",
+                    link,
+                    minimum,
+                    maximum,
+                )
+            )
+        if bodies:
+            attached[robot_id] = bodies
+    points = [
+        point["positions"] if isinstance(point, Mapping) else point
+        for point in raw["points"]
+    ]
+    static = {
+        name: float(value)
+        for name, value in (request.start_state or {}).items()
+        if isinstance(value, (int, float))
+    }
+    report = gate_trajectory(
+        model_document,
+        raw["joint_names"],
+        points,
+        static_joint_values=static,
+        attached=attached,
+        floor_m=CLEARANCE_FLOOR_M,
+        robots=tuple(request.robots),
+    )
+    covered = report.evidence["covered_bodies"]
+    for robot_id in request.robots:
+        # A description that carries this robot's arm links but matches no
+        # arbiter body would silently pass every pair; treat that as a hard
+        # failure so gate coverage can never vanish unnoticed.
+        if (
+            f'link name="{robot_id}_base_link"' in model_document
+            and covered.get(robot_id, 0) == 0
+        ):
+            raise ValueError(
+                f"sim-arbiter clearance gate matched no body for {robot_id}"
+            )
+    return report
 
 
 def perform_coordinated_plan(
@@ -181,6 +276,13 @@ def perform_coordinated_plan(
             "scene_digest": operation.scene_digest,
             "planning_scene": dict(scene_proof),
         }
+        clearance = clearance_gate(session, request, raw)
+        trajectory["clearance_gate"] = clearance.evidence
+        if not clearance.passed:
+            raise ValueError(
+                f"sim-arbiter clearance gate blocked dispatch: "
+                f"{clearance.fail_message()}"
+            )
         if callable(participants_executor):
             # Crossing this boundary may prepare or start physical actions.
             # Exceptions after it cannot prove that the participants stopped.

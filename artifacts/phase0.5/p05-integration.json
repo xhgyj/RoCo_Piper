@@ -1,0 +1,272 @@
+{
+  "checks": {
+    "host_cleanup_orderly": true,
+    "host_dofs_complete": true,
+    "host_evidence_passed": true,
+    "host_single_participant": true,
+    "probe_passed": true,
+    "readiness_marker_seen": true
+  },
+  "collected_at_utc": "2026-09-21T01:58:17.894452+00:00",
+  "host_bridge": {
+    "articulation_prim_path": "/World/Robot_0/root_joint",
+    "bounded": {
+      "hold_seconds_s": 90.0,
+      "hold_steps": 600,
+      "max_steps": 1000000,
+      "ready_timeout_s": 60.0,
+      "render_steps": false,
+      "time_limit_s": 300.0
+    },
+    "bridge_extension_enabled": false,
+    "cleanup": {
+      "app_close_initiated": true,
+      "rclpy_shutdown": true,
+      "timeline_stopped": true,
+      "world_stopped": true
+    },
+    "clock_published_at_ready": 1,
+    "commands": {
+      "applied": 553,
+      "clamped_to_limits": 0,
+      "received": 553,
+      "unknown_joint_names_ignored": []
+    },
+    "dds_profile": "/home/mzictt/RoCo_Piper/.runtime/dds/fastdds-host.xml",
+    "dof_limits_source": "robot.dof_properties",
+    "elapsed_s": 96.861,
+    "headless": true,
+    "hold": {
+      "seconds_wall": 90.0,
+      "sim_time_final_s": 740.300039,
+      "steps": 44411
+    },
+    "hold_completed": true,
+    "hold_samples": [
+      {
+        "playing": true,
+        "sim_time_s": 2.117,
+        "step": 125,
+        "wall_s": 0.278
+      },
+      {
+        "playing": true,
+        "sim_time_s": 4.117,
+        "step": 245,
+        "wall_s": 0.508
+      },
+      {
+        "playing": true,
+        "sim_time_s": 6.117,
+        "step": 365,
+        "wall_s": 0.858
+      },
+      {
+        "playing": true,
+        "sim_time_s": 8.117,
+        "step": 485,
+        "wall_s": 1.188
+      },
+      {
+        "playing": true,
+        "sim_time_s": 10.117,
+        "step": 605,
+        "wall_s": 1.354
+      },
+      {
+        "playing": true,
+        "sim_time_s": 12.117,
+        "step": 725,
+        "wall_s": 1.467
+      },
+      {
+        "playing": true,
+        "sim_time_s": 14.117,
+        "step": 845,
+        "wall_s": 1.546
+      },
+      {
+        "playing": true,
+        "sim_time_s": 16.117,
+        "step": 965,
+        "wall_s": 1.611
+      },
+      {
+        "playing": true,
+        "sim_time_s": 18.117,
+        "step": 1085,
+        "wall_s": 1.675
+      },
+      {
+        "playing": true,
+        "sim_time_s": 20.117,
+        "step": 1205,
+        "wall_s": 1.742
+      }
+    ],
+    "in_process_rclpy": true,
+    "joint_command_message_type": "sensor_msgs/JointState",
+    "joint_dofs": [
+      "joint1",
+      "joint2",
+      "joint3",
+      "joint4",
+      "joint5",
+      "joint6",
+      "gripper_joint1",
+      "gripper_joint2"
+    ],
+    "joint_states_published_at_ready": 1,
+    "omnigraph_created": false,
+    "passed": true,
+    "phase": "P0.5",
+    "publish_totals": {
+      "clock": 2572,
+      "joint_states": 2572,
+      "joint_states_diag": 2572,
+      "positions_nan": 0
+    },
+    "rclpy_bundled_humble": true,
+    "rclpy_module": "/home/mzictt/RoCo_Piper/.venv/lib/python3.11/site-packages/isaacsim/exts/isaacsim.ros2.bridge/humble/rclpy/rclpy/__init__.py",
+    "rclpy_node_count": 1,
+    "rclpy_node_name": "piper_l0_host_bridge",
+    "rclpy_source": "bundled humble rclpy via tools/isaac-ros-env.sh",
+    "rclpy_started": true,
+    "readiness_marker": "p0.5_host_bridge_ready",
+    "ready": true,
+    "robot_prim_path": "/World/Robot_0",
+    "ros_domain_id": 73,
+    "schema": "rocobrick-host-bridge-smoke/v1",
+    "sim_time_at_ready_s": 0.116667,
+    "steps_to_ready": 5,
+    "steps_total": 44416,
+    "timeline_playing": true,
+    "topics": {
+      "clock": "/clock",
+      "joint_commands": "/isaac_joint_command",
+      "joint_states": "/isaac_joint_states"
+    },
+    "usd": {
+      "path": "/home/mzictt/RoCo_Piper/robot_assets/piper_l/USD/piper_l_gripper_d435.usd",
+      "sha256": "a781d52f9d55291fca9c8f2695abf9e311640d996314d272f47639d5323e2375"
+    }
+  },
+  "host_exit_status": "0",
+  "integration_probe": {
+    "baseline": {
+      "gripper_joint1": 2.7493737775330374e-07,
+      "gripper_joint2": -8.384326122268249e-09,
+      "joint1": -9.89935301731748e-07,
+      "joint2": 0.0006135629373602569,
+      "joint3": -2.410111846984364e-05,
+      "joint4": 0.0012944333720952272,
+      "joint5": 0.0002810671867337078,
+      "joint6": 4.781715688295662e-06
+    },
+    "clock_first_ns": 43850002287,
+    "clock_increasing": true,
+    "clock_last_ns": 44466668986,
+    "clock_messages": 4,
+    "command_delta": 0.2,
+    "command_joint_names": [
+      "joint1",
+      "joint4"
+    ],
+    "command_move_min": 0.05,
+    "command_positions": {
+      "joint1": 0.19999901006469828,
+      "joint4": 0.20129443337209524
+    },
+    "command_published": true,
+    "commanded_moved": true,
+    "deltas": {
+      "gripper_joint1": 4.8e-05,
+      "gripper_joint2": -0.0,
+      "joint1": 0.199949,
+      "joint2": 0.000283,
+      "joint3": 5e-06,
+      "joint4": 0.214296,
+      "joint5": 0.000122,
+      "joint6": 3.8e-05
+    },
+    "dof_names_ok": true,
+    "expected_dof_names": [
+      "joint1",
+      "joint2",
+      "joint3",
+      "joint4",
+      "joint5",
+      "joint6",
+      "gripper_joint1",
+      "gripper_joint2"
+    ],
+    "final_positions": {
+      "gripper_joint1": 4.824838470085524e-05,
+      "gripper_joint2": -4.749174919993493e-08,
+      "joint1": 0.19994834065437317,
+      "joint2": 0.0008962861029431224,
+      "joint3": -1.879022784123663e-05,
+      "joint4": 0.2155902087688446,
+      "joint5": 0.00040344041190110147,
+      "joint6": 4.320702646509744e-05
+    },
+    "idle_delta_max": 0.35,
+    "idle_within_limit": true,
+    "joint_state_diag_messages": 0,
+    "joint_state_messages": 1,
+    "observed_dof_names": [
+      "gripper_joint1",
+      "gripper_joint2",
+      "joint1",
+      "joint2",
+      "joint3",
+      "joint4",
+      "joint5",
+      "joint6"
+    ],
+    "passed": true,
+    "phase": "P0.5",
+    "publisher_info": {
+      "/clock": [
+        {
+          "node_name": "piper_l0_host_bridge",
+          "topic_type": "rosgraph_msgs/msg/Clock"
+        }
+      ],
+      "/isaac_joint_states": [
+        {
+          "node_name": "piper_l0_host_bridge",
+          "topic_type": "sensor_msgs/msg/JointState"
+        }
+      ]
+    },
+    "schema": "rocobrick-p05-integration-probe/v1",
+    "topics": {
+      "clock": "/clock",
+      "joint_commands": "/isaac_joint_command",
+      "joint_states": "/isaac_joint_states"
+    }
+  },
+  "passed": true,
+  "phase": "P0.5",
+  "profiles": {
+    "container_port": 17651,
+    "host_address": "10.198.61.26",
+    "host_port": 17650,
+    "profiles": {
+      "container": {
+        "path": "/home/mzictt/RoCo_Piper/.runtime/dds/fastdds-container.xml",
+        "sha256": "d8985db864680b6987c85abb7f951df2af0c60d184c72a8e0ab3a2e4c82e7e4d"
+      },
+      "host": {
+        "path": "/home/mzictt/RoCo_Piper/.runtime/dds/fastdds-host.xml",
+        "sha256": "859b4b01c93c3f29266ae99f63c37300888c16255080f3b334592c63b6525f6b"
+      }
+    },
+    "schema": "rocobrick-dds-profiles/v1",
+    "topology": "single-host-participant-explicit-peers",
+    "transport": "TCPv4"
+  },
+  "readiness_marker_seen": true,
+  "schema": "rocobrick-p05-integration/v1"
+}

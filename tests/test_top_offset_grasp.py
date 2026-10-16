@@ -86,6 +86,29 @@ def test_real_task_c_has_half_overlap_and_negative_y_free_strip():
     assert payload == before
 
 
+def test_tilted_offset_grasp_keeps_closing_axis_horizontal_and_rejects_wrong_lean():
+    """The commanded tilt moves the wrist toward the free strip, not the jaws."""
+    sample = observed(document())
+    ctx = context()
+    ctx = replace(ctx, params=replace(ctx.params, top_offset_pick_tilt_deg=30.0))
+    original = pick_targets(
+        sample.aabb_min, sample.aabb_max, ctx.base, ctx.provenance, ctx.params
+    )
+    targets, contact, proof = top_offset_targets(binding(), sample, ctx, original)
+    tool = _quat_rotate_vector(contact.orientation_xyzw, (0, 0, 1))
+    closing = _quat_rotate_vector(contact.orientation_xyzw, (0, 1, 0))
+    assert tool[2] == pytest.approx(-math.cos(math.radians(30)))
+    assert tool[1] > 0  # Wrist (-tool axis) leans into negative-Y free strip.
+    assert closing[2] == pytest.approx(0, abs=1e-12)
+    assert abs(closing[0]) == pytest.approx(1)
+    assert proof["downward_tilt_deg"] == 30.0
+    assert targets.lift.orientation_xyzw == targets.precontact_boundary.orientation_xyzw
+    verify_top_offset_arrival(sample, replace(sample, tcp_pose=contact), contact)
+    wrong = Pose(contact.position_xyz, (2**-0.5, 2**-0.5, 0, 0))
+    with pytest.raises(ValueError, match="not downward"):
+        verify_top_offset_arrival(sample, replace(sample, tcp_pose=wrong), contact)
+
+
 def test_contact_is_downward_and_offset_survives_world_yaw_and_height():
     """Use brick-local empty-half geometry and measured elevated support height."""
     shared = document()
@@ -101,7 +124,18 @@ def test_contact_is_downward_and_offset_survives_world_yaw_and_height():
         sample.aabb_min, sample.aabb_max, ctx.base, ctx.provenance, ctx.params
     )
     targets, contact, proof = top_offset_targets(binding(), sample, ctx, original)
-    assert contact.position_xyz == pytest.approx((0.358, 0.06, 0.09395))
+    # The pad centre starts at the free strip's centre (32/2 - 16/2 = 8 mm from
+    # the brick's centre) and moves deeper into the free strip by min(3 mm, 20%
+    # of the strip): no shift let the jaws graze the mated upper brick and the
+    # 13k insertion plan was rejected; 6 mm cleared it but the longer arm let
+    # the brick slip at the stud engagement (13l). 3 mm keeps both margins.
+    deeper = min(0.0045, 0.016 * 0.3)
+    assert deeper == pytest.approx(0.0045)
+    assert contact.position_xyz == pytest.approx((0.35 + 0.008 + deeper, 0.06, 0.09395))
+    centre_offset = proof["local_contact_xyz_m"][1]
+    assert centre_offset == pytest.approx(-(0.008 + deeper))
+    # The pad centre never leaves the brick's free half.
+    assert abs(centre_offset) <= 0.032 / 2 - 0.001
     assert _quat_rotate_vector(contact.orientation_xyzw, (0, 0, 1)) == pytest.approx(
         (0, 0, -1)
     )
@@ -150,6 +184,8 @@ def test_contact_is_downward_and_offset_survives_world_yaw_and_height():
 @pytest.mark.parametrize("push_brick", [False, True])
 def test_pick_submits_only_offset_pose_and_retains_arrival_gate(push_brick):
     """Use strict arrival evidence and refuse early contact permission on a push."""
+    from rocobrick.skills.pick import PICK_TOPDOWN_HOVER_M
+
     shared = document()
     ledger = OperationStateLedger(("piper_0", "piper_1"))
     ledger.confirm(
@@ -172,6 +208,7 @@ def test_pick_submits_only_offset_pose_and_retains_arrival_gate(push_brick):
             robot_ids=("piper_0", "piper_1"), free_space_context=capture
         ),
     )
+    base = Pose(context().base.position_xyz, context().base.orientation_xyzw)
 
     async def dispatch(item, phase, value):
         phases.append(phase)
@@ -188,6 +225,7 @@ def test_pick_submits_only_offset_pose_and_retains_arrival_gate(push_brick):
 
     async def move(item, **kwargs):
         phase = kwargs["phase_id"]
+        assert phase in ("precontact_boundary", "contact_descent")
         phases.append(phase)
         target = kwargs["targets"]["piper_0"]
         motions.append(target)
@@ -197,7 +235,6 @@ def test_pick_submits_only_offset_pose_and_retains_arrival_gate(push_brick):
         assert "vertical_approach" not in target
         assert target["moveit_pose_goal"] is True
         tcp = target["tcp_pose"]
-        base = Pose(context().base.position_xyz, context().base.orientation_xyzw)
         measured = compose(
             base, Pose(tuple(tcp["position"]), tuple(tcp["orientation_xyzw"]))
         )
@@ -241,6 +278,7 @@ def test_pick_submits_only_offset_pose_and_retains_arrival_gate(push_brick):
         "plan_grasp",
         "open_gripper",
         "precontact_boundary",
+        "contact_descent",
         "allow_grasp_contact",
         "close_gripper",
     ], result.reason
@@ -248,11 +286,24 @@ def test_pick_submits_only_offset_pose_and_retains_arrival_gate(push_brick):
     assert (
         result.evidence["lift_geometry"]["source"] == "measured_vertical_offset_grasp"
     )
-    assert len(motions) == 1
+    assert result.evidence["topdown_split"]["hover_height_m"] == (
+        PICK_TOPDOWN_HOVER_M
+    )
+    assert result.evidence["contact_descent"]["free_space"]["arrival_confirmed"] is True
+    assert len(motions) == 2
     assert motions[0]["tcp_pose"]["position_tolerance_m"] == 0.002
     assert (
         motions[0]["tcp_pose"]["orientation_tolerance_rad"]
         == context().params.orientation_tolerance_rad
+    )
+    # The free-space plan ends at the hover pose; the handler-owned descent
+    # runs on the same unified lane and covers exactly the hover height
+    # straight down (base z is world z).
+    assert motions[1]["tcp_pose"]["position"][:2] == pytest.approx(
+        motions[0]["tcp_pose"]["position"][:2]
+    )
+    assert motions[1]["tcp_pose"]["position"][2] == pytest.approx(
+        motions[0]["tcp_pose"]["position"][2] - PICK_TOPDOWN_HOVER_M
     )
     assert shared["robots"]["piper_0"]["opening_m"] == pytest.approx(0.08)
     assert ledger.owner_of_object("brick-a") is None

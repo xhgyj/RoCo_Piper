@@ -111,3 +111,43 @@ alone does not certify upward assembly or clearance for the whole gripper. The
 known discrepancy between the source JSON's half overlap and the previous live
 interface transform has not been repaired by this trial; actual PLACE_UP remains
 subject to its existing planning and physical evidence gates.
+
+#### Top support and execution limits
+
+`config/skill_params.json` sets `support_radial_tilt_deg` to 5 degrees
+(allowed range 0–10; zero restores vertical support). SUPPORT_TOP alone leans
+the tool outward along the base-to-support surface tangent. The approach and
+contact use the same orientation and distal reference point: the tool-axis
+offset is compensated so the reference stays over the measured top centre,
+with 10 mm approach clearance and the configured bounded contact press.
+Position/orientation acceptance tolerances, collision checks, actual contact
+reports and the 8 N support-force guard remain enforced.
+
+Task C's vertical support approach exceeds the effective joint5 limit of
+70 degrees even though the planning-source URDF permits 89.5 degrees. Offline
+IK must intersect URDF limits with generated `joint_limits.yaml`; the wider
+URDF alone is not execution feasibility evidence. The 5-degree support lean
+was checked against both approach and contact using the effective limits;
+live planning and contact evidence are still required to confirm execution.
+
+The Task C trial also uses a 20 mm `support_surface_bias_m` toward the
+support robot along the long top dimension, capped to preserve the measured
+pad separation and an 8 mm edge margin. `top_offset_pick_tilt_deg: 30` leans
+the carrier wrist toward its structurally exposed half while keeping the
+closing axis horizontal. Arrival must match the commanded tilted tool axis;
+the orientation tolerance is not widened. Zero restores the vertical trial.
+`place_up_standoff_m: 0.03` separates the upward insertion standoff from
+the unchanged PLACE_DOWN standoff. These settings require a fresh PICK:
+the actual measured grasp transform, not an assumed tilted transform, is
+used to generate subsequent placement targets. Collision checks remain on.
+
+#### Continuous PLACE_UP trial
+
+`place_up_feedback_step_m: 0.0` selects one collision-checked, supervised LIN
+rise instead of repeated millimetre corrections and their planning pauses.
+Upward insertion alone uses a 5 mm/s Cartesian speed cap; SUPPORT_TOP,
+PLACE_DOWN and withdrawal retain the 1 mm/s cap. Retiming never accelerates
+a trajectory beyond its MoveIt-planned timing or skips its waypoints.
+The live monitor retains 3 mm / 3 degree grasp-slip bounds, the 8 N force
+limit, support checks and exact native connection confirmation. Unconfirmed
+connection permits bounded withdrawal, not release or an assembly claim.

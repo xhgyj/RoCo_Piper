@@ -1,0 +1,133 @@
+{
+  "artifact": "ros-humble-runtime",
+  "phase": "P0.3",
+  "date_collected": "2026-09-20",
+  "architecture": "host-isaac-ros-container",
+  "base_image": {
+    "repository": "osrf/ros",
+    "tag_observed": "humble-desktop-jammy",
+    "reference": "osrf/ros@sha256:c3eb3a8576b8b4fee5988244135855a1a2146df93ee1523878cebdc0fb1be9a6",
+    "digest": "sha256:c3eb3a8576b8b4fee5988244135855a1a2146df93ee1523878cebdc0fb1be9a6",
+    "os": "linux",
+    "architecture": "amd64",
+    "created": "2026-08-19T00:25:15.342111404Z",
+    "verification": "local docker image inspect RepoDigests"
+  },
+  "ros": {
+    "distro": "humble",
+    "rmw_implementation": "rmw_fastrtps_cpp",
+    "ros_localhost_only": "0",
+    "ros_domain_id_default": "73",
+    "network_mode": "rootless_bridge_with_explicit_tcpv4"
+  },
+  "required_apt_packages": [
+    "python3-colcon-common-extensions",
+    "python3-rosdep",
+    "python3-vcstool",
+    "ros-humble-controller-manager",
+    "ros-humble-joint-state-broadcaster",
+    "ros-humble-joint-trajectory-controller",
+    "ros-humble-moveit",
+    "ros-humble-moveit-configs-utils",
+    "ros-humble-rmw-fastrtps-cpp",
+    "ros-humble-ros2-control",
+    "ros-humble-ros2-controllers",
+    "ros-humble-xacro"
+  ],
+  "installed_package_versions": {
+    "python3-colcon-common-extensions": "0.3.0-100",
+    "python3-rosdep": "0.27.0-1",
+    "python3-vcstool": "0.3.0-1",
+    "ros-humble-controller-manager": "2.54.2-1jammy.20260908.115549",
+    "ros-humble-joint-state-broadcaster": "2.54.0-1jammy.20260908.124005",
+    "ros-humble-joint-trajectory-controller": "2.54.0-1jammy.20260908.124006",
+    "ros-humble-moveit": "2.5.10-1jammy.20260908.102620",
+    "ros-humble-moveit-configs-utils": "2.5.10-1jammy.20260908.003510",
+    "ros-humble-rmw-fastrtps-cpp": "6.2.10-1jammy.20260907.210327",
+    "ros-humble-ros2-control": "2.54.2-1jammy.20260908.123937",
+    "ros-humble-ros2-controllers": "2.54.0-1jammy.20260909.011001",
+    "ros-humble-xacro": "2.1.1-1jammy.20260304.195513"
+  },
+  "built_image": {
+    "reference": "roco-piper-ros:humble",
+    "id": "sha256:77615ee01616",
+    "architecture": "amd64",
+    "os": "linux",
+    "self_check_schema": "rocobrick-ros-self-check/v1",
+    "self_check_ready": true
+  },
+  "workspace": {
+    "container_path": "/workspace/ros_ws",
+    "host_path": "./ros_ws",
+    "legacy_planner_workspace_copied": false
+  },
+  "entrypoint": {
+    "path": "/usr/local/bin/ros-entrypoint",
+    "default_command": [
+      "sleep",
+      "infinity"
+    ],
+    "self_check_command": [
+      "self-check"
+    ]
+  },
+  "host_facts": {
+    "docker_version": "29.6.2",
+    "docker_mode": "rootless",
+    "docker_compose_available": false,
+    "base_image_local": true,
+    "base_image_digest_verified": true
+  },
+  "dds_smoke": {
+    "rmw_implementation": "rmw_fastrtps_cpp",
+    "shared_bridge_network": {
+      "passed": true,
+      "evidence": "A listener container received data: 'Hello World: 5' from a separate talker container."
+    },
+    "rootless_host_network": {
+      "passed": false,
+      "evidence": "The listener timed out after 30 seconds and ros2 node list --no-daemon returned no remote nodes while the talker was publishing.",
+      "interpretation": "Default multicast discovery does not cross the rootless host-network boundary. This failed topology is no longer used."
+    },
+    "explicit_tcpv4": {
+      "passed": true,
+      "transport": "TCPv4",
+      "topology": "dual-listener-explicit-peers",
+      "host_port": 17650,
+      "container_port": 17651,
+      "shared_memory_enabled": false,
+      "multicast_discovery_enabled": false,
+      "container_restart_passed": true,
+      "evidence_path": "artifacts/phase0/rootless-dds-smoke.json",
+      "evidence": "Two rounds passed with distinct payloads in both directions; the ROS container was removed and recreated between rounds. The host participant ran through Isaac Sim 5.1 with isaacsim.ros2.bridge enabled."
+    },
+    "host_isaac_bridge": {
+      "passed": true,
+      "evidence": "artifacts/phase0.5/p05-integration.json",
+      "schema": "rocobrick-p05-integration/v1",
+      "checks": [
+        "readiness_marker_seen",
+        "host_single_participant",
+        "host_dofs_complete",
+        "host_cleanup_orderly",
+        "host_evidence_passed",
+        "probe_passed"
+      ],
+      "verified": "Host Isaac Sim 5.1 single in-process rclpy participant (bridge Kit extension disabled) publishes /clock and /isaac_joint_states to the rootless ROS container and applies /isaac_joint_command commands to the 8-DOF Piper_L articulation; container probe verified complete DOF names, increasing clock, commanded joint movement (0.20 rad commanded vs 0.20/0.21 rad measured) and bounded idling."
+    }
+  },
+  "status": {
+    "contract_complete": true,
+    "image_build_attempted": true,
+    "image_self_check_passed": true,
+    "compose_smoke_passed": false,
+    "host_isaac_runtime_bidirectional_passed": true,
+    "host_isaac_dds_smoke_passed": true
+  },
+  "gaps": [
+    {
+      "id": "compose_plugin_missing",
+      "detail": "Docker Engine is available, but the docker compose CLI plugin is not installed on the host. The equivalent image build and self-check were completed with docker build/run."
+    }
+  ]
+}

@@ -357,20 +357,28 @@ def test_srdf_preserves_arm_and_adds_the_tcp_group() -> None:
 
 
 def test_kinematics_arm_entry_unchanged_and_arm_tcp_mirrors_it() -> None:
-    """The vendor arm/gripper entries stay; arm_tcp copies arm verbatim."""
+    """The vendor arm/gripper entries stay; arm_tcp mirrors arm except timeout."""
     ours = yaml.safe_load(KINEMATICS_YAML.read_text(encoding="utf-8"))
     vendor = yaml.safe_load(VENDOR_KINEMATICS_YAML.read_text(encoding="utf-8"))
     # The vendor entries are preserved exactly (parsed-YAML equality).
     assert ours["arm"] == vendor["arm"]
     assert ours["gripper"] == vendor["gripper"]
-    # The R5.A addition is exactly one new group, mirroring arm verbatim.
+    # The R5.A addition is exactly one new group: solver and search
+    # resolution mirror arm verbatim, while the raised timeout gives
+    # MoveIt's constrained goal sampler real restart budget on narrow
+    # IK basins near the joint limits.
     assert set(ours) == {"arm", "gripper", "arm_tcp"}
-    assert ours["arm_tcp"] == ours["arm"]
-    assert ours["arm_tcp"] == {
-        "kinematics_solver": "kdl_kinematics_plugin/KDLKinematicsPlugin",
-        "kinematics_solver_search_resolution": 0.0050000000000000001,
-        "kinematics_solver_timeout": 0.0050000000000000001,
+    assert {
+        key: value
+        for key, value in ours["arm_tcp"].items()
+        if key != "kinematics_solver_timeout"
+    } == {
+        key: value
+        for key, value in ours["arm"].items()
+        if key != "kinematics_solver_timeout"
     }
+    assert ours["arm_tcp"]["kinematics_solver_timeout"] == 0.05
+    assert ours["arm"]["kinematics_solver_timeout"] == 0.0050000000000000001
     # Vendor provenance citation is kept in the header.
     header = KINEMATICS_YAML.read_text(encoding="utf-8")
     assert (
@@ -459,7 +467,7 @@ def test_tcp_planning_artifact_pins_the_kinematics_config(plan_artifact) -> None
     digest = hashlib.sha256(KINEMATICS_YAML.read_bytes()).hexdigest()
     assert plan_artifact["kinematics_yaml_sha256"] == digest
     assert plan_artifact["kinematics_arm_tcp_entry"] == (
-        "mirrors arm exactly (KDL, resolution/timeout copied)"
+        "mirrors arm (KDL, resolution copied; timeout raised to 0.05 s)"
     )
 
 

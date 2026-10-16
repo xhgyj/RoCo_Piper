@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from rocobrick.operation_state_ledger import OperationStateLedger
+from rocobrick.execution.operation_state_ledger import OperationStateLedger
 
 
 def test_ledger_is_robot_isolated_and_evidence_driven() -> None:

@@ -258,7 +258,18 @@ def derive_pre_phase_targets(
     if operation.skill == "SUPPORT_TOP":
         # The support approach is an empty-gripper Cartesian goal; MoveIt's
         # own sampler solves it instead of the host's fixed-seed KDL pass.
-        result[robot] = {**result[robot], "moveit_pose_goal": True}
+        # The 180-degree jaw-equivalent flip demands a joint6 offset of a
+        # half turn against the 120-degree limit, so at a support station
+        # the flipped branch can be structurally unreachable (offline
+        # evidence at task-c-top-offset7: the pinned orientation converged
+        # to 1e-15 while the flip stalled at 0.35 rad residual); a dead
+        # branch only dilutes the goal-tree sampling budget, so the
+        # support pose goal also stays a single orientation branch.
+        result[robot] = {
+            **result[robot],
+            "moveit_pose_goal": True,
+            "roll_flip_equivalent": False,
+        }
     if (
         operation.skill == "SUPPORT_TOP"
         and values.get("placement_robot_id") in contexts

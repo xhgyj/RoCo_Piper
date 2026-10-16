@@ -1,0 +1,148 @@
+-3] [INFO] [1789980488.260622258] [moveit.plugins.moveit_simple_controller_manager]: Returned 2 controllers in list
+[move_group-3] [INFO] [1789980488.261033551] [moveit_ros.trajectory_execution_manager]: Trajectory execution is managing controllers
+[move_group-3] [INFO] [1789980488.261042650] [move_group.move_group]: MoveGroup debug mode is ON
+[move_group-3] [INFO] [1789980488.279259630] [move_group.move_group]: 
+[move_group-3] 
+[move_group-3] ********************************************************
+[move_group-3] * MoveGroup using: 
+[move_group-3] *     - ApplyPlanningSceneService
+[move_group-3] *     - ClearOctomapService
+[move_group-3] *     - CartesianPathService
+[move_group-3] *     - ExecuteTrajectoryAction
+[move_group-3] *     - GetPlanningSceneService
+[move_group-3] *     - KinematicsService
+[move_group-3] *     - MoveAction
+[move_group-3] *     - MotionPlanService
+[move_group-3] *     - QueryPlannersService
+[move_group-3] *     - StateValidationService
+[move_group-3] ********************************************************
+[move_group-3] 
+[move_group-3] [INFO] [1789980488.279288351] [moveit_move_group_capabilities_base.move_group_context]: MoveGroup context using planning plugin ompl_interface/OMPLPlanner
+[move_group-3] [INFO] [1789980488.279295901] [moveit_move_group_capabilities_base.move_group_context]: MoveGroup context initialization complete
+[move_group-3] [96mLoading 'move_group/ApplyPlanningSceneService'...
+[move_group-3] [0m[96mLoading 'move_group/ClearOctomapService'...
+[move_group-3] [0m[96mLoading 'move_group/MoveGroupCartesianPathService'...
+[move_group-3] [0m[96mLoading 'move_group/MoveGroupExecuteTrajectoryAction'...
+[move_group-3] [0m[96mLoading 'move_group/MoveGroupGetPlanningSceneService'...
+[move_group-3] [0m[96mLoading 'move_group/MoveGroupKinematicsService'...
+[move_group-3] [0m[96mLoading 'move_group/MoveGroupMoveAction'...
+[move_group-3] [0m[96mLoading 'move_group/MoveGroupPlanService'...
+[move_group-3] [0m[96mLoading 'move_group/MoveGroupQueryPlannersService'...
+[move_group-3] [0m[96mLoading 'move_group/MoveGroupStateValidationService'...
+[move_group-3] [0m[92m
+[move_group-3] You can start planning now!
+[move_group-3] 
+[move_group-3] [WARN] [1789980488.683358373] [moveit_ros.planning_scene_monitor.planning_scene_monitor]: The complete state of the robot is not yet known.  Missing gripper
+[move_group-3] [WARN] [1789980489.698754696] [moveit_ros.planning_scene_monitor.planning_scene_monitor]: The complete state of the robot is not yet known.  Missing gripper
+[move_group-3] [WARN] [1789980490.711619570] [moveit_ros.planning_scene_monitor.planning_scene_monitor]: The complete state of the robot is not yet known.  Missing gripper
+[move_group-3] [WARN] [1789980491.759383331] [moveit_ros.planning_scene_monitor.planning_scene_monitor]: The complete state of the robot is not yet known.  Missing gripper
+[move_group-3] [INFO] [1789980492.202423922] [moveit_move_group_default_capabilities.move_action_capability]: Received request
+[move_group-3] [INFO] [1789980492.202839992] [moveit_move_group_default_capabilities.move_action_capability]: executing..
+[move_group-3] [INFO] [1789980492.202966323] [moveit_move_group_default_capabilities.move_action_capability]: Combined planning and execution request received for MoveGroup action. Forwarding to planning and execution pipeline.
+[move_group-3] [WARN] [1789980492.202985790] [moveit_move_group_capabilities_base.move_group_capability]: Execution of motions should always start at the robot's current state. Ignoring the state supplied as start state in the motion planning request
+[move_group-3] [WARN] [1789980492.202993041] [moveit_move_group_capabilities_base.move_group_capability]: Execution of motions should always start at the robot's current state. Ignoring the state supplied as difference in the planning scene diff
+[move_group-3] [INFO] [1789980492.203005880] [moveit_ros.plan_execution]: Planning attempt 1 of at most 1
+[move_group-3] [INFO] [1789980492.211393226] [moveit.ompl_planning.model_based_planning_context]: Planner configuration 'arm' will use planner 'geometric::RRTConnect'. Additional configuration parameters will be set when the planner is constructed.
+[move_group-3] [WARN] [1789980492.595492399] [moveit_trajectory_processing.time_optimal_trajectory_generation]: Joint acceleration limits are not defined. Using the default 1 rad/s^2. You can define acceleration limits in the URDF or joint_limits.yaml.
+[move_group-3] [INFO] [1789980492.605488842] [moveit.plugins.moveit_simple_controller_manager]: Returned 2 controllers in list
+[move_group-3] [INFO] [1789980492.605505552] [moveit.plugins.moveit_simple_controller_manager]: Returned 2 controllers in list
+[move_group-3] [INFO] [1789980492.605536220] [moveit_ros.trajectory_execution_manager]: Validating trajectory with allowed_start_tolerance 0.01
+[move_group-3] [INFO] [1789980492.607350692] [moveit_ros.trajectory_execution_manager]: Starting trajectory execution ...
+[move_group-3] [INFO] [1789980492.607373767] [moveit.plugins.moveit_simple_controller_manager]: Returned 2 controllers in list
+[move_group-3] [INFO] [1789980492.607380869] [moveit.plugins.moveit_simple_controller_manager]: Returned 2 controllers in list
+[move_group-3] [INFO] [1789980492.607445201] [moveit.simple_controller_manager.follow_joint_trajectory_controller_handle]: sending trajectory to arm_controller
+[ros2_control_node-1] [INFO] [1789980492.607620479] [arm_controller]: Received new action goal
+[ros2_control_node-1] [INFO] [1789980492.607655814] [arm_controller]: Accepted new action goal
+[move_group-3] [INFO] [1789980492.607770975] [moveit.simple_controller_manager.follow_joint_trajectory_controller_handle]: arm_controller started execution
+[move_group-3] [INFO] [1789980492.607788039] [moveit.simple_controller_manager.follow_joint_trajectory_controller_handle]: Goal request accepted!
+[ros2_control_node-1] [INFO] [1789980492.656364288] [arm_controller]: Goal reached, success!
+[move_group-3] [INFO] [1789980492.658201959] [moveit.simple_controller_manager.follow_joint_trajectory_controller_handle]: Controller 'arm_controller' successfully finished
+[move_group-3] [INFO] [1789980492.658248850] [moveit_ros.trajectory_execution_manager]: Completed trajectory execution with status SUCCEEDED ...
+[move_group-3] [INFO] [1789980492.667451109] [moveit_move_group_default_capabilities.move_action_capability]: Solution was found and executed.
+[move_group-3] [WARN] [1789980492.779405440] [moveit_ros.planning_scene_monitor.planning_scene_monitor]: The complete state of the robot is not yet known.  Missing gripper
+[move_group-3] [WARN] [1789980493.799460984] [moveit_ros.planning_scene_monitor.planning_scene_monitor]: The complete state of the robot is not yet known.  Missing gripper
+[move_group-3] [WARN] [1789980494.838313893] [moveit_ros.planning_scene_monitor.planning_scene_monitor]: The complete state of the robot is not yet known.  Missing gripper
+[move_group-3] [WARN] [1789980495.868471462] [moveit_ros.planning_scene_monitor.planning_scene_monitor]: The complete state of the robot is not yet known.  Missing gripper
+[move_group-3] [INFO] [1789980496.108998549] [moveit_move_group_default_capabilities.move_action_capability]: Received request
+[move_group-3] [INFO] [1789980496.109163015] [moveit_move_group_default_capabilities.move_action_capability]: executing..
+[move_group-3] [INFO] [1789980496.109219705] [moveit_move_group_default_capabilities.move_action_capability]: Combined planning and execution request received for MoveGroup action. Forwarding to planning and execution pipeline.
+[move_group-3] [WARN] [1789980496.109261430] [moveit_move_group_capabilities_base.move_group_capability]: Execution of motions should always start at the robot's current state. Ignoring the state supplied as start state in the motion planning request
+[move_group-3] [WARN] [1789980496.109265555] [moveit_move_group_capabilities_base.move_group_capability]: Execution of motions should always start at the robot's current state. Ignoring the state supplied as difference in the planning scene diff
+[move_group-3] [INFO] [1789980496.109269493] [moveit_ros.plan_execution]: Planning attempt 1 of at most 1
+[move_group-3] [INFO] [1789980496.114714818] [moveit.ompl_planning.model_based_planning_context]: Planner configuration 'arm' will use planner 'geometric::RRTConnect'. Additional configuration parameters will be set when the planner is constructed.
+[move_group-3] [INFO] [1789980496.443166414] [moveit.plugins.moveit_simple_controller_manager]: Returned 2 controllers in list
+[move_group-3] [INFO] [1789980496.443184441] [moveit.plugins.moveit_simple_controller_manager]: Returned 2 controllers in list
+[move_group-3] [INFO] [1789980496.443210201] [moveit_ros.trajectory_execution_manager]: Validating trajectory with allowed_start_tolerance 0.01
+[move_group-3] [INFO] [1789980496.443243907] [moveit_ros.trajectory_execution_manager]: Starting trajectory execution ...
+[move_group-3] [INFO] [1789980496.443271475] [moveit.plugins.moveit_simple_controller_manager]: Returned 2 controllers in list
+[move_group-3] [INFO] [1789980496.443285197] [moveit.plugins.moveit_simple_controller_manager]: Returned 2 controllers in list
+[move_group-3] [INFO] [1789980496.443344123] [moveit.simple_controller_manager.follow_joint_trajectory_controller_handle]: sending trajectory to arm_controller
+[ros2_control_node-1] [INFO] [1789980496.443435647] [arm_controller]: Received new action goal
+[ros2_control_node-1] [INFO] [1789980496.443460671] [arm_controller]: Accepted new action goal
+[move_group-3] [INFO] [1789980496.443520340] [moveit.simple_controller_manager.follow_joint_trajectory_controller_handle]: arm_controller started execution
+[move_group-3] [INFO] [1789980496.443529020] [moveit.simple_controller_manager.follow_joint_trajectory_controller_handle]: Goal request accepted!
+[ros2_control_node-1] [INFO] [1789980496.576174104] [arm_controller]: Goal reached, success!
+[move_group-3] [INFO] [1789980496.594255231] [moveit.simple_controller_manager.follow_joint_trajectory_controller_handle]: Controller 'arm_controller' successfully finished
+[move_group-3] [INFO] [1789980496.594447961] [moveit_ros.trajectory_execution_manager]: Completed trajectory execution with status SUCCEEDED ...
+[move_group-3] [INFO] [1789980496.603362541] [moveit_move_group_default_capabilities.move_action_capability]: Solution was found and executed.
+[move_group-3] [WARN] [1789980496.900318539] [moveit_ros.planning_scene_monitor.planning_scene_monitor]: The complete state of the robot is not yet known.  Missing gripper
+[move_group-3] [WARN] [1789980497.913433929] [moveit_ros.planning_scene_monitor.planning_scene_monitor]: The complete state of the robot is not yet known.  Missing gripper
+[move_group-3] [WARN] [1789980498.928249897] [moveit_ros.planning_scene_monitor.planning_scene_monitor]: The complete state of the robot is not yet known.  Missing gripper
+[move_group-3] [WARN] [1789980499.961272129] [moveit_ros.planning_scene_monitor.planning_scene_monitor]: The complete state of the robot is not yet known.  Missing gripper
+[move_group-3] [INFO] [1789980500.266771062] [moveit_move_group_default_capabilities.move_action_capability]: Received request
+[move_group-3] [INFO] [1789980500.267072435] [moveit_move_group_default_capabilities.move_action_capability]: executing..
+[move_group-3] [INFO] [1789980500.282860353] [moveit_move_group_default_capabilities.move_action_capability]: Combined planning and execution request received for MoveGroup action. Forwarding to planning and execution pipeline.
+[move_group-3] [WARN] [1789980500.282920593] [moveit_move_group_capabilities_base.move_group_capability]: Execution of motions should always start at the robot's current state. Ignoring the state supplied as start state in the motion planning request
+[move_group-3] [WARN] [1789980500.282935465] [moveit_move_group_capabilities_base.move_group_capability]: Execution of motions should always start at the robot's current state. Ignoring the state supplied as difference in the planning scene diff
+[move_group-3] [INFO] [1789980500.282947557] [moveit_ros.plan_execution]: Planning attempt 1 of at most 1
+[move_group-3] [INFO] [1789980500.296447424] [moveit.ompl_planning.model_based_planning_context]: Planner configuration 'arm' will use planner 'geometric::RRTConnect'. Additional configuration parameters will be set when the planner is constructed.
+[move_group-3] [INFO] [1789980500.939414479] [moveit.plugins.moveit_simple_controller_manager]: Returned 2 controllers in list
+[move_group-3] [INFO] [1789980500.939432461] [moveit.plugins.moveit_simple_controller_manager]: Returned 2 controllers in list
+[move_group-3] [INFO] [1789980500.939459952] [moveit_ros.trajectory_execution_manager]: Validating trajectory with allowed_start_tolerance 0.01
+[move_group-3] [WARN] [1789980500.969581835] [moveit_ros.planning_scene_monitor.planning_scene_monitor]: The complete state of the robot is not yet known.  Missing gripper
+[move_group-3] [INFO] [1789980500.969705191] [moveit_ros.trajectory_execution_manager]: Starting trajectory execution ...
+[move_group-3] [INFO] [1789980500.969782811] [moveit.plugins.moveit_simple_controller_manager]: Returned 2 controllers in list
+[move_group-3] [INFO] [1789980500.969831376] [moveit.plugins.moveit_simple_controller_manager]: Returned 2 controllers in list
+[move_group-3] [INFO] [1789980500.969976714] [moveit.simple_controller_manager.follow_joint_trajectory_controller_handle]: sending trajectory to arm_controller
+[ros2_control_node-1] [INFO] [1789980500.970480888] [arm_controller]: Received new action goal
+[ros2_control_node-1] [INFO] [1789980500.970564781] [arm_controller]: Accepted new action goal
+[move_group-3] [INFO] [1789980500.970769561] [moveit.simple_controller_manager.follow_joint_trajectory_controller_handle]: arm_controller started execution
+[move_group-3] [INFO] [1789980500.970800682] [moveit.simple_controller_manager.follow_joint_trajectory_controller_handle]: Goal request accepted!
+[move_group-3] [WARN] [1789980502.000723650] [moveit_ros.planning_scene_monitor.planning_scene_monitor]: The complete state of the robot is not yet known.  Missing gripper
+[ros2_control_node-1] [INFO] [1789980502.139457503] [arm_controller]: Goal reached, success!
+[move_group-3] [INFO] [1789980502.171469501] [moveit.simple_controller_manager.follow_joint_trajectory_controller_handle]: Controller 'arm_controller' successfully finished
+[move_group-3] [INFO] [1789980502.187478027] [moveit_ros.trajectory_execution_manager]: Completed trajectory execution with status SUCCEEDED ...
+[move_group-3] [INFO] [1789980502.189888308] [moveit_move_group_default_capabilities.move_action_capability]: Solution was found and executed.
+[move_group-3] [WARN] [1789980503.044420605] [moveit_ros.planning_scene_monitor.planning_scene_monitor]: The complete state of the robot is not yet known.  Missing gripper
+[move_group-3] [WARN] [1789980504.060519557] [moveit_ros.planning_scene_monitor.planning_scene_monitor]: The complete state of the robot is not yet known.  Missing gripper
+[move_group-3] [WARN] [1789980505.082887089] [moveit_ros.planning_scene_monitor.planning_scene_monitor]: The complete state of the robot is not yet known.  Missing gripper
+[move_group-3] [INFO] [1789980506.082567274] [moveit_move_group_default_capabilities.move_action_capability]: Received request
+[move_group-3] [INFO] [1789980506.083464236] [moveit_move_group_default_capabilities.move_action_capability]: executing..
+[move_group-3] [WARN] [1789980506.094305046] [moveit_ros.planning_scene_monitor.planning_scene_monitor]: The complete state of the robot is not yet known.  Missing gripper
+[move_group-3] [INFO] [1789980506.094439849] [moveit_move_group_default_capabilities.move_action_capability]: Combined planning and execution request received for MoveGroup action. Forwarding to planning and execution pipeline.
+[move_group-3] [WARN] [1789980506.094531634] [moveit_move_group_capabilities_base.move_group_capability]: Execution of motions should always start at the robot's current state. Ignoring the state supplied as start state in the motion planning request
+[move_group-3] [WARN] [1789980506.094559057] [moveit_move_group_capabilities_base.move_group_capability]: Execution of motions should always start at the robot's current state. Ignoring the state supplied as difference in the planning scene diff
+[move_group-3] [INFO] [1789980506.094581083] [moveit_ros.plan_execution]: Planning attempt 1 of at most 1
+[move_group-3] [INFO] [1789980506.112894850] [moveit.ompl_planning.model_based_planning_context]: Planner configuration 'arm' will use planner 'geometric::RRTConnect'. Additional configuration parameters will be set when the planner is constructed.
+[move_group-3] [INFO] [1789980506.563344166] [moveit.plugins.moveit_simple_controller_manager]: Returned 2 controllers in list
+[move_group-3] [INFO] [1789980506.563362638] [moveit.plugins.moveit_simple_controller_manager]: Returned 2 controllers in list
+[move_group-3] [INFO] [1789980506.563387806] [moveit_ros.trajectory_execution_manager]: Validating trajectory with allowed_start_tolerance 0.01
+[move_group-3] [INFO] [1789980506.563424744] [moveit_ros.trajectory_execution_manager]: Starting trajectory execution ...
+[move_group-3] [INFO] [1789980506.563452002] [moveit.plugins.moveit_simple_controller_manager]: Returned 2 controllers in list
+[move_group-3] [INFO] [1789980506.563465809] [moveit.plugins.moveit_simple_controller_manager]: Returned 2 controllers in list
+[move_group-3] [INFO] [1789980506.563526530] [moveit.simple_controller_manager.follow_joint_trajectory_controller_handle]: sending trajectory to arm_controller
+[ros2_control_node-1] [INFO] [1789980506.563644030] [arm_controller]: Received new action goal
+[ros2_control_node-1] [INFO] [1789980506.563667993] [arm_controller]: Accepted new action goal
+[move_group-3] [INFO] [1789980506.563727443] [moveit.simple_controller_manager.follow_joint_trajectory_controller_handle]: arm_controller started execution
+[move_group-3] [INFO] [1789980506.563734414] [moveit.simple_controller_manager.follow_joint_trajectory_controller_handle]: Goal request accepted!
+[ros2_control_node-1] [INFO] [1789980506.918061821] [arm_controller]: Goal reached, success!
+[move_group-3] [INFO] [1789980506.964033562] [moveit.simple_controller_manager.follow_joint_trajectory_controller_handle]: Controller 'arm_controller' successfully finished
+[move_group-3] [INFO] [1789980506.964483052] [moveit_ros.trajectory_execution_manager]: Completed trajectory execution with status SUCCEEDED ...
+[move_group-3] [INFO] [1789980506.973567083] [moveit_move_group_default_capabilities.move_action_capability]: Solution was found and executed.
+[move_group-3] [WARN] [1789980507.104327401] [moveit_ros.planning_scene_monitor.planning_scene_monitor]: The complete state of the robot is not yet known.  Missing gripper
+[move_group-3] [WARN] [1789980508.115543328] [moveit_ros.planning_scene_monitor.planning_scene_monitor]: The complete state of the robot is not yet known.  Missing gripper
+[move_group-3] [WARN] [1789980509.129786994] [moveit_ros.planning_scene_monitor.planning_scene_monitor]: The complete state of the robot is not yet known.  Missing gripper
+[move_group-3] [WARN] [1789980510.150586360] [moveit_ros.planning_scene_monitor.planning_scene_monitor]: The complete state of the robot is not yet known.  Missing gripper
+[move_group-3] [WARN] [1789980511.161497496] [moveit_ros.planning_scene_monitor.planning_scene_monitor]: The complete state of the robot is not yet known.  Missing gripper
+[move_group-3] [WARN] [1789980512.186829433] [moveit_ros.planning_scene_monitor.planning_scene_monitor]: The complete state of the robot is not yet known.  Missing gripper
+[move_group-3] [WARN] [1789980513.209887911] [moveit_ros.planning_scene_monitor.planning_scene_monitor]: The complete state of the robot is not yet known.  Missing gripper

@@ -2,3 +2,18 @@
 .venv/
 .runtime/
 *.zip
+
+# Local caches and agent state (not source or runtime inputs).
+__pycache__/
+/.pytest_cache/
+/.ruff_cache/
+/.zcode/
+
+# Rebuildable ROS workspace outputs; keep ros_ws/src visible.
+/ros_ws/build/
+/ros_ws/install/
+/ros_ws/log/
+
+# Runtime evidence output; created on demand per run and never committed.
+# Frozen plan bytes used by offline tests live in tests/fixtures/ instead.
+/runs/

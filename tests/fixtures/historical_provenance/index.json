@@ -1,0 +1,18 @@
+{
+  "run/pregrasp_v2.py": {
+    "sha256": "4ad96b12a359d2d4a75210486fbb837f7ccebbbf0e9be1beb489a619aeaaed67",
+    "object": "4ad96b12a359d2d4a75210486fbb837f7ccebbbf0e9be1beb489a619aeaaed67.bin"
+  },
+  "runs/example1-compound-pick-20260915T130000Z/generated-plan.json": {
+    "sha256": "02b5f86513f1daaf6763b787c5a791b1acd0a7656e8cf0fb1e5420e623f9cae3",
+    "object": "02b5f86513f1daaf6763b787c5a791b1acd0a7656e8cf0fb1e5420e623f9cae3.bin"
+  },
+  "runs/example1-compound-pick-20260915T130000Z/tcp-closed-loop/approach-planning-request.json": {
+    "sha256": "e48b31f7947c5b73ae1d5242afaf75e297bb6b83d1977c512680e0a3b06bedcf",
+    "object": "e48b31f7947c5b73ae1d5242afaf75e297bb6b83d1977c512680e0a3b06bedcf.bin"
+  },
+  "runs/example1-compound-pick-20260915T130000Z/tcp-closed-loop/events.jsonl": {
+    "sha256": "25acef85d11dd19bd5ab5d53ce68254d11028cb55380b7ec43bd1dc033108724",
+    "object": "25acef85d11dd19bd5ab5d53ce68254d11028cb55380b7ec43bd1dc033108724.bin"
+  }
+}

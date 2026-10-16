@@ -1,0 +1,451 @@
+{
+  "checks": {
+    "bounded_and_no_leftovers": true,
+    "log_scan_clean": true,
+    "per_participant_payloads_unique": true,
+    "process_exit_codes_clean": true,
+    "profiles_contract": true,
+    "round1_all_participants_bidirectional": true,
+    "round2_all_participants_bidirectional": true,
+    "round2_restart_new_nonce": true
+  },
+  "collected_at_utc": "2026-09-21T03:08:48.851712+00:00",
+  "container_name": "rocobrick-p1-gate-2545634",
+  "host_address": "10.198.61.26",
+  "host_port": 17650,
+  "image_id": "sha256:659623efed210acf91ea1bc76e6aac2d360ed62882bc536693a4afc0fb113e98",
+  "log_scan": {
+    "files": [
+      "docker-container.log",
+      "host-r1.log",
+      "host-r2.log",
+      "p1-r1.log",
+      "p2-r1.log",
+      "p2-r2.log",
+      "p3-r1.log",
+      "p3-r2.log",
+      "p4-r1.log"
+    ],
+    "findings": [],
+    "passed": true,
+    "patterns": [
+      "address already in use",
+      "error binding",
+      "binding at port",
+      "shared memory",
+      "shm",
+      "udpv4",
+      "udpv6",
+      "multicast"
+    ]
+  },
+  "passed": true,
+  "phase": "P1.A",
+  "plan": {
+    "bounds_seconds": {
+      "host_exec": 110.0,
+      "host_probe": 75.0,
+      "kill_wait": 15.0,
+      "p_hold_exec": 200.0,
+      "p_hold_probe": 200.0,
+      "p_span_exec": 240.0,
+      "p_span_probe": 200.0,
+      "round2_exec": 110.0,
+      "round2_probe": 75.0
+    },
+    "container_name": "rocobrick-p1-gate-2545634",
+    "container_nonce_r1": {
+      "p1": "r1-p1-5b9565fd39d9e532",
+      "p2": "r1-p2-66de81a097159e2f",
+      "p3": "r1-p3-c1845f6e912baf0c",
+      "p4": "r1-p4-2c701199b5c85245"
+    },
+    "container_nonce_r2": {
+      "p2": "r2-p2-b749a5699f0eda1e",
+      "p3": "r2-p3-41edaa92b31af29b"
+    },
+    "host_nonce_r1": {
+      "p1": "r1-h-p1-639bdc3beb3368d5",
+      "p2": "r1-h-p2-4b83fdff024b8fb8",
+      "p3": "r1-h-p3-b90b35f824cd78cb",
+      "p4": "r1-h-p4-888bd1a2edded814"
+    },
+    "host_nonce_r2": {
+      "p1": "r2-h-p1-75bda0170ab95449",
+      "p2": "r2-h-p2-7577d04ee59e599f",
+      "p3": "r2-h-p3-d8fed28d134e8777",
+      "p4": "r2-h-p4-ad834705e62fff86"
+    },
+    "participant_ids": {
+      "p1": 1,
+      "p2": 2,
+      "p3": 3,
+      "p4": 4
+    },
+    "participants": [
+      "p1",
+      "p2",
+      "p3",
+      "p4"
+    ],
+    "restarted": [
+      "p2",
+      "p3"
+    ],
+    "topic": "/rocobrick/p1/dds/gate"
+  },
+  "process_model": "four independent container OS processes (docker exec), each a separate rclpy participant with its own pinned-ID client-only profile",
+  "processes": {
+    "host-r1": {
+      "exit_code": 0,
+      "killed_for_restart": false,
+      "log": "host-r1.log"
+    },
+    "host-r2": {
+      "exit_code": 0,
+      "killed_for_restart": false,
+      "log": "host-r2.log"
+    },
+    "p1-r1": {
+      "exit_code": 0,
+      "killed_for_restart": false,
+      "log": "p1-r1.log"
+    },
+    "p2-r1": {
+      "exit_code": 130,
+      "killed_for_restart": true,
+      "log": "p2-r1.log"
+    },
+    "p2-r2": {
+      "exit_code": 0,
+      "killed_for_restart": false,
+      "log": "p2-r2.log"
+    },
+    "p3-r1": {
+      "exit_code": 130,
+      "killed_for_restart": true,
+      "log": "p3-r1.log"
+    },
+    "p3-r2": {
+      "exit_code": 0,
+      "killed_for_restart": false,
+      "log": "p3-r2.log"
+    },
+    "p4-r1": {
+      "exit_code": 0,
+      "killed_for_restart": false,
+      "log": "p4-r1.log"
+    }
+  },
+  "profiles": {
+    "host_address": "10.198.61.26",
+    "host_port": 17650,
+    "profiles": {
+      "container": {
+        "initial_peers": [
+          [
+            "10.198.61.26",
+            17650
+          ]
+        ],
+        "listening_ports": [],
+        "participant_id": null,
+        "path": "/home/mzictt/RoCo_Piper/.runtime/dds/fastdds-container.xml",
+        "role": "container-client",
+        "sha256": "758ddfda286de89bcc72f2d85b23222f4c10a26c65683567073de66a7e8270b8"
+      },
+      "container-p1": {
+        "initial_peers": [
+          [
+            "10.198.61.26",
+            17650
+          ]
+        ],
+        "listening_ports": [],
+        "participant_id": 1,
+        "path": "/home/mzictt/RoCo_Piper/.runtime/dds/fastdds-container-p1.xml",
+        "role": "container-client",
+        "sha256": "990f7125ac763821cb31f257e35b4b9eeca3ab2a0803bb7b864f9c7f3b8d9f94"
+      },
+      "container-p2": {
+        "initial_peers": [
+          [
+            "10.198.61.26",
+            17650
+          ]
+        ],
+        "listening_ports": [],
+        "participant_id": 2,
+        "path": "/home/mzictt/RoCo_Piper/.runtime/dds/fastdds-container-p2.xml",
+        "role": "container-client",
+        "sha256": "f0e7ccbe9801d940f3b3b897424f441de5efd47b5bd93ab1f5284ab210c4b42d"
+      },
+      "container-p3": {
+        "initial_peers": [
+          [
+            "10.198.61.26",
+            17650
+          ]
+        ],
+        "listening_ports": [],
+        "participant_id": 3,
+        "path": "/home/mzictt/RoCo_Piper/.runtime/dds/fastdds-container-p3.xml",
+        "role": "container-client",
+        "sha256": "6061a6ab90137a4a4f9e103237badae587a010599d496da409066fc060399646"
+      },
+      "container-p4": {
+        "initial_peers": [
+          [
+            "10.198.61.26",
+            17650
+          ]
+        ],
+        "listening_ports": [],
+        "participant_id": 4,
+        "path": "/home/mzictt/RoCo_Piper/.runtime/dds/fastdds-container-p4.xml",
+        "role": "container-client",
+        "sha256": "13635917ed7cc13b877a7e3d80396b50cc6067981becfbb2edcb585d1e228833"
+      },
+      "host": {
+        "initial_peers": [],
+        "listening_ports": [
+          17650
+        ],
+        "participant_id": 0,
+        "path": "/home/mzictt/RoCo_Piper/.runtime/dds/fastdds-host.xml",
+        "role": "host-listener",
+        "sha256": "9cbb704710bd2c80845492cadc259086634a06a3dc50524684588a1cba6c3785"
+      }
+    },
+    "roles": {
+      "container-client": "client-only TCPv4 (no listening_ports); discovers the host via initialPeersList 10.198.61.26:17650",
+      "host-listener": "owns the only boundary listening endpoint, fixed TCP 17650; accepts container clients"
+    },
+    "schema": "rocobrick-dds-profiles/v2",
+    "topology": "single-host-listener-17650-client-only-containers",
+    "transport": "TCPv4"
+  },
+  "rootless": {
+    "cgroup_version": "2",
+    "docker_context": "rootless",
+    "rootless_context": true,
+    "security_options": [
+      "name=seccomp,profile=builtin",
+      "name=rootless",
+      "name=cgroupns"
+    ],
+    "server_version": "29.6.2",
+    "storage_driver": "overlayfs"
+  },
+  "ros_domain_id": 73,
+  "rounds": [
+    {
+      "participants": {
+        "p1": {
+          "expected_host_payload": "host->p1|r1-h-p1-639bdc3beb3368d5",
+          "host_nonce": "r1-h-p1-639bdc3beb3368d5",
+          "nonce": "r1-p1-5b9565fd39d9e532",
+          "participant_id": 1,
+          "passed": true,
+          "process": "p1-r1",
+          "process_exit_code": 0,
+          "receive_evidence": {
+            "process_milestones": [
+              "host->p1|r1-h-p1-639bdc3beb3368d5",
+              "host->p1|r2-h-p1-75bda0170ab95449"
+            ],
+            "published_by_host": true,
+            "received_by_process": true
+          },
+          "role_in_round": "initial",
+          "send_evidence": {
+            "host_receive_count": 250,
+            "published_by_process": true,
+            "received_by_host": true
+          },
+          "sent_payload": "p1->host|r1-p1-5b9565fd39d9e532"
+        },
+        "p2": {
+          "expected_host_payload": "host->p2|r1-h-p2-4b83fdff024b8fb8",
+          "host_nonce": "r1-h-p2-4b83fdff024b8fb8",
+          "nonce": "r1-p2-66de81a097159e2f",
+          "participant_id": 2,
+          "passed": true,
+          "process": "p2-r1",
+          "process_exit_code": 130,
+          "receive_evidence": {
+            "process_milestones": [
+              "host->p2|r1-h-p2-4b83fdff024b8fb8"
+            ],
+            "published_by_host": true,
+            "received_by_process": true
+          },
+          "role_in_round": "initial",
+          "send_evidence": {
+            "host_receive_count": 245,
+            "published_by_process": true,
+            "received_by_host": true
+          },
+          "sent_payload": "p2->host|r1-p2-66de81a097159e2f"
+        },
+        "p3": {
+          "expected_host_payload": "host->p3|r1-h-p3-b90b35f824cd78cb",
+          "host_nonce": "r1-h-p3-b90b35f824cd78cb",
+          "nonce": "r1-p3-c1845f6e912baf0c",
+          "participant_id": 3,
+          "passed": true,
+          "process": "p3-r1",
+          "process_exit_code": 130,
+          "receive_evidence": {
+            "process_milestones": [
+              "host->p3|r1-h-p3-b90b35f824cd78cb"
+            ],
+            "published_by_host": true,
+            "received_by_process": true
+          },
+          "role_in_round": "initial",
+          "send_evidence": {
+            "host_receive_count": 2567,
+            "published_by_process": true,
+            "received_by_host": true
+          },
+          "sent_payload": "p3->host|r1-p3-c1845f6e912baf0c"
+        },
+        "p4": {
+          "expected_host_payload": "host->p4|r1-h-p4-888bd1a2edded814",
+          "host_nonce": "r1-h-p4-888bd1a2edded814",
+          "nonce": "r1-p4-2c701199b5c85245",
+          "participant_id": 4,
+          "passed": true,
+          "process": "p4-r1",
+          "process_exit_code": 0,
+          "receive_evidence": {
+            "process_milestones": [
+              "host->p4|r1-h-p4-888bd1a2edded814",
+              "host->p4|r2-h-p4-ad834705e62fff86"
+            ],
+            "published_by_host": true,
+            "received_by_process": true
+          },
+          "role_in_round": "initial",
+          "send_evidence": {
+            "host_receive_count": 260,
+            "published_by_process": true,
+            "received_by_host": true
+          },
+          "sent_payload": "p4->host|r1-p4-2c701199b5c85245"
+        }
+      },
+      "passed": true,
+      "round": 1
+    },
+    {
+      "participants": {
+        "p1": {
+          "expected_host_payload": "host->p1|r2-h-p1-75bda0170ab95449",
+          "host_nonce": "r2-h-p1-75bda0170ab95449",
+          "nonce": "r1-p1-5b9565fd39d9e532",
+          "participant_id": 1,
+          "passed": true,
+          "process": "p1-r1",
+          "process_exit_code": 0,
+          "receive_evidence": {
+            "process_milestones": [
+              "host->p1|r1-h-p1-639bdc3beb3368d5",
+              "host->p1|r2-h-p1-75bda0170ab95449"
+            ],
+            "published_by_host": true,
+            "received_by_process": true
+          },
+          "role_in_round": "continuing_across_rounds",
+          "send_evidence": {
+            "host_receive_count": 143,
+            "published_by_process": true,
+            "received_by_host": true
+          },
+          "sent_payload": "p1->host|r1-p1-5b9565fd39d9e532"
+        },
+        "p2": {
+          "expected_host_payload": "host->p2|r2-h-p2-7577d04ee59e599f",
+          "host_nonce": "r2-h-p2-7577d04ee59e599f",
+          "nonce": "r2-p2-b749a5699f0eda1e",
+          "participant_id": 2,
+          "passed": true,
+          "process": "p2-r2",
+          "process_exit_code": 0,
+          "receive_evidence": {
+            "process_milestones": [
+              "host->p2|r2-h-p2-7577d04ee59e599f"
+            ],
+            "published_by_host": true,
+            "received_by_process": true
+          },
+          "role_in_round": "recreated_new_nonce",
+          "send_evidence": {
+            "host_receive_count": 154,
+            "published_by_process": true,
+            "received_by_host": true
+          },
+          "sent_payload": "p2->host|r2-p2-b749a5699f0eda1e"
+        },
+        "p3": {
+          "expected_host_payload": "host->p3|r2-h-p3-d8fed28d134e8777",
+          "host_nonce": "r2-h-p3-d8fed28d134e8777",
+          "nonce": "r2-p3-41edaa92b31af29b",
+          "participant_id": 3,
+          "passed": true,
+          "process": "p3-r2",
+          "process_exit_code": 0,
+          "receive_evidence": {
+            "process_milestones": [
+              "host->p3|r2-h-p3-d8fed28d134e8777"
+            ],
+            "published_by_host": true,
+            "received_by_process": true
+          },
+          "role_in_round": "recreated_new_nonce",
+          "send_evidence": {
+            "host_receive_count": 1434,
+            "published_by_process": true,
+            "received_by_host": true
+          },
+          "sent_payload": "p3->host|r2-p3-41edaa92b31af29b"
+        },
+        "p4": {
+          "expected_host_payload": "host->p4|r2-h-p4-ad834705e62fff86",
+          "host_nonce": "r2-h-p4-ad834705e62fff86",
+          "nonce": "r1-p4-2c701199b5c85245",
+          "participant_id": 4,
+          "passed": true,
+          "process": "p4-r1",
+          "process_exit_code": 0,
+          "receive_evidence": {
+            "process_milestones": [
+              "host->p4|r1-h-p4-888bd1a2edded814",
+              "host->p4|r2-h-p4-ad834705e62fff86"
+            ],
+            "published_by_host": true,
+            "received_by_process": true
+          },
+          "role_in_round": "continuing_across_rounds",
+          "send_evidence": {
+            "host_receive_count": 218,
+            "published_by_process": true,
+            "received_by_host": true
+          },
+          "sent_payload": "p4->host|r1-p4-2c701199b5c85245"
+        }
+      },
+      "passed": true,
+      "restarted": [
+        "p2",
+        "p3"
+      ],
+      "round": 2
+    }
+  ],
+  "schema": "rocobrick-p1-dds-multiprocess-gate/v1",
+  "topology": "single-host-listener-17650-client-only-containers",
+  "topology_description": "exactly one boundary listening endpoint: host listener on fixed TCP 17650; every container participant is client-only TCPv4 (no listening_ports) with an explicit initialPeersList locator",
+  "transport": "TCPv4"
+}
