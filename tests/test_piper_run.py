@@ -75,7 +75,7 @@ ALLOWED_ROCOBRICK = {
     # executor are imported lazily, only after every immutable gate and the
     # TCP authorization have passed, and only for explicit dispatch.
     "rocobrick.multi_robot_runtime",
-    "rocobrick.adapters.moveit.transit",
+    "rocobrick.skills.target_context",
     "rocobrick.adapters.moveit.handover_live",
     "rocobrick.execution.operation_state_ledger",
     "rocobrick.isaac_snapshot_host_adapter",
@@ -976,8 +976,7 @@ def test_operation_phase_imports_its_owned_dependencies():
     }
     expected = {
         "OperationStateLedger": "rocobrick.execution.operation_state_ledger",
-        "SessionTcpMotionAdapter": "rocobrick.adapters.moveit.transit",
-        "load_transit_contexts": "rocobrick.adapters.moveit.transit",
+        "load_target_contexts": "rocobrick.skills.target_context",
         "SkillOperationExecutor": "rocobrick.execution.robot_operation_executor",
         "PickHandler": "rocobrick.skills.pick",
     }
@@ -1000,8 +999,7 @@ def test_operation_phase_imports_its_owned_dependencies():
         [
             sys.executable,
             "-c",
-            "from rocobrick.adapters.moveit.transit import "
-            "SessionTcpMotionAdapter, load_transit_contexts; "
+            "from rocobrick.skills.target_context import load_target_contexts; "
             "from rocobrick.execution.operation_state_ledger import "
             "OperationStateLedger; "
             "from rocobrick.execution.robot_operation_executor import "

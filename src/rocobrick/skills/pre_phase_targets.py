@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 
-from rocobrick.adapters.moveit.transit import TransitContext
 from rocobrick.robot_operation_plan import RobotOperation
 from rocobrick.skills.observation import (
     _pose,
@@ -16,10 +15,10 @@ from rocobrick.skills.placement_geometry import (
     interface_place_up_targets,
     support_top_target,
 )
+from rocobrick.skills.target_context import TargetContext
 from rocobrick.skills.targets import (
     _tcp_pose_target,
     pick_targets,
-    transit_target,
     world_orientation_to_base,
     world_position_to_base,
 )
@@ -114,7 +113,7 @@ def derive_wire_targets(operation_document, shared, context_documents):
     contexts = {}
     for robot, document in context_documents.items():
         base = document["base"]
-        contexts[robot] = TransitContext(
+        contexts[robot] = TargetContext(
             RobotBaseFrame(
                 tuple(base["position_xyz"]), tuple(base["orientation_xyzw"])
             ),
@@ -127,7 +126,7 @@ def derive_wire_targets(operation_document, shared, context_documents):
 def derive_pre_phase_targets(
     operation: RobotOperation,
     shared: Mapping[str, object],
-    contexts: Mapping[str, TransitContext],
+    contexts: Mapping[str, TargetContext],
 ):
     """Derive skill boundaries while keeping every non-moving participant fixed.
 
@@ -139,12 +138,7 @@ def derive_pre_phase_targets(
     values = operation.target.values if operation.target else {}
     session = shared["session_id"]
     manifest = shared["manifest_sha256"]
-    connection_transit = (
-        operation.skill == "TRANSIT"
-        and isinstance(values.get("to"), Mapping)
-        and values["to"].get("kind") == "connection"
-    )
-    if operation.skill in {"PICK", "TRANSIT"} and not connection_transit:
+    if operation.skill == "PICK":
         destination = values.get("to")
         physical = (
             destination.get("physical_instance_id")
@@ -160,27 +154,13 @@ def derive_pre_phase_targets(
             session_id=session,
             manifest_sha256=manifest,
         )
-        target = (
-            pick_targets(
-                sample.aabb_min,
-                sample.aabb_max,
-                context.base,
-                context.provenance,
-                context.params,
-            ).pregrasp
-            if operation.skill == "PICK"
-            or (
-                operation.skill == "TRANSIT"
-                and not values.get("carrying_physical_instance_id")
-            )
-            else transit_target(
-                sample.aabb_min,
-                sample.aabb_max,
-                context.base,
-                context.provenance,
-                context.params,
-            )
-        )
+        target = pick_targets(
+            sample.aabb_min,
+            sample.aabb_max,
+            context.base,
+            context.provenance,
+            context.params,
+        ).pregrasp
     elif operation.skill == "SUPPORT_TOP":
         sample = parse_pick_observation(
             shared,
@@ -192,23 +172,7 @@ def derive_pre_phase_targets(
         target = support_top_target(
             sample, context.base, context.provenance, context.params, approach=True
         )
-    elif operation.skill in {"PLACE_DOWN", "PLACE_UP"} or (
-        operation.skill == "TRANSIT"
-        and isinstance(values.get("to"), Mapping)
-        and values["to"].get("kind") == "connection"
-    ):
-        if connection_transit:
-            pairs = shared.get("placement_interfaces", {}).get("pairs", {})
-            matches = [
-                pair
-                for pair in pairs.values()
-                if pair.get("connection_id") == values["to"]["connection_id"]
-            ]
-            if len(matches) != 1:
-                raise ValueError(
-                    "connection transport lacks unique live interface binding"
-                )
-            values = {**matches[0], **values}
+    elif operation.skill in {"PLACE_DOWN", "PLACE_UP"}:
         upper, lower = (
             values["upper_physical_instance_id"],
             values["lower_physical_instance_id"],
@@ -224,9 +188,7 @@ def derive_pre_phase_targets(
         interface = sample.interfaces["pairs"]["|".join(sorted((upper, lower)))]
         connection = _pose(interface["lower_to_upper"], "interface transform")
         symmetries = tuple(interface.get("allowed_upper_yaw_quarter_turns", (0,)))
-        upward = operation.skill == "PLACE_UP" or (
-            connection_transit and values.get("carrying_physical_instance_id") == lower
-        )
+        upward = operation.skill == "PLACE_UP"
         if upward:
             targets, _, _ = interface_place_up_targets(
                 sample.upper.object_pose,

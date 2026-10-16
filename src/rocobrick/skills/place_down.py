@@ -24,7 +24,6 @@ from collections.abc import Mapping
 from dataclasses import asdict, dataclass, replace
 from typing import Protocol
 
-from rocobrick.adapters.moveit.transit import TransitContext
 from rocobrick.coordinated_session import (
     FreeSpaceMotionEvidence,
     FreeSpaceMotionRequest,
@@ -59,6 +58,7 @@ from rocobrick.skills.placement_geometry import (
     inverse,
     pose_error,
 )
+from rocobrick.skills.target_context import TargetContext
 from rocobrick.skills.targets import _quat_rotate_vector, world_position_to_base
 
 
@@ -135,7 +135,7 @@ class PlaceDownHandler:
         manifest_sha256: str,
         motion_transport: PlaceMotionTransport | None = None,
         free_space_transport: PlaceDownFreeSpaceTransport | None = None,
-        context: TransitContext | None = None,
+        context: TargetContext | None = None,
         poll_interval_s: float = 0.2,
         probe_contact: bool = False,
     ) -> None:
@@ -262,7 +262,7 @@ class PlaceDownHandler:
     def _world_payload(
         self,
         admission: PlaceAdmission,
-        context: TransitContext,
+        context: TargetContext,
         sample: PlaceObservation,
         *,
         include_upper: bool,

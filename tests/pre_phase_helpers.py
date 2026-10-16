@@ -2,7 +2,7 @@
 
 from dataclasses import replace
 
-from rocobrick.robot_operation_plan import RobotOperation
+from rocobrick.robot_operation_plan import OperationTarget, RobotOperation
 from rocobrick.unified_dual_arm_runtime import (
     SharedSceneSnapshot,
     SuccessorPrePhaseRequest,
@@ -11,19 +11,19 @@ from rocobrick.unified_dual_arm_runtime import (
 
 
 def operation(operation_id="next-op", robot_id="piper_0"):
-    """Construct an immutable operation without runtime-derived targets.
+    """Construct an immutable operation with a static PICK target.
 
     Returns:
-        An offline immutable motion operation.
+        An offline immutable motion operation with a static PICK target.
     """
     return RobotOperation(
         operation_id,
         "task",
-        "TRANSIT",
+        "PICK",
         robot_id,
         (robot_id,),
         {"executor": robot_id},
-        None,
+        OperationTarget({"physical_instance_id": "part-1"}),
         {},
         (),
         (),

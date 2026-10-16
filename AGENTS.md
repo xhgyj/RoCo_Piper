@@ -68,13 +68,12 @@ src/rocobrick/
 │   ├── programs.py                      # phase definitions
 │   ├── targets.py                       # target geometry and TCP provenance
 │   ├── wait.py                          # dedicated WAIT handler
-│   ├── transit.py                       # dedicated TRANSIT handler
+│   ├── target_context.py                # per-robot calibrated target contexts
 │   ├── pick.py                          # dedicated PICK handler
 │   ├── place_down.py                    # dedicated PLACE_DOWN handler
 │   ├── observation.py                   # identity/freshness/following checks
 │   └── contracts.py                     # skill context/result protocols
 ├── adapters/moveit/
-│   ├── transit.py                       # current TRANSIT target/action adapter
 │   ├── motion.py                        # planned shared action lifecycle adapter
 │   ├── gripper.py                       # planned gripper action/feedback adapter
 │   └── planning_scene.py                # planned scene synchronization adapter
@@ -97,9 +96,10 @@ Current capability boundary:
 - `WAIT` confirms only from the executing robot's live observation: its own
   simulation time must advance and the requested measured object must remain
   stable.
-- Empty TRANSIT to a measured part target is implemented through the MoveIt
-  adapter and final TCP feedback gates.
-- Keep all formal skill branches: WAIT, TRANSIT, PICK, PLACE_DOWN, HANDOVER,
+- One shared `TargetContext` per robot (base frame, authorized TCP
+  provenance, frozen skill parameters, ground geometry) feeds every formal
+  motion skill target, loaded once per run before any dispatch.
+- Keep all formal skill branches: WAIT, PICK, PLACE_DOWN, HANDOVER,
   SUPPORT_TOP and PLACE_UP. Their implementation and fail-closed evidence gates
   define capability; a Task C trajectory is not proof that other skills are dead.
   A carrying request must be rejected before motion unless the ledger confirms

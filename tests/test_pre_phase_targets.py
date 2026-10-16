@@ -5,12 +5,12 @@ from dataclasses import asdict, replace
 import pytest
 from test_pick_handler import document, operation
 
-from rocobrick.adapters.moveit.transit import TransitContext
 from rocobrick.robot_operation_plan import OperationTarget
 from rocobrick.skills.pre_phase_targets import (
     derive_pre_phase_targets,
     derive_wire_targets,
 )
+from rocobrick.skills.target_context import TargetContext
 from rocobrick.skills.targets import RobotBaseFrame, SkillParams, TcpProvenance
 
 
@@ -18,7 +18,7 @@ def test_pick_target_is_pregrasp_and_other_arm_keeps_measured_tcp():
     """PICK pre-phase must not use generic transport height."""
     shared = document()
     shared["robots"]["piper_1"] = {**shared["robots"]["piper_0"], "robot_id": "piper_1"}
-    context = TransitContext(
+    context = TargetContext(
         RobotBaseFrame((0.0, 0.0, 0.0), (0.0, 0.0, 0.0, 1.0)),
         TcpProvenance("a" * 64, "b" * 64),
         SkillParams(),
@@ -32,31 +32,32 @@ def test_pick_target_is_pregrasp_and_other_arm_keeps_measured_tcp():
     )
     assert result["piper_1"]["tcp_pose"]["position"] == (0.0, 0.0, 0.04)
     assert item.parameters == {}
-    transit = replace(
-        item,
-        skill="TRANSIT",
-        target=OperationTarget(
-            {
-                "from": {
-                    "kind": "robot_current",
-                    "physical_instance_id": None,
-                    "connection_id": None,
-                    "robot_id": None,
-                },
-                "to": {
-                    "kind": "part",
-                    "physical_instance_id": "brick-a",
-                    "connection_id": None,
-                    "robot_id": None,
-                },
-                "carrying_physical_instance_id": None,
-            }
-        ),
-    )
-    transit_targets = derive_pre_phase_targets(
-        transit, shared, {robot: context for robot in ("piper_0", "piper_1")}
-    )
-    assert transit_targets["piper_0"] == result["piper_0"]
+    with pytest.raises(ValueError, match="does not define a motion pre-phase"):
+        derive_pre_phase_targets(
+            replace(
+                item,
+                skill="TRANSIT",
+                target=OperationTarget(
+                    {
+                        "from": {
+                            "kind": "robot_current",
+                            "physical_instance_id": None,
+                            "connection_id": None,
+                            "robot_id": None,
+                        },
+                        "to": {
+                            "kind": "part",
+                            "physical_instance_id": "brick-a",
+                            "connection_id": None,
+                            "robot_id": None,
+                        },
+                        "carrying_physical_instance_id": None,
+                    }
+                ),
+            ),
+            shared,
+            {robot: context for robot in ("piper_0", "piper_1")},
+        )
     support = replace(
         item,
         skill="SUPPORT_TOP",
@@ -102,7 +103,7 @@ def test_support_top_carrier_target_defers_without_roll_flip():
             }
         }
     }
-    context = TransitContext(
+    context = TargetContext(
         RobotBaseFrame((0.0, 0.0, 0.0), (0.0, 0.0, 0.0, 1.0)),
         TcpProvenance("a" * 64, "b" * 64),
         SkillParams(),
@@ -132,7 +133,7 @@ def test_wire_target_is_unwrapped_from_asdict_shape():
     """The asdict wire target must bind its values, not the wrapper mapping."""
     shared = document()
     shared["robots"]["piper_1"] = {**shared["robots"]["piper_0"], "robot_id": "piper_1"}
-    context = TransitContext(
+    context = TargetContext(
         RobotBaseFrame((0.0, 0.0, 0.0), (0.0, 0.0, 0.0, 1.0)),
         TcpProvenance("a" * 64, "b" * 64),
         SkillParams(),

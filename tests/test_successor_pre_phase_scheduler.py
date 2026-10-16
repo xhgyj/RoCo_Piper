@@ -13,6 +13,7 @@ from test_multi_robot_scheduler_contract import (
 )
 
 from rocobrick.multi_robot_scheduler import OperationStatus, schedule
+from rocobrick.robot_operation_plan import OperationTarget
 from rocobrick.unified_dual_arm_runtime import TerminalPrePhasePolicy
 
 
@@ -99,7 +100,11 @@ def chain(*, extra=False):
         An offline plan with retained physical ownership.
     """
     a = _raw_operation("a", "piper_0", ("robot:piper_0", "part:brick"))
-    b = replace(_raw_operation("b", "piper_0", ("robot:piper_0",)), skill="TRANSIT")
+    b = replace(
+        _raw_operation("b", "piper_0", ("robot:piper_0",)),
+        skill="PICK",
+        target=OperationTarget({"physical_instance_id": "brick-1"}),
+    )
     if extra:
         other = _raw_operation("unrelated", "piper_1", ("robot:piper_1",))
         return _raw_plan([a, other, b], (("a",), ("unrelated",), ("b",)))
@@ -133,7 +138,11 @@ def test_late_contact_confirmation_never_releases_physical_endpoint():
 def test_adopted_resources_remain_accounted_for_across_multiple_successors():
     """Inherited resources remain accounted for on subsequent transfers."""
     plan = chain()
-    c = replace(_raw_operation("c", "piper_0", ("robot:piper_0",)), skill="TRANSIT")
+    c = replace(
+        _raw_operation("c", "piper_0", ("robot:piper_0",)),
+        skill="PICK",
+        target=OperationTarget({"physical_instance_id": "brick-1"}),
+    )
     plan = _raw_plan([*plan.operations.values(), c], (("a",), ("b",), ("c",)))
     executor = TransitionExecutor()
     executor.outcomes["b"] = endpoint

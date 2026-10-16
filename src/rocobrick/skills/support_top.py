@@ -14,7 +14,6 @@ from collections.abc import Mapping
 from dataclasses import asdict, dataclass
 from typing import Protocol
 
-from rocobrick.adapters.moveit.transit import TransitContext
 from rocobrick.coordinated_session import (
     FreeSpaceMotionEvidence,
     FreeSpaceMotionRequest,
@@ -35,6 +34,7 @@ from rocobrick.skills.observation import PickObservation, Pose, parse_pick_obser
 from rocobrick.skills.placement_geometry import pose_error, support_top_target
 from rocobrick.skills.successor_motion import contact_scene_payload, move_boundary
 from rocobrick.skills.support_evidence import verify_support_contact
+from rocobrick.skills.target_context import TargetContext
 from rocobrick.unified_dual_arm_runtime import SuccessorPrePhaseEvidence
 
 
@@ -93,7 +93,7 @@ class SupportTopHandler:
         manifest_sha256: str,
         motion_transport: SupportMotionTransport | None = None,
         free_space_transport: SupportFreeSpaceTransport | None = None,
-        context: TransitContext | None = None,
+        context: TargetContext | None = None,
         poll_interval_s: float = 0.2,
     ) -> None:
         """Bind identity, observation, motion and calibrated TCP context."""

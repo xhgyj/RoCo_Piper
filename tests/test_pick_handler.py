@@ -7,7 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from rocobrick.adapters.moveit.transit import GroundSpec
+from rocobrick.skills.target_context import GroundSpec
 
 from rocobrick.execution.operation_state_ledger import OperationStateLedger
 from rocobrick.isaac_backend import OperationKind, RuntimeOperation

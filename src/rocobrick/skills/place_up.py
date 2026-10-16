@@ -15,7 +15,6 @@ from collections.abc import Mapping
 from dataclasses import asdict, dataclass
 from typing import Protocol
 
-from rocobrick.adapters.moveit.transit import TransitContext
 from rocobrick.coordinated_session import (
     FreeSpaceMotionEvidence,
     FreeSpaceMotionRequest,
@@ -51,6 +50,7 @@ from rocobrick.skills.placement_geometry import (
 )
 from rocobrick.skills.successor_motion import move_boundary
 from rocobrick.skills.support_evidence import verify_support_contact
+from rocobrick.skills.target_context import TargetContext
 from rocobrick.skills.targets import (
     _quat_rotate_vector,
     _tcp_pose_target,
@@ -181,7 +181,7 @@ class PlaceUpHandler:
         manifest_sha256: str,
         motion_transport: PlaceUpMotionTransport | None = None,
         free_space_transport: PlaceUpFreeSpaceTransport | None = None,
-        context: TransitContext | None = None,
+        context: TargetContext | None = None,
         poll_interval_s: float = 0.2,
     ) -> None:
         """Bind one session identity, ledger, motion transport and calibration."""

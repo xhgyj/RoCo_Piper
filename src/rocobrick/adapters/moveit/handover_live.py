@@ -26,7 +26,6 @@ from rocobrick.adapters.moveit.handover_scene_planner import (
     ReadOnlyCombinedHandoverPlanner,
     SessionCombinedPlanRuntime,
 )
-from rocobrick.adapters.moveit.transit import TransitContext
 from rocobrick.coordinated_moveit import (
     CoordinatedOperation,
     CoordinatedRobotTrajectory,
@@ -76,6 +75,7 @@ from rocobrick.skills.observation import Pose, _pose, parse_pick_observation
 from rocobrick.skills.pick import PickHandler, _tcp_relative_aabb
 from rocobrick.skills.placement_geometry import pose_error
 from rocobrick.skills.post_lift_handover import capture_post_lift_handover
+from rocobrick.skills.target_context import TargetContext
 
 TRACKING_ERROR_RAD = 0.0005
 
@@ -180,7 +180,7 @@ class LiveSimulationHandover:
         self,
         session: MultiRobotIsaacMoveItSession,
         ledger: OperationStateLedger,
-        contexts: Mapping[str, TransitContext],
+        contexts: Mapping[str, TargetContext],
         *,
         session_id: str,
         manifest_sha256: str,

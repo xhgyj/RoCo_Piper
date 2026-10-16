@@ -7,7 +7,6 @@ from dataclasses import replace
 
 import pytest
 
-from rocobrick.adapters.moveit.transit import GroundSpec, TransitContext
 from rocobrick.execution.operation_state_ledger import OperationStateLedger
 from rocobrick.execution.robot_operation_executor import SkillOperationExecutor
 from rocobrick.isaac_backend import OperationKind, RuntimeOperation
@@ -18,6 +17,7 @@ from rocobrick.skills.observation import (
     verify_place_bricks,
 )
 from rocobrick.skills.place_down import PlaceDownHandler
+from rocobrick.skills.target_context import GroundSpec, TargetContext
 from rocobrick.skills.targets import (
     RobotBaseFrame,
     SkillParams,
@@ -43,9 +43,9 @@ def provenance() -> TcpProvenance:
     return TcpProvenance(runtime_model_sha256=MODEL_SHA, source_sha256=SOURCE_SHA)
 
 
-def context() -> TransitContext:
+def context() -> TargetContext:
     """Return one identity-base transit context with the frozen params."""
-    return TransitContext(
+    return TargetContext(
         base=RobotBaseFrame(
             position_xyz=(0.0, 0.0, 0.0), orientation_xyzw=(0.0, 0.0, 0.0, 1.0)
         ),

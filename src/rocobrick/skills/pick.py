@@ -8,7 +8,6 @@ from collections.abc import Mapping
 from dataclasses import asdict, dataclass, replace
 from typing import Protocol
 
-from rocobrick.adapters.moveit.transit import TransitContext
 from rocobrick.coordinated_session import (
     CoordinatedSessionResult,
     FreeSpaceMotionEvidence,
@@ -41,6 +40,7 @@ from rocobrick.skills.observation import (
     parse_pick_observation,
     verify_pick_following,
 )
+from rocobrick.skills.target_context import TargetContext
 from rocobrick.skills.targets import (
     pick_targets,
     world_orientation_to_base,
@@ -183,7 +183,7 @@ class PickHandler:
         manifest_sha256: str,
         motion_transport: PickMotionTransport | None = None,
         free_space_transport: PickFreeSpaceTransport | None = None,
-        context: TransitContext | None = None,
+        context: TargetContext | None = None,
         poll_interval_s: float = 0.2,
         top_offset_grasps: Mapping[str, TopOffsetBinding] | None = None,
     ) -> None:
@@ -309,7 +309,7 @@ class PickHandler:
 
     @staticmethod
     def _base_aabb(
-        sample: PickObservation, context: TransitContext
+        sample: PickObservation, context: TargetContext
     ) -> tuple[tuple[float, float, float], tuple[float, float, float]]:
         """Transform all world AABB corners and rebuild a base-frame AABB."""
         corners = [
@@ -327,7 +327,7 @@ class PickHandler:
     def _planning_payload(
         self,
         admission: PickAdmission,
-        context: TransitContext,
+        context: TargetContext,
         sample: PickObservation | None = None,
         *,
         allow_contact: bool = False,

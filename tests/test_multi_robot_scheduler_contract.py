@@ -21,6 +21,7 @@ from rocobrick.multi_robot_scheduler import (
     to_json_value,
 )
 from rocobrick.robot_operation_plan import (
+    OperationTarget,
     RobotOperation,
     RobotOperationPlan,
     ScheduledOperation,
@@ -511,7 +512,9 @@ def test_handoff_releases_resources_only_after_terminal_safe_transfer() -> None:
         [
             _raw_operation("a", "piper_0", ("robot:piper_0",)),
             dataclasses.replace(
-                _raw_operation("b", "piper_0", ("robot:piper_0",)), skill="TRANSIT"
+                _raw_operation("b", "piper_0", ("robot:piper_0",)),
+                skill="PICK",
+                target=OperationTarget({"physical_instance_id": "brick-1"}),
             ),
         ],
         (("a",), ("b",)),
@@ -546,7 +549,9 @@ def test_failed_handoff_keeps_previous_resources_held() -> None:
         [
             _raw_operation("a", "piper_0", ("robot:piper_0",)),
             dataclasses.replace(
-                _raw_operation("b", "piper_0", ("robot:piper_0",)), skill="TRANSIT"
+                _raw_operation("b", "piper_0", ("robot:piper_0",)),
+                skill="PICK",
+                target=OperationTarget({"physical_instance_id": "brick-1"}),
             ),
         ],
         (("a",), ("b",)),

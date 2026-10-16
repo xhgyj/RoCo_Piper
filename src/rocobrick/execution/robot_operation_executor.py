@@ -20,7 +20,6 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 from typing import Protocol
 
-from rocobrick.adapters.moveit.transit import TransitContext
 from rocobrick.coordinated_layer import coordinated_layer_group
 from rocobrick.execution.operation_state_ledger import OperationStateLedger
 from rocobrick.multi_robot_scheduler import (
@@ -37,6 +36,7 @@ from rocobrick.skills.observation import (
     parse_place_observation,
 )
 from rocobrick.skills.placement_geometry import interface_place_up_targets
+from rocobrick.skills.target_context import TargetContext
 from rocobrick.skills.targets import (
     _tcp_pose_target,
     world_orientation_to_base,
@@ -84,15 +84,6 @@ REASON_STRUCTURAL_FACT_UNSTABLE = "WAIT_STRUCTURAL_FACT_UNSTABLE"
 REASON_OPERATION_ALREADY_ACTIVE = "OPERATION_ALREADY_ACTIVE"
 REASON_CANCELLED = "CANCELLED"
 
-_REF_KEYS = frozenset(
-    {
-        "kind",
-        "physical_instance_id",
-        "connection_id",
-        "robot_id",
-    }
-)
-_REF_KINDS = frozenset({"robot_current", "robot_home", "part", "connection"})
 _PICK_KEYS = frozenset({"physical_instance_id"})
 _HANDOVER_KEYS = frozenset(
     {"physical_instance_id", "donor_robot_id", "receiver_robot_id"}
@@ -280,34 +271,6 @@ def _text(value: object) -> bool:
         True only for a non-empty ``str``.
     """
     return isinstance(value, str) and bool(value)
-
-
-def _reference_valid(value: object, executor_robot_id: str) -> bool:
-    """Return whether one TRANSIT reference matches the frozen shape.
-
-    Args:
-        value: Candidate ``from``/``to`` reference.
-        executor_robot_id: Operation executor robot id.
-
-    Returns:
-        True only for an exactly shaped reference whose ``robot_id`` (when
-        present) is the executor robot.
-    """
-    if not isinstance(value, Mapping) or set(value) != _REF_KEYS:
-        return False
-    kind = value["kind"]
-    if kind not in _REF_KINDS:
-        return False
-    physical = value["physical_instance_id"]
-    connection = value["connection_id"]
-    robot = value["robot_id"]
-    if kind == "robot_current":
-        return connection is None and physical is None and robot is None
-    if kind == "robot_home":
-        return connection is None and physical is None and robot == executor_robot_id
-    if kind == "part":
-        return _text(physical) and connection is None and robot is None
-    return _text(connection) and physical is None and robot is None
 
 
 def _target_valid(skill: str, target: object, executor_robot_id: str) -> bool:
@@ -566,7 +529,7 @@ def _tcp_target_mapping(target: object, robot_id: str) -> Mapping[str, object]:
 
 
 def _support_pre_phase_target(
-    observation, context: TransitContext
+    observation, context: TargetContext
 ) -> Mapping[str, object]:
     """Derive support TCP pose above a measured upper brick.
 
@@ -603,8 +566,7 @@ class SkillOperationExecutor:
         wait_timeout_s: float = 30.0,
         cancel_timeout_s: float = 5.0,
         aabb_tolerance_m: float = 0.01,
-        transit_adapters: Mapping[str, object] | None = None,
-        transit_contexts: Mapping[str, TransitContext] | None = None,
+        target_contexts: Mapping[str, TargetContext] | None = None,
         pick_backends: Mapping[str, object] | None = None,
         place_backends: Mapping[str, object] | None = None,
         place_up_backends: Mapping[str, object] | None = None,
@@ -636,8 +598,7 @@ class SkillOperationExecutor:
         Args:
             coordinated_layer_transport: Optional layer-level transport.
             pre_phase_runtime: Unified successor pre-phase runtime.
-            transit_adapters: Per-robot free-space adapters.
-            transit_contexts: Per-robot calibrated target contexts.
+            target_contexts: Per-robot calibrated target contexts.
             pick_backends: Per-robot PICK handlers.
             place_backends: Per-robot PLACE_DOWN handlers.
             place_up_backends: Per-robot PLACE_UP handlers.
@@ -668,8 +629,7 @@ class SkillOperationExecutor:
         self._aabb_tolerance_m = _non_negative_number(
             aabb_tolerance_m, "aabb_tolerance_m"
         )
-        self._transit_adapters = dict(transit_adapters or {})
-        self._transit_contexts = dict(transit_contexts or {})
+        self._target_contexts = dict(target_contexts or {})
         self._pick_backends = dict(pick_backends or {})
         self._place_backends = dict(place_backends or {})
         self._place_up_backends = dict(place_up_backends or {})
@@ -730,7 +690,7 @@ class SkillOperationExecutor:
             raise ValueError("coordinated group identity is unavailable")
         targets: dict[str, Mapping[str, object]] = {}
         for robot_id in group.robot_ids:
-            context = self._transit_contexts.get(robot_id)
+            context = self._target_contexts.get(robot_id)
             if context is None:
                 raise ValueError(f"no calibrated context for {robot_id}")
             document = observations.get(robot_id)
@@ -888,7 +848,7 @@ class SkillOperationExecutor:
         for operation in request.successor_operations:
             target = operation.target.values if operation.target is not None else {}
             robot_id = operation.executor_robot_id
-            context = self._transit_contexts.get(robot_id)
+            context = self._target_contexts.get(robot_id)
             document = observations.get(robot_id)
             if context is None or not isinstance(document, Mapping):
                 raise ValueError(f"successor pre-phase lacks context for {robot_id}")

@@ -7,7 +7,7 @@ import pytest
 from pre_phase_helpers import request, success
 
 from rocobrick.execution.operation_state_ledger import OperationStateLedger
-from rocobrick.adapters.moveit.transit import TransitContext
+from rocobrick.skills.target_context import TargetContext
 from rocobrick.skills.targets import RobotBaseFrame, SkillParams, TcpProvenance
 from rocobrick.unified_dual_arm_runtime import (
     SharedSceneSnapshot,
@@ -79,7 +79,7 @@ def ledger_with_holding():
 
 def _context():
     """Return a real dataclass context for facade serialization."""
-    return TransitContext(
+    return TargetContext(
         RobotBaseFrame((0.0, 0.0, 0.0), (0.0, 0.0, 0.0, 1.0)),
         TcpProvenance("a" * 64, "b" * 64),
         SkillParams(),

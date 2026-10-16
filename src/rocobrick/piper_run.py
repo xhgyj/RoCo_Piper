@@ -41,7 +41,7 @@ contract libraries and a future execution backend. Every invocation:
    mode (``allow_legacy_results=False``) over
    :class:`rocobrick.execution.robot_operation_executor.SkillOperationExecutor`, which
    observes the real scene through the session's read-only ``observe``
-   transport. WAIT, TRANSIT, PICK and PLACE_DOWN use their evidence backends;
+   transport. WAIT, PICK and PLACE_DOWN use their evidence backends;
    PLACE_DOWN proves connection, release and retreat separately before any
    assembled state is published. The session is stopped with cleanup evidence in
    a ``finally`` block on every path, and ``robot-operation-plan-run.json``
@@ -1403,10 +1403,6 @@ def _robot_operation_plan_phase(
         and the inputs stayed immutable (the caller reports ``EXECUTED``),
         otherwise the terminal status and reason.
     """
-    from rocobrick.adapters.moveit.transit import (
-        SessionTcpMotionAdapter,
-        load_transit_contexts,
-    )
     from rocobrick.execution.operation_state_ledger import OperationStateLedger
     from rocobrick.execution.robot_operation_executor import SkillOperationExecutor
     from rocobrick.robot_operation_runner import (
@@ -1418,6 +1414,7 @@ def _robot_operation_plan_phase(
     from rocobrick.skills.place_down import PlaceDownHandler
     from rocobrick.skills.place_up import PlaceUpHandler
     from rocobrick.skills.support_top import SupportTopHandler
+    from rocobrick.skills.target_context import load_target_contexts
     from rocobrick.tcp_contract import EXPECTED_RUNTIME_MODEL_SHA256
     from rocobrick.unified_runtime_facade import UnifiedDualArmRuntimeFacade
 
@@ -1719,21 +1716,17 @@ def _robot_operation_plan_phase(
                         raise RuntimeError(
                             "authorized TCP contract has no calibration transform"
                         )
-                    transit_contexts = load_transit_contexts(
+                    target_contexts = load_target_contexts(
                         args.config_path or REPO_ROOT / "config/user_config.json",
                         REPO_ROOT / "config/skill_params.json",
                         operation_plan.robots,
                         runtime_model_sha256=EXPECTED_RUNTIME_MODEL_SHA256,
                         source_sha256=contract.transform.sha256,
                     )
-                    transit_adapters = {
-                        robot_id: SessionTcpMotionAdapter(session, robot_id)
-                        for robot_id in operation_plan.robots
-                    }
                     state_ledger = OperationStateLedger(operation_plan.robots)
                     unified_runtime = UnifiedDualArmRuntimeFacade(
                         session,
-                        transit_contexts,
+                        target_contexts,
                         state_ledger=state_ledger,
                     )
                     pick_backends = {}
@@ -1793,7 +1786,7 @@ def _robot_operation_plan_phase(
                                     manifest_sha256=manifest.manifest_sha256,
                                     motion_transport=session,
                                     free_space_transport=unified_runtime,
-                                    context=transit_contexts[robot_id],
+                                    context=target_contexts[robot_id],
                                     top_offset_grasps=top_grasps,
                                 )
                                 for robot_id in operation_plan.robots
@@ -1816,7 +1809,7 @@ def _robot_operation_plan_phase(
                                     manifest_sha256=manifest.manifest_sha256,
                                     motion_transport=session,
                                     free_space_transport=unified_runtime,
-                                    context=transit_contexts[robot_id],
+                                    context=target_contexts[robot_id],
                                     probe_contact=place_probe,
                                 )
                                 for robot_id in operation_plan.robots
@@ -1833,7 +1826,7 @@ def _robot_operation_plan_phase(
                                     manifest_sha256=manifest.manifest_sha256,
                                     motion_transport=session,
                                     free_space_transport=unified_runtime,
-                                    context=transit_contexts[robot_id],
+                                    context=target_contexts[robot_id],
                                 )
                                 for robot_id in operation_plan.robots
                             }
@@ -1849,7 +1842,7 @@ def _robot_operation_plan_phase(
                                     manifest_sha256=manifest.manifest_sha256,
                                     motion_transport=session,
                                     free_space_transport=unified_runtime,
-                                    context=transit_contexts[robot_id],
+                                    context=target_contexts[robot_id],
                                 )
                                 for robot_id in operation_plan.robots
                             }
@@ -1878,7 +1871,7 @@ def _robot_operation_plan_phase(
                             for row in robot_rows if row["Name"] in operation_plan.robots
                         }))
                         live_handover = DirectSimulationHandover(
-                            session, state_ledger, transit_contexts,
+                            session, state_ledger, target_contexts,
                             session_id=args.host_instance_id,
                             manifest_sha256=manifest.manifest_sha256,
                             package_dirs=package_dirs,
@@ -1913,8 +1906,7 @@ def _robot_operation_plan_phase(
                     executor = SkillOperationExecutor(
                         operation_plan.robots,
                         session,
-                        transit_adapters=transit_adapters,
-                        transit_contexts=transit_contexts,
+                        target_contexts=target_contexts,
                         pick_backends=pick_backends,
                         place_backends=place_backends,
                         place_up_backends=place_up_backends,

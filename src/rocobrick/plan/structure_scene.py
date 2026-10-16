@@ -637,25 +637,6 @@ def _plan_facts(plan: RobotOperationPlan) -> _PlanFacts:
         elif operation.skill == "PICK":
             values = _target_values(operation_id, plan)
             referenced.add(_target_text(values, "physical_instance_id", path))
-        elif operation.skill == "TRANSIT":
-            values = _target_values(operation_id, plan)
-            for key in ("from", "to"):
-                reference = values.get(key)
-                if not isinstance(reference, Mapping):
-                    raise StructureSceneError(f"{path}.target.{key} must be an object")
-                if reference.get("kind") == "part":
-                    referenced.add(
-                        _target_text(
-                            reference,
-                            "physical_instance_id",
-                            f"{path}.target.{key}",
-                        )
-                    )
-            carrying = values.get("carrying_physical_instance_id")
-            if carrying is not None:
-                referenced.add(
-                    _target_text(values, "carrying_physical_instance_id", path)
-                )
         else:
             observation = operation.parameters.get("observation")
             if observation is not None:
@@ -1009,10 +990,10 @@ def build_structure_scene_plan_from_files(
     initial_ids = frozenset(key_to_id[goal_key] for goal_key in start_key_by_goal_key)
     layers, slots = _operation_positions(operation_plan)
     # Once a placement operation is present, require complete placement. A
-    # TRANSIT/PICK-only prefix remains valid for scene preparation.
+    # A PICK-only prefix remains valid for scene preparation.
     allow_partial = (
         any(
-            operation.skill in {"TRANSIT", "PICK"}
+            operation.skill == "PICK"
             for operation in operation_plan.operations.values()
         )
         and not facts.placed
