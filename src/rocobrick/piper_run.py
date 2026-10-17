@@ -1,96 +1,38 @@
-"""Formal ``piper-run`` immutable STAP ingest and preflight composition.
+"""The formal ``piper-run`` direct robot-operation-plan preflight and runtime.
 
-``piper-run`` is the offline composition entry point between the accepted
-contract libraries and a future execution backend. Every invocation:
+``piper-run`` has exactly one plan entry and one structure entry:
 
-1. Reads the plan and the two task structure files exactly once into memory
-   and hashes the raw bytes before anything is parsed (IMMUTABLE_INPUT). The
-   input paths are never written to.
-2. Validates the plan authoritatively with ``parse_stap_plan``. The metric
-   plan contract is never imported or called, and no plan is ever repaired,
-   reassigned, reordered, or rewritten (STAP_VALIDATED).
-3. Binds the plan's single pending task to the exact supplied bytes with
-   ``bind_single_stap_task`` and stops on any rejection (STRUCTURAL_BINDING).
-4. Re-derives the Piper L TCP claim from the read-only model-audit artifact
-   with ``assess_piper_l_tcp``, requires the re-derived status to equal the
-   serialized status and ``tcp_execution_allowed`` to be consistent, and —
-   because every PLACE_DOWN binding requires a tool point —
-   ``require_resolved_tcp`` (TCP_GATE).
-5. Without ``--robot-operation-plan``, never dispatches: the default path is
-   still the preflight bridge. A run whose gates all pass reports
-   ``EXECUTION_NOT_IMPLEMENTED`` and exits nonzero; only ``--preflight-only``
-   on a plan whose gates all pass reports ``PREFLIGHT_ONLY`` with exit code
-   0. No ROS, Isaac, Docker, GPU, MoveIt action, or motion is ever started
-   or sent.
-6. ``--robot-operation-plan PLAN_JSON`` is the only production dispatch
-   entry: the external ``robot-operation-plan/v1`` bytes are copied
-   verbatim into ``robot-operation-plan.json`` inside the run directory and
-   validated against the authoritative STAP plan (cross-binding: plan id,
-   robot set, task allocation, parts, connections, layers, schedule and
-   resources). Every gate — including the strict
-   :func:`rocobrick.tcp_capability.authorize_tcp` decision — runs BEFORE any
-   runtime is created. Only then is the real multi-robot session
-   (:class:`rocobrick.multi_robot_runtime.MultiRobotIsaacMoveItSession`,
-   one host and one container for all validated plan robots) created and
-   started; it needs the explicit scene group (``--scene-manifest``,
-   ``--scene-snapshot-out``, ``--host-instance-id`` and ``--config``) and
-   never falls back to a fake transport. ``start()`` must prove readiness
-   for every plan robot; otherwise no operation is ever scheduled.
-7. With a READY session the plan runs through
-   :class:`rocobrick.robot_operation_runner.OperationPlanRunner` in strict
-   mode (``allow_legacy_results=False``) over
-   :class:`rocobrick.execution.robot_operation_executor.SkillOperationExecutor`, which
-   observes the real scene through the session's read-only ``observe``
-   transport. WAIT, PICK and PLACE_DOWN use their evidence backends;
-   PLACE_DOWN proves connection, release and retreat separately before any
-   assembled state is published. The session is stopped with cleanup evidence in
-   a ``finally`` block on every path, and ``robot-operation-plan-run.json``
-   (schema ``rocobrick-operation-plan-run/v1``) records readiness, per-robot
-   isolated operations, layers, cancellations, resources, cleanup, the
-   immutable input digests and the aggregate ``passed`` verdict. STAP-backed
-   runs additionally require pending assembly effects to be evidenced by
-   CONFIRMED PLACE_DOWN operations; direct robot-operation-plan runs have no
-   STAP assembly effect to evaluate.
-   Terminal statuses: ``INVALID_INPUT`` (2) for a malformed or unbindable
-   external plan, ``UNRESOLVED_TCP`` (4) when the TCP authorization denies,
-   ``RUNTIME_START_FAILED`` (8) when the session or any robot readiness
-   fails (zero operations scheduled), ``EXECUTION_FAILED`` (10) when the
-   scheduler, the assembly-effect check or cleanup does not pass, and
-   ``EXECUTED`` (0) only when every gate, every robot readiness, every
-   operation, every pending assembly effect and the cleanup passed and the
-   input digests are unchanged.
-8. Re-hashes the original input files from disk after all phases — including
-   the external operation plan and after the runtime — and fails with
-   ``INPUT_MUTATED`` if any digest changed (IMMUTABILITY).
-9. ``--robot-operation-plan`` WITHOUT ``--task``/``--plan`` is the
-   structure-bound direct path. It requires ``--structure-goal`` (which is
-   never defaulted); ``--structure-start`` is optional and an omitted flag
-   or the literal empty string both mean EMPTY initial structure, and the
-   inputs record that choice explicitly (``start_provided`` and
-   ``start_empty``) without inventing a digest for an absent start. The
-   named original inputs must also stay distinct files: the plan, the goal,
-   a supplied start and the optional scene manifest and config are rejected
-   with ``INVALID_INPUT`` (2) when any two of them resolve to the same file,
-   strictly before the binder runs. The external plan is read, copied
-   verbatim, hashed and validated with ``parse_robot_operation_plan(source_plan=None)``,
-   then bound to the exact structure files with
-   :func:`rocobrick.plan.structure_scene.build_structure_scene_plan_from_files`
-   and only afterwards is the TCP claim re-derived. By default this path
-   executes: the scene manifest, snapshot, host id and config paths are
-   filled from the fresh run directory and repository defaults, and the
-   Isaac host generates the manifest from its loaded scene before PICK
-   dispatch. With ``--preflight-only`` the same invocation becomes the
-   no-runtime preflight: no scene path is invented, no session is created,
-   no operation is scheduled and no motion is sent.
+* ``--robot-operation-plan`` is the only plan: an external
+  ``robot-operation-plan/v1`` document. It is read once, captured verbatim into
+  the run directory, and bound to the explicit structure files by physical
+  instance id.
+* ``--structure-goal`` is required and never defaulted; ``--structure-start`` is
+  optional, and an omitted flag or the literal empty string both mean EMPTY
+  initial structure.
 
-The program is offline and pure apart from its evidence directory and the
-explicit ``--task``/``--plan`` STAP or structure-bound
-``--robot-operation-plan`` runtime bridge: without dispatch (no
-``--robot-operation-plan``, or the ``--preflight-only`` direct form) it
-imports no runtime adapter module. It writes evidence (input copies, phase
-events, ``preflight.json``, and ``result.json``) only inside its own run
-directory. Exactly one final JSON line is printed to stdout; diagnostics go
-to stderr.
+There is no ``--task``/``--plan`` STAP ingest, no ``--structure-dir`` and no
+assembly-plan/v2 fallback: an invocation that passes one of those obsolete
+flags is an argparse usage error (``INVALID_INPUT``) raised before any run
+directory exists.
+
+The gates run in a fixed, audited order and each one appends its event to
+``events.jsonl``: input capture with digests, input aliasing, strict
+robot-operation-plan validation, structure-scene binding, input immutability
+after validation, the TCP claim gate (``_rederive_tcp`` followed by
+``require_resolved_tcp``) and the TCP dispatch authorization. The real
+multi-robot session is created only after both TCP steps have passed; a denied,
+unresolved or contract-invalid claim schedules zero sessions and zero
+operations. The plan then runs through the strict shared scheduler and skill
+executor, the session is stopped with cleanup evidence in a ``finally`` block,
+and the terminal status is derived from that evidence.
+
+``--preflight-only`` evaluates the same gates and stops before dispatch, so it
+never creates a session and never moves a robot. The program is offline and
+pure apart from its evidence directory and the processes of the runtime it is
+explicitly authorized to start; node motion is out of scope here, and the TCP
+geometry/calibration/frame/model safety validation is owned by
+:mod:`rocobrick.tcp_contract` and its model-audit artifact. Exactly one final
+JSON line is printed to stdout; diagnostics go to stderr.
 """
 
 from __future__ import annotations
@@ -117,16 +59,6 @@ from rocobrick.robot_operation_plan import (
     RobotOperationPlanError,
     parse_robot_operation_plan,
 )
-from rocobrick.stap_contract import (
-    STAP_PLAN_SCHEMA,
-    StapContractError,
-    parse_stap_plan,
-)
-from rocobrick.structural_binding import (
-    StructuralBinding,
-    bind_single_stap_task,
-    binding_requires_tcp,
-)
 from rocobrick.tcp_capability import authorize_tcp
 from rocobrick.tcp_contract import (
     TcpContract,
@@ -143,21 +75,16 @@ PLAN_CAPTURE_NAME = "robot-operation-plan.json"
 PLAN_RUN_NAME = "robot-operation-plan-run.json"
 SCENE_MANIFEST_CAPTURE_NAME = "scene-manifest.json"
 CONFIG_CAPTURE_NAME = "config.json"
-# Direct ``--robot-operation-plan`` runs never synthesize a STAP source plan.
-# Explicit preflight-only runs stop before dispatch; direct runtime runs still
-# require structure binding, implemented skill backends and TCP authorization.
+# The single direct path reuses the established evidence-mode string so the
+# preflight and result documents keep their historical vocabulary.
 STRUCTURE_ONLY_MODE = "structure-only-preflight"
-NO_STAP_AUTHORIZATION = "no authoritative STAP authorization"
+NO_PLAN_AUTHORIZATION = "no authoritative plan authorization"
 OPERATION_TIMEOUT_S = 60.0
 CANCEL_TIMEOUT_S = 5.0
+# Evidence-key compatibility: the direct path keeps the established schema
+# string and emits the trivial assembly-effects document, but it never
+# synthesizes an ``assembly-plan/v2`` binding or STAP authorization.
 ASSEMBLY_EFFECT_SCHEMA = "rocobrick-piper-run-stap-assembly-effects/v1"
-PENDING_TASK_SKILL = "PLACE_DOWN"
-ASSEMBLY_EVIDENCE_LABELS = (
-    "connection_confirmed",
-    "release_confirmed",
-    "retreat_confirmed",
-)
-UPWARD_TASK_SKILL = "PLACE_UP"
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -254,37 +181,19 @@ class RunOutcome:
 
 @dataclass(frozen=True)
 class _Arguments:
-    """Parsed command-line arguments."""
+    """Parsed command-line arguments of the direct plan entry."""
 
-    task_dir: Path | None
-    plan_path: Path | None
     backend: str
     robot_id: str
     run_dir: Path | None
     preflight_only: bool
-    robot_operation_plan_path: Path | None = None
+    robot_operation_plan_path: Path
     scene_manifest: Path | None = None
     scene_snapshot_out: Path | None = None
     host_instance_id: str | None = None
     config_path: Path | None = None
-    structure_dir: Path | None = None
     structure_goal: Path | None = None
     structure_start: Path | None = None
-
-
-@dataclass(frozen=True)
-class _Inputs:
-    """The exact input bytes read once, with their raw digests."""
-
-    task_dir: Path
-    start_path: Path
-    goal_path: Path
-    plan_path: Path
-    plan_bytes: bytes
-    start_bytes: bytes
-    goal_bytes: bytes
-    sha256: Mapping[str, str]
-    sizes: Mapping[str, int]
 
 
 class _ArgumentParser(argparse.ArgumentParser):
@@ -308,31 +217,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser = _ArgumentParser(
         prog="piper-run",
         description=(
-            "Immutable STAP ingest, structural binding, TCP gate, and "
-            "evidence composition preflight. Starts no runtime and no motion."
-        ),
-    )
-    parser.add_argument(
-        "--task",
-        required=False,
-        type=Path,
-        metavar="TASK_DIR",
-        help=(
-            "task directory containing structure_start.json and "
-            "structure_goal.json (extra files are ignored); read-only, "
-            "together with --plan"
-        ),
-    )
-    parser.add_argument(
-        "--plan",
-        required=False,
-        type=Path,
-        metavar="PLAN_JSON",
-        help=(
-            "assembly-plan/v2 STAP plan JSON file; read-only, together with "
-            "--task; omit both to select the structure-bound "
-            "--robot-operation-plan path (add --preflight-only for the "
-            "no-runtime preflight)"
+            "Immutable external robot-operation-plan ingest, explicit "
+            "structure binding, TCP gate and evidence composition preflight. "
+            "No runtime and no motion is started unless dispatch is "
+            "authorized."
         ),
     )
     parser.add_argument(
@@ -340,18 +228,14 @@ def build_parser() -> argparse.ArgumentParser:
         required=False,
         default=None,
         choices=BACKENDS,
-        help=(
-            "execution backend selected for this run; required by the "
-            f"--task/--plan STAP path (default for the structure-only "
-            f"preflight: {BACKENDS[0]})"
-        ),
+        help=f"execution backend selected for this run (default: {BACKENDS[0]})",
     )
     parser.add_argument(
         "--robot-id",
         default=DEFAULT_ROBOT_ID,
         metavar="ROBOT_ID",
         help=(
-            "robot the plan must allocate its single pending task to "
+            "robot this invocation is audited for "
             f"(default: {DEFAULT_ROBOT_ID})"
         ),
     )
@@ -369,8 +253,8 @@ def build_parser() -> argparse.ArgumentParser:
         "--preflight-only",
         action="store_true",
         help=(
-            "stop after the gates and never consider dispatch; an unresolved "
-            "required TCP still fails nonzero"
+            "stop after the gates and never create a session or dispatch; an "
+            "unresolved required TCP still fails nonzero"
         ),
     )
     parser.add_argument("--scene-manifest", type=Path, default=None)
@@ -378,21 +262,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--host-instance-id", default=None)
     parser.add_argument("--config", type=Path, default=None, metavar="USER_CONFIG_JSON")
     parser.add_argument(
-        "--structure-dir",
-        type=Path,
-        default=None,
-        metavar="STRUCTURE_DIR",
-    )
-    parser.add_argument(
         "--structure-goal",
         type=Path,
         default=None,
         metavar="GOAL_JSON",
         dest="structure_goal",
         help=(
-            "goal structure JSON of a structure-bound "
-            "--robot-operation-plan invocation (no --task/--plan STAP "
-            "source); required in that mode and never defaulted"
+            "required goal structure JSON of the invocation; it is never "
+            "defaulted and never inferred"
         ),
     )
     parser.add_argument(
@@ -401,9 +278,8 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="START_JSON",
         dest="structure_start",
         help=(
-            "optional initial structure JSON of a structure-bound "
-            "--robot-operation-plan invocation; an omitted flag or the "
-            "literal empty string both mean EMPTY initial structure"
+            "optional initial structure JSON; an omitted flag or the literal "
+            "empty string both mean EMPTY initial structure"
         ),
     )
     parser.add_argument(
@@ -413,11 +289,11 @@ def build_parser() -> argparse.ArgumentParser:
         dest="robot_operation_plan",
         metavar="PLAN_JSON",
         help=(
-            "the ONLY production dispatch entry: an external "
-            "robot-operation-plan/v1 document, validated against the "
-            "assembly-plan/v2 binding (with --task/--plan) or the explicit "
-            "structure inputs, then executed through the real multi-robot "
-            "session; scene paths default into the run directory"
+            "the only plan entry: an external robot-operation-plan/v1 "
+            "document, bound to the explicit structure inputs and then "
+            "executed through the real multi-robot session unless "
+            "--preflight-only is passed; scene paths default into the run "
+            "directory"
         ),
     )
     return parser
@@ -476,55 +352,6 @@ def _prepare_run_dir(requested: Path | None) -> Path:
         return candidate
     raise _RunDirError(  # pragma: no cover - statistically unreachable
         f"cannot create a unique run directory under {base}", base
-    )
-
-
-def _resolve_and_read(task_dir: Path, plan_path: Path) -> _Inputs:
-    """Check the input layout and read every input exactly once.
-
-    Args:
-        task_dir: Directory that must contain both task structure files.
-        plan_path: Plan file that must exist.
-
-    Returns:
-        The exact input bytes with their raw SHA-256 digests and sizes.
-
-    Raises:
-        ValueError: If the task directory, structure files, or plan file do
-            not satisfy the required layout.
-    """
-    if not task_dir.is_dir():
-        raise ValueError(
-            f"task directory {task_dir} does not exist or is not a directory"
-        )
-    start_path = task_dir / TASK_START_NAME
-    goal_path = task_dir / TASK_GOAL_NAME
-    for path in (start_path, goal_path):
-        if not path.is_file():
-            raise ValueError(f"required task structure file {path} is missing")
-    if not plan_path.is_file():
-        raise ValueError(f"plan {plan_path} does not exist or is not a file")
-    plan_bytes = plan_path.read_bytes()
-    start_bytes = start_path.read_bytes()
-    goal_bytes = goal_path.read_bytes()
-    return _Inputs(
-        task_dir=task_dir,
-        start_path=start_path,
-        goal_path=goal_path,
-        plan_path=plan_path,
-        plan_bytes=plan_bytes,
-        start_bytes=start_bytes,
-        goal_bytes=goal_bytes,
-        sha256={
-            "plan": sha256(plan_bytes).hexdigest(),
-            "task_start": sha256(start_bytes).hexdigest(),
-            "task_goal": sha256(goal_bytes).hexdigest(),
-        },
-        sizes={
-            "plan": len(plan_bytes),
-            "task_start": len(start_bytes),
-            "task_goal": len(goal_bytes),
-        },
     )
 
 
@@ -683,8 +510,8 @@ def _derive_pick_collision_filter(
         The unique executor robot and its authorized physical-instance ids;
         ambiguous multi-robot assignments return ``(None, ())``.
     """
-    plan_path = getattr(args, "robot_operation_plan_path", None)
-    if plan_path is None or not plan_path.is_file():
+    plan_path = args.robot_operation_plan_path
+    if not plan_path.is_file():
         return None, ()
     try:
         document = json.loads(plan_path.read_text(encoding="utf-8"))
@@ -735,8 +562,8 @@ def _derive_observation_connection_pairs(
     Returns:
         The unique order-normalized connection pairs of the plan.
     """
-    plan_path = getattr(args, "robot_operation_plan_path", None)
-    if plan_path is None or not plan_path.is_file():
+    plan_path = args.robot_operation_plan_path
+    if not plan_path.is_file():
         return ()
     try:
         document = json.loads(plan_path.read_text(encoding="utf-8"))
@@ -773,15 +600,15 @@ def _create_session(
     The production construction is deliberately trivial and lazy: the real
     :class:`rocobrick.multi_robot_runtime.MultiRobotIsaacMoveItSession` is
     imported only here, after every gate and the TCP authorization have
-    passed, with the validated plan robots and the explicit scene option
-    group of the invocation. There is no fake fallback: a missing scene group
-    is rejected as a usage error before any run directory exists, and a
-    construction failure is reported as a runtime start failure.
+    passed, with the validated plan robots and the scene paths materialized
+    into the run directory by ``_materialize_direct_defaults``. There is no
+    fake fallback, and a construction failure is reported as a runtime start
+    failure.
 
     Args:
         session_dir: Directory (inside the run evidence directory) that the
             session owns for its lifecycle evidence.
-        args: Parsed command-line arguments carrying the scene group.
+        args: Parsed command-line arguments carrying the scene paths.
         robot_ids: Validated ``robots`` of the parsed operation plan; every
             one of them is started and must become ready.
 
@@ -804,13 +631,9 @@ def _create_session(
         scene_manifest=args.scene_manifest,
         scene_snapshot_out=args.scene_snapshot_out,
         host_instance_id=args.host_instance_id,
-        plan_path=(
-            args.plan_path
-            or args.robot_operation_plan_path
-            or REPO_ROOT / "artifacts/scene/example1-robot-operation-plan.json"
-        ),
+        plan_path=args.robot_operation_plan_path,
         config_path=args.config_path or REPO_ROOT / "config/user_config.json",
-        structure_dir=args.structure_dir,
+        structure_dir=None,
         structure_goal_path=args.structure_goal,
         structure_start_path=args.structure_start,
         collision_filter_robot_id=collision_filter_robot_id,
@@ -818,9 +641,9 @@ def _create_session(
         observation_connection_pairs=_derive_observation_connection_pairs(
             args, robot_ids
         ),
-        verify_plan_robots=not (
-            args.robot_operation_plan_path is not None and args.plan_path is None
-        ),
+        # The external plan is validated by its own strict parser; the session
+        # must not re-validate it against a STAP robot allocation.
+        verify_plan_robots=False,
     )
     return MultiRobotIsaacMoveItSession(
         config, runner=SubprocessRunner(), session_dir=session_dir
@@ -1182,226 +1005,37 @@ def _plan_failure_reason(document: Mapping[str, object]) -> str:
     return "not every operation was confirmed"
 
 
-def _place_down_upper_part(operation: object) -> str | None:
-    """Return the placed/moving part targeted by PLACE_DOWN or PLACE_UP.
-
-    Returns:
-        The upper part for PLACE_DOWN, or the lower moving part for PLACE_UP.
-    """
-    target = getattr(operation, "target", None)
-    values = getattr(target, "values", None)
-    if not isinstance(values, Mapping):
-        return None
-    skill = getattr(operation, "skill", None)
-    key = (
-        "lower_physical_instance_id"
-        if skill == "PLACE_UP"
-        else "upper_physical_instance_id"
-    )
-    value = values.get(key)
-    return value if isinstance(value, str) and value else None
-
-
-def _evidence_label_proven(evidence: object, label: str) -> bool:
-    """Return whether one required evidence label carries an explicit proof.
-
-    Mirrors the frozen scheduler predicate: the label must be present in the
-    evidence mapping and its value must be neither ``None`` nor ``False``.
-
-    Args:
-        evidence: The serialized per-operation evidence mapping (or anything
-            else found under the ``evidence`` key).
-        label: Required evidence label name.
-
-    Returns:
-        True only when the label is present with an explicit value.
-    """
-    if not isinstance(evidence, Mapping) or label not in evidence:
-        return False
-    value = evidence[label]
-    return value is not None and value is not False
-
-
-def _pending_assembly_effect_check(
-    stap_plan: object,
-    operation_plan: object,
-    run_document: Mapping[str, object],
-) -> dict[str, object]:
-    """Verify every pending STAP task's assembly effect is evidenced.
-
-    This is the final semantic gate of a dispatch run: ``EXECUTED`` requires
-    each pending STAP task to have exactly one ``PLACE_DOWN`` operation in the
-    external plan that executes that task's part on that task's allocated
-    robot, whose serialized scheduler result is ``CONFIRMED``/``passed`` and
-    whose evidence carries every required connection, release and retreat
-    label. A binding of the external plan to the STAP plan, a CONFIRMED
-    observation of another skill, or a missing operation is never assembly
-    effect evidence, and the check is fail-closed on any missing or
-    malformed input.
-
-    Args:
-        stap_plan: The authoritative validated STAP plan.
-        operation_plan: The parsed external operation plan.
-        run_document: The serialized ``rocobrick-operation-plan-run/v1``
-            document of the scheduler run.
-
-    Returns:
-        A JSON-safe evidence document with ``passed``, the pending, evidenced
-        and missing task ids, and one per-task verification entry.
-    """
-    tasks = getattr(stap_plan, "tasks", None)
-    operations = getattr(operation_plan, "operations", None)
-    run_operations = run_document.get("operations")
-    run_operations = run_operations if isinstance(run_operations, Mapping) else {}
-    document: dict[str, object] = {
-        "schema": ASSEMBLY_EFFECT_SCHEMA,
-        "required_evidence_labels": list(ASSEMBLY_EVIDENCE_LABELS),
-        "pending_task_ids": [],
-        "evidenced_task_ids": [],
-        "missing_task_ids": [],
-        "tasks": [],
-        "passed": False,
-        "reason": None,
-    }
-    if not isinstance(tasks, Mapping) or not isinstance(operations, Mapping):
-        document["reason"] = (
-            "the authoritative STAP tasks or the parsed operation plan are "
-            "not available for the assembly-effect check"
-        )
-        return document
-    entries: list[dict[str, object]] = []
-    pending: list[str] = []
-    evidenced: list[str] = []
-    missing: list[str] = []
-    for task_id, task in tasks.items():
-        task_name = str(task_id)
-        part_id = getattr(task, "physical_instance_id", None)
-        robot_id = getattr(task, "primary_robot", None)
-        skill = str(getattr(task, "skill", ""))
-        entry: dict[str, object] = {
-            "task_id": task_name,
-            "physical_instance_id": part_id,
-            "primary_robot": robot_id,
-            "skill": skill,
-            "required_evidence_labels": list(ASSEMBLY_EVIDENCE_LABELS),
-            "operation_id": None,
-            "operation_status": None,
-            "operation_passed": None,
-            "missing_evidence_labels": list(ASSEMBLY_EVIDENCE_LABELS),
-            "confirmed": False,
-            "reason": None,
-        }
-        pending.append(task_name)
-        matching = [
-            operation
-            for operation in operations.values()
-            if getattr(operation, "skill", None)
-            in {PENDING_TASK_SKILL, UPWARD_TASK_SKILL}
-            and getattr(operation, "source_task_id", None) == task_id
-            and getattr(operation, "executor_robot_id", None) == robot_id
-            and _place_down_upper_part(operation) == part_id
-        ]
-        if len(matching) != 1:
-            entry["reason"] = (
-                f"the external plan has {len(matching)} PLACE_DOWN/PLACE_UP "
-                f"placement operations for STAP task "
-                f"{task_name!r} (part {part_id!r} on "
-                f"robot {robot_id!r}); exactly one is required"
-            )
-            missing.append(task_name)
-            entries.append(entry)
-            continue
-        operation = matching[0]
-        operation_id = getattr(operation, "operation_id", None)
-        entry["operation_id"] = operation_id
-        result = (
-            run_operations.get(operation_id) if isinstance(operation_id, str) else None
-        )
-        if not isinstance(result, Mapping):
-            entry["reason"] = (
-                f"operation {operation_id!r} has no scheduler result in the "
-                "run document"
-            )
-            missing.append(task_name)
-            entries.append(entry)
-            continue
-        status = result.get("status")
-        passed = result.get("passed") is True
-        entry["operation_status"] = status
-        entry["operation_passed"] = passed
-        missing_labels = [
-            label
-            for label in ASSEMBLY_EVIDENCE_LABELS
-            if not _evidence_label_proven(result.get("evidence"), label)
-        ]
-        entry["missing_evidence_labels"] = missing_labels
-        if status != "CONFIRMED" or not passed:
-            entry["reason"] = (
-                f"operation {operation_id!r} for STAP task {task_name!r} "
-                f"ended {status!r} (passed={passed!r}) instead of CONFIRMED"
-            )
-            missing.append(task_name)
-        elif missing_labels:
-            entry["reason"] = (
-                f"operation {operation_id!r} for STAP task {task_name!r} is "
-                f"CONFIRMED but lacks the assembly evidence labels "
-                f"{missing_labels}"
-            )
-            missing.append(task_name)
-        else:
-            entry["confirmed"] = True
-            evidenced.append(task_name)
-        entries.append(entry)
-    document["pending_task_ids"] = pending
-    document["evidenced_task_ids"] = evidenced
-    document["missing_task_ids"] = missing
-    document["tasks"] = entries
-    document["passed"] = not missing
-    if missing:
-        document["reason"] = (
-            "pending STAP assembly effects are not evidenced for tasks "
-            f"{missing}; each pending task requires one CONFIRMED "
-            f"{PENDING_TASK_SKILL} operation for its part and robot with the "
-            f"evidence labels {list(ASSEMBLY_EVIDENCE_LABELS)}"
-        )
-    return document
-
-
 def _robot_operation_plan_phase(
     args: "_Arguments",
     record: dict[str, object],
     recorder: EvidenceRecorder,
     contract: TcpContract | None,
-    stap_plan: object,
 ) -> tuple[RunStatus, str] | None:
     """Validate the external plan, authorize, run the session, aggregate.
 
-    Every gate — external plan capture/parse/cross-binding and the strict TCP
-    authorization — completes before the real multi-robot session is created.
-    The session is started for every validated plan robot; a readiness
-    failure schedules zero operations. The plan itself runs through
-    ``OperationPlanRunner`` in strict mode over ``SkillOperationExecutor``,
-    which observes the session's real read-only scene transport, and the
-    session is stopped with cleanup evidence in a ``finally`` block on every
-    path. A final semantic check then requires every pending STAP task's
-    assembly effect to be evidenced by one CONFIRMED ``PLACE_DOWN`` operation
-    for that exact task/part/robot with the required connection, release and
-    retreat labels; ``robot-operation-plan-run.json`` is left in ``record``
-    for the caller to finalize with the post-phase input digests.
+    Every gate — external plan capture/parse and the strict TCP authorization —
+    completes before the real multi-robot session is created. The session is
+    started for every validated plan robot; a readiness failure schedules zero
+    operations. The plan itself runs through ``OperationPlanRunner`` in strict
+    mode over ``SkillOperationExecutor``, which observes the session's real
+    read-only scene transport, and the session is stopped with cleanup evidence
+    in a ``finally`` block on every path.
+    ``robot-operation-plan-run.json`` is left in ``record`` for the caller to
+    finalize with the post-phase input digests. This path never synthesizes
+    STAP authorization or an assembly-plan/v2 binding: the structure carrier
+    binding was validated by the caller before dispatch.
 
     Args:
         args: Parsed command-line arguments with the external plan and the
-            explicit scene option group.
+            explicit structure inputs.
         record: The mutable preflight record, updated in place.
         recorder: The run evidence recorder.
         contract: The re-derived TCP contract from the TCP gate.
-        stap_plan: The authoritative validated STAP plan.
 
     Returns:
-        ``None`` when every robot was ready, every operation was confirmed,
-        every pending STAP assembly effect is evidenced, the cleanup passed
-        and the inputs stayed immutable (the caller reports ``EXECUTED``),
-        otherwise the terminal status and reason.
+        ``None`` when every robot was ready, every operation was confirmed, the
+        cleanup passed and the inputs stayed immutable (the caller reports
+        ``EXECUTED``), otherwise the terminal status and reason.
     """
     from rocobrick.execution.operation_state_ledger import OperationStateLedger
     from rocobrick.execution.robot_operation_executor import SkillOperationExecutor
@@ -1431,7 +1065,7 @@ def _robot_operation_plan_phase(
         "sha256": None,
         "bytes": None,
         "validated": False,
-        "source_plan_bound": stap_plan is not None,
+        "source_plan_bound": False,
         "error": None,
     }
     record["robot_operation_plan"] = plan_record
@@ -1469,12 +1103,9 @@ def _robot_operation_plan_phase(
         )
         return RunStatus.INVALID_INPUT, reason
     try:
-        operation_plan = parse_robot_operation_plan(payload, source_plan=stap_plan)
+        operation_plan = parse_robot_operation_plan(payload)
     except RobotOperationPlanError as error:
-        reason = (
-            f"the robot operation plan failed strict validation against the "
-            f"STAP binding: {error}"
-        )
+        reason = f"the robot operation plan failed strict validation: {error}"
         plan_record["error"] = reason
         recorder.append_event(
             {
@@ -1544,7 +1175,6 @@ def _robot_operation_plan_phase(
         }
     )
     record["checks"]["robot_operation_plan_validated"] = True
-    record["checks"]["robot_operation_plan_cross_bound"] = True
     recorder.append_event(
         {
             "phase": "robot_operation_plan",
@@ -1761,17 +1391,15 @@ def _robot_operation_plan_phase(
                                     top_offset_bindings,
                                 )
 
-                                structure = stap_plan
-                                if structure is None:
-                                    structure, _ = (
-                                        build_structure_scene_plan_from_files(
-                                            recorder.directory / "structure_start.json"
-                                            if args.structure_start is not None
-                                            else None,
-                                            recorder.directory / "structure_goal.json",
-                                            payload,
-                                        )
+                                structure, _ = (
+                                    build_structure_scene_plan_from_files(
+                                        recorder.directory / "structure_start.json"
+                                        if args.structure_start is not None
+                                        else None,
+                                        recorder.directory / "structure_goal.json",
+                                        payload,
                                     )
+                                )
                                 library = json.loads(
                                     (REPO_ROOT / "config/lego_library.json").read_text()
                                 )
@@ -1999,28 +1627,23 @@ def _robot_operation_plan_phase(
     run_document["motion_sent"] = motion_sent
     record["checks"]["motion_sent"] = motion_sent
 
-    # Final semantic check: EXECUTED requires every pending STAP task's
-    # assembly effect to be evidenced by a CONFIRMED PLACE_DOWN operation for
-    # that exact task/part/robot carrying the required connection, release and
-    # retreat labels. The STAP binding alone, or a CONFIRMED observation of
-    # another skill, never substitutes for the assembly effect.
-    assembly_effects = (
-        _pending_assembly_effect_check(stap_plan, operation_plan, run_document)
-        if stap_plan is not None
-        else {
-            "schema": ASSEMBLY_EFFECT_SCHEMA,
-            "mode": "robot_operation_plan_primary",
-            "passed": True,
-            "pending_task_ids": [],
-            "evidenced_task_ids": [],
-            "missing_task_ids": [],
-            "tasks": [],
-            "reason": (
-                "no assembly-plan/v2 binding is required for "
-                "robot-operation-plan simulation"
-            ),
-        }
-    )
+    # The direct path never synthesizes an ``assembly-plan/v2`` STAP binding,
+    # so no pending STAP task can exist. The trivial document keeps the
+    # established evidence keys and schema string with an explicitly empty
+    # task set instead of inventing STAP authorization.
+    assembly_effects = {
+        "schema": ASSEMBLY_EFFECT_SCHEMA,
+        "mode": "robot_operation_plan_primary",
+        "passed": True,
+        "pending_task_ids": [],
+        "evidenced_task_ids": [],
+        "missing_task_ids": [],
+        "tasks": [],
+        "reason": (
+            "no assembly-plan/v2 binding is required for "
+            "robot-operation-plan simulation"
+        ),
+    }
     assembly_effects_passed = assembly_effects.get("passed") is True
     run_document["stap_assembly_effects"] = assembly_effects
     record["checks"]["robot_operation_plan_pending_tasks_confirmed"] = (
@@ -2298,34 +1921,28 @@ def _structure_carrier_summary(
 def _run_robot_operation_plan_primary(
     args: _Arguments, run_dir: Path, recorder: EvidenceRecorder
 ) -> RunOutcome:
-    """Validate and, when authorized, execute a direct operation plan.
+    """Validate and, when authorized, execute the direct operation plan.
 
-    Without an authoritative STAP source this path still validates and binds
-    the external operation plan to explicit structure inputs. A complete scene
-    option group then permits the shared real runtime for skills with available
-    backends; the direct path does not synthesize STAP authorization or
-    assembly-effect evidence.
-    The explicit structure inputs are captured and bound before the TCP claim is
-    re-derived; every step is audited as an event. Before the binder runs, the
-    named original inputs are audited for aliasing: the plan, the goal, a
+    The external plan is validated against the explicit structure goal/start
+    inputs and then bound to them by physical instance id, before the TCP claim
+    is re-derived; every step is audited as an event. Before the binder runs,
+    the named original inputs are audited for aliasing: the plan, the goal, a
     supplied start and the optional scene manifest and config must resolve to
     distinct files, and an aliased pair ends ``INVALID_INPUT`` with no binding.
     The inputs also record the start choice explicitly; an omitted or
     empty-string start is EMPTY initial structure and never receives an
-    invented SHA-256. With a complete runtime option group, the shared runtime
-    dispatch is authorized by the same TCP gate and executor used by the STAP
-    path. Without that group, the invocation remains a no-runtime preflight.
-    A direct run does not synthesize an ``assembly-plan/v2`` STAP plan or
-    evaluate STAP assembly effects.
-
+    invented SHA-256. The TCP gate and its dispatch authorization run before
+    any session is created, so a denied, unresolved or contract-invalid claim
+    schedules zero sessions and zero operations. ``--preflight-only`` stops
+    after the gates; otherwise the plan runs through the shared strict runtime.
 
     Args:
-        args: Parsed arguments of a structure-only invocation.
+        args: Parsed arguments of a direct robot-operation-plan invocation.
         run_dir: The freshly created evidence run directory.
         recorder: The run evidence recorder.
 
     Returns:
-        The terminal non-success outcome, including its exit code.
+        The terminal outcome of the run, including its exit code.
     """
     from rocobrick.plan.structure_scene import (
         StructureSceneError,
@@ -2346,17 +1963,17 @@ def _run_robot_operation_plan_primary(
             "requested": False,
             "status": str(RunStatus.EXECUTION_NOT_IMPLEMENTED),
             "reason": (
-                f"{NO_STAP_AUTHORIZATION}; the structure-only preflight "
-                "never authorizes dispatch"
+                f"{NO_PLAN_AUTHORIZATION}; the preflight never requests "
+                "dispatch"
             ),
             "backend": args.backend,
-            "provenance": "no_stap_source_plan",
+            "provenance": "no_authoritative_plan",
             "runtime_asset_sha256": None,
             "calibration_artifact_sha256": None,
         },
     }
     plan_record: dict[str, object] = {
-        "path": str(plan_path) if plan_path is not None else None,
+        "path": str(plan_path),
         "captured_path": str(recorder.directory / PLAN_CAPTURE_NAME),
         "mode": STRUCTURE_ONLY_MODE,
         "schema": None,
@@ -2378,10 +1995,8 @@ def _run_robot_operation_plan_primary(
         "mode": STRUCTURE_ONLY_MODE,
         "backend": args.backend,
         "robot_id": args.robot_id,
-        "preflight_only": False,
+        "preflight_only": args.preflight_only,
         "robot_operation_plan_path": plan_record["path"],
-        "task_dir": None,
-        "plan_path": None,
         "plan_id": None,
         "task_id": None,
         "structure_goal_path": (str(goal_path) if goal_path is not None else None),
@@ -2426,11 +2041,11 @@ def _run_robot_operation_plan_primary(
     # Phase 1: IMMUTABLE_INPUT. Every original input is read once, hashed and
     # copied verbatim; the goal is required and the start, scene manifest and
     # config are captured only when the invocation supplies them.
-    if plan_path is None or goal_path is None:
+    if goal_path is None:
         terminal = (
             RunStatus.INVALID_INPUT,
-            "the structure-only --robot-operation-plan preflight requires "
-            "both --robot-operation-plan and --structure-goal",
+            "a robot-operation-plan invocation requires an explicit "
+            "--structure-goal; the goal structure is never inferred",
         )
     else:
         plan_bytes, plan_entry = _capture_input_record(
@@ -2554,7 +2169,7 @@ def _run_robot_operation_plan_primary(
                 )
     if terminal is None and payload is not None:
         try:
-            operation_plan = parse_robot_operation_plan(payload, source_plan=None)
+            operation_plan = parse_robot_operation_plan(payload)
             from rocobrick.skills.handover_profile import resolve_handover_profile
 
             plan_record["handover_profiles"] = [
@@ -2573,7 +2188,7 @@ def _run_robot_operation_plan_primary(
             terminal = (
                 RunStatus.INVALID_INPUT,
                 "the robot operation plan failed strict structural "
-                f"validation without a STAP source plan: {error}",
+                f"validation: {error}",
             )
         except ValueError as error:
             operation_plan = None
@@ -2706,6 +2321,7 @@ def _run_robot_operation_plan_primary(
                 "structure": metadata,
             }
             checks["structure_scene_validated"] = True
+            checks["robot_operation_plan_cross_bound"] = True
             recorder.append_event(
                 {
                     "phase": "structure_scene",
@@ -2782,14 +2398,14 @@ def _run_robot_operation_plan_primary(
             gate_status = str(RunStatus.UNRESOLVED_TCP)
             terminal = (
                 RunStatus.UNRESOLVED_TCP,
-                f"{NO_STAP_AUTHORIZATION}: required TCP is unresolved: "
+                f"{NO_PLAN_AUTHORIZATION}: required TCP is unresolved: "
                 f"{error}; no session was created and no motion was sent",
             )
         except _TcpGateError as failure:
             gate_status = str(failure.status)
             terminal = (
                 failure.status,
-                f"{NO_STAP_AUTHORIZATION}: {failure.reason}; no session was "
+                f"{NO_PLAN_AUTHORIZATION}: {failure.reason}; no session was "
                 "created and no motion was sent",
             )
         tcp_record["gate"] = gate_status
@@ -2811,11 +2427,11 @@ def _run_robot_operation_plan_primary(
             }
         )
 
-    # Phase 6: execute the validated no-STAP path for skills with real
+    # Phase 6: execute the validated direct path for skills with real
     # backends, including HANDOVER. The runtime retains all evidence gates.
     if terminal is None and direct_dispatch:
         runtime_terminal = _robot_operation_plan_phase(
-            args, record, recorder, contract, None
+            args, record, recorder, contract
         )
         terminal = runtime_terminal or (
             RunStatus.EXECUTED,
@@ -3100,8 +2716,6 @@ def _materialize_direct_defaults(args: _Arguments, run_dir: Path) -> _Arguments:
     """
     if args.preflight_only:
         return args
-    if args.robot_operation_plan_path is None:
-        return args
     return replace(
         args,
         scene_manifest=(
@@ -3118,7 +2732,7 @@ def _materialize_direct_defaults(args: _Arguments, run_dir: Path) -> _Arguments:
 
 
 def _run(args: _Arguments) -> RunOutcome:
-    """Execute the preflight phases and write the run evidence.
+    """Create the run directory and execute the direct plan path.
 
     Args:
         args: Parsed command-line arguments.
@@ -3141,412 +2755,12 @@ def _run(args: _Arguments) -> RunOutcome:
             run_dir=run_dir,
             result_path=None,
         )
-    if args.robot_operation_plan_path is not None and args.plan_path is None:
-        args = _materialize_direct_defaults(args, run_dir)
-        return _run_robot_operation_plan_primary(args, run_dir, recorder)
-    recorder.capture_provenance(
-        REPO_ROOT,
-        {
-            "tool": "piper-run",
-            "backend": args.backend,
-            "robot_id": args.robot_id,
-            "preflight_only": args.preflight_only,
-            "robot_operation_plan": (
-                str(args.robot_operation_plan_path)
-                if args.robot_operation_plan_path is not None
-                else None
-            ),
-        },
-    )
-    record: dict[str, object] = {
-        "schema": PREFLIGHT_SCHEMA,
-        "backend": args.backend,
-        "robot_id": args.robot_id,
-        "preflight_only": args.preflight_only,
-        "robot_operation_plan_path": (
-            str(args.robot_operation_plan_path)
-            if args.robot_operation_plan_path is not None
-            else None
-        ),
-        "task_dir": str(args.task_dir),
-        "plan_path": str(args.plan_path),
-        "plan_id": None,
-        "task_id": None,
-        "motion_geometry": None,
-        "inputs": None,
-        "binding": None,
-        "tcp": None,
-        "dispatch": None,
-        "robot_operation_plan": None,
-        "robot_operation_plan_run": None,
-        "runtime": None,
-        "checks": {},
-    }
-    terminal: tuple[RunStatus, str] | None = None
-    inputs: _Inputs | None = None
-    binding: StructuralBinding | None = None
-    contract: TcpContract | None = None
-    try:
-        # Phase 1: IMMUTABLE_INPUT + authoritative STAP validation.
-        try:
-            inputs = _resolve_and_read(args.task_dir, args.plan_path)
-        except ValueError as error:
-            terminal = (RunStatus.INVALID_INPUT, str(error))
-        if inputs is not None:
-            record["inputs"] = {
-                "task_dir": str(inputs.task_dir),
-                "plan_path": str(inputs.plan_path),
-                "sha256": dict(inputs.sha256),
-                "bytes": dict(inputs.sizes),
-            }
-            record["checks"]["task_structure_files_present"] = True
-            record["checks"]["plan_path_is_file"] = True
-            recorder.capture_input("plan.json", inputs.plan_path)
-            recorder.capture_input("structure_start.json", inputs.start_path)
-            recorder.capture_input("structure_goal.json", inputs.goal_path)
-            recorder.append_event(
-                {
-                    "phase": "immutable_input",
-                    "status": "OK",
-                    "sha256": dict(inputs.sha256),
-                    "bytes": dict(inputs.sizes),
-                    "note": (
-                        "plan and task structure bytes read exactly once and "
-                        "hashed before any parsing; the input paths are never "
-                        "written"
-                    ),
-                }
-            )
-            try:
-                payload = json.loads(inputs.plan_bytes.decode("utf-8"))
-            except (UnicodeDecodeError, ValueError) as error:
-                terminal = (
-                    RunStatus.INVALID_INPUT,
-                    f"plan is not valid UTF-8 JSON: {error}",
-                )
-            if terminal is None:
-                try:
-                    plan = parse_stap_plan(payload)
-                except StapContractError as error:
-                    terminal = (
-                        RunStatus.INVALID_INPUT,
-                        f"plan failed authoritative STAP validation: {error}",
-                    )
-                else:
-                    record["plan_id"] = plan.plan_id
-                    record["checks"]["stap_validated_authoritatively"] = True
-                    recorder.append_event(
-                        {
-                            "phase": "stap_validated",
-                            "status": "OK",
-                            "schema": STAP_PLAN_SCHEMA,
-                            "plan_id": plan.plan_id,
-                            "parser": (
-                                "rocobrick.stap_contract.parse_stap_plan "
-                                "(the metric plan contract is never imported)"
-                            ),
-                            "robots": list(plan.robots),
-                        }
-                    )
-        # Phase 2: STRUCTURAL_BINDING.
-        if terminal is None:
-            decision = bind_single_stap_task(
-                plan_bytes=inputs.plan_bytes,
-                task_start_bytes=inputs.start_bytes,
-                task_goal_bytes=inputs.goal_bytes,
-                robot_id=args.robot_id,
-            )
-            binding = decision.binding
-            record["binding"] = {
-                "accepted": decision.accepted,
-                "reason": decision.reason,
-                "binding": asdict(binding) if binding is not None else None,
-                "details": dict(decision.details),
-            }
-            if binding is not None:
-                record["plan_id"] = binding.plan_id
-                record["task_id"] = binding.task_id
-                record["motion_geometry"] = binding.motion_geometry
-                record["checks"]["binding_accepted"] = True
-            recorder.append_event(
-                {
-                    "phase": "structural_binding",
-                    "status": "ACCEPTED" if decision.accepted else "REJECTED",
-                    "reason": decision.reason,
-                    "robot_id": args.robot_id,
-                    "motion_geometry": (
-                        binding.motion_geometry if binding is not None else None
-                    ),
-                    "binding": asdict(binding) if binding is not None else None,
-                    "details": dict(decision.details),
-                }
-            )
-            if not decision.accepted:
-                terminal = (
-                    RunStatus.BINDING_REJECTED,
-                    f"structural binding rejected: {decision.reason}",
-                )
-        # Phase 3: TCP_GATE.
-        requires_tcp = binding_requires_tcp(binding) if binding is not None else None
-        tcp_record: dict[str, object] = {"binding_requires_tcp": requires_tcp}
-        record["tcp"] = tcp_record
-        if terminal is None:
-            if requires_tcp:
-                gate_status = "PASSED"
-                try:
-                    contract = _rederive_tcp(tcp_record)
-                    require_resolved_tcp(contract)
-                    tcp_record["require_resolved_tcp"] = "satisfied"
-                    record["checks"]["tcp_resolved"] = True
-                except UnresolvedTcpError as error:
-                    gate_status = str(RunStatus.UNRESOLVED_TCP)
-                    terminal = (
-                        RunStatus.UNRESOLVED_TCP,
-                        f"required TCP is unresolved: {error}",
-                    )
-                except _TcpGateError as failure:
-                    gate_status = str(failure.status)
-                    terminal = (failure.status, failure.reason)
-                tcp_record["gate"] = gate_status
-            else:
-                tcp_record["gate"] = "not_required"
-            recorder.append_event(
-                {
-                    "phase": "tcp_gate",
-                    "status": str(terminal[0]) if terminal is not None else "PASSED",
-                    "tcp": tcp_record,
-                }
-            )
-        # Phase 4: CAPABILITY / DISPATCH decision. ``--robot-operation-plan``
-        # is the only production dispatch entry; without it nothing is ever
-        # sent to any runtime. The plan path captures and validates the
-        # external document and authorizes the calibrated TCP strictly before
-        # any real session exists.
-        if binding is not None:
-            if (
-                terminal is None
-                and args.robot_operation_plan_path is not None
-                and not args.preflight_only
-            ):
-                record["dispatch"] = {
-                    "implemented": True,
-                    "dispatch_requested": True,
-                    "blocked": False,
-                    "status": "RUNTIME_DISPATCH",
-                    "reason": (
-                        "explicit --robot-operation-plan dispatch through the "
-                        "real multi-robot session"
-                    ),
-                }
-                recorder.append_event(
-                    {
-                        "phase": "dispatch",
-                        "status": "RUNTIME_DISPATCH",
-                        "robot_operation_plan": str(args.robot_operation_plan_path),
-                    }
-                )
-                terminal = _robot_operation_plan_phase(
-                    args, record, recorder, contract, plan
-                )
-                if terminal is None:
-                    terminal = (
-                        RunStatus.EXECUTED,
-                        "the robot operation plan executed: every robot was "
-                        "ready, every operation was confirmed, every pending "
-                        "STAP assembly effect is evidenced, and the "
-                        "multi-robot session stopped with passing cleanup",
-                    )
-                else:
-                    record["dispatch"]["blocked"] = True
-                record["dispatch"]["status"] = str(terminal[0])
-                record["dispatch"]["reason"] = terminal[1]
-            elif terminal is None:
-                terminal = (
-                    (
-                        RunStatus.PREFLIGHT_ONLY,
-                        "preflight-only run: all gates evaluated and no "
-                        "capability is unresolved; dispatch not requested",
-                    )
-                    if args.preflight_only
-                    else (
-                        RunStatus.EXECUTION_NOT_IMPLEMENTED,
-                        "all gates passed but no dispatch path is implemented "
-                        "in piper-run; no command or action message was sent",
-                    )
-                )
-            if record.get("dispatch") is None:
-                record["dispatch"] = {
-                    "implemented": False,
-                    "dispatch_requested": not args.preflight_only,
-                    "blocked": True,
-                    "status": str(terminal[0]),
-                    "reason": terminal[1],
-                }
-                recorder.append_event(
-                    {
-                        "phase": "dispatch_blocked",
-                        "status": str(terminal[0]),
-                        "dispatch_requested": not args.preflight_only,
-                        "reason": terminal[1],
-                    }
-                )
-    except Exception as error:
-        _diagnostic(format_exc())
-        terminal = (
-            RunStatus.INTERNAL_ERROR,
-            f"unexpected internal error: {error}",
-        )
-    # Phase 5: IMMUTABILITY of the original input files, including the
-    # captured external operation plan when this run requested one.
-    run_document = record.get("robot_operation_plan_run")
-    plan_record = record.get("robot_operation_plan")
-    if inputs is not None:
-        originals = {
-            "plan": inputs.plan_path,
-            "task_start": inputs.start_path,
-            "task_goal": inputs.goal_path,
-        }
-        expected = dict(inputs.sha256)
-        sizes = dict(inputs.sizes)
-        if (
-            isinstance(plan_record, Mapping)
-            and isinstance(plan_record.get("sha256"), str)
-            and isinstance(plan_record.get("path"), str)
-        ):
-            originals["robot_operation_plan"] = Path(str(plan_record["path"]))
-            expected["robot_operation_plan"] = str(plan_record["sha256"])
-            sizes["robot_operation_plan"] = plan_record.get("bytes")
-        after: dict[str, str] = {}
-        immutable = False
-        try:
-            after = {
-                name: sha256(path.read_bytes()).hexdigest()
-                for name, path in originals.items()
-            }
-        except OSError as error:
-            record["checks"]["inputs_immutable_after_all_phases"] = False
-            terminal = (
-                RunStatus.INPUT_MUTATED,
-                f"input files could not be re-read after the phases: {error}",
-            )
-        else:
-            immutable = after == expected
-            record["checks"]["inputs_immutable_after_all_phases"] = immutable
-            if not immutable:
-                terminal = (
-                    RunStatus.INPUT_MUTATED,
-                    f"input files changed on disk during the run: "
-                    f"before={expected} after={after}",
-                )
-        if isinstance(run_document, dict):
-            # The run document is finalized only after every phase, so its
-            # ``passed`` verdict can require unchanged inputs and the written
-            # copy can carry the post-run digests.
-            run_document["inputs"] = {
-                "sha256_before": expected,
-                "bytes": sizes,
-                "sha256_after_all_phases": after,
-                "immutable_after_all_phases": immutable,
-            }
-            run_document["passed"] = bool(
-                run_document.get("scheduler_ran") is True
-                and run_document.get("scheduler_passed") is True
-                and record["checks"].get("robot_operation_plan_readiness_passed")
-                is True
-                and record["checks"].get("robot_operation_plan_cleanup_passed") is True
-                and record["checks"].get("robot_operation_plan_pending_tasks_confirmed")
-                is True
-                and immutable
-            )
-    status, reason = (
-        terminal
-        if terminal is not None
-        else (
-            RunStatus.INTERNAL_ERROR,
-            "the run ended without a terminal status",
-        )
-    )
-    motion_sent = record["checks"].get("motion_sent") is True
-    record["checks"]["robot_operation_plan_dispatched"] = (
-        args.robot_operation_plan_path is not None
-    )
-    record["checks"]["runtime_dispatched"] = isinstance(record.get("runtime"), Mapping)
-    record["checks"]["no_motion_dispatched"] = not motion_sent
-    record["checks"]["inputs_immutable_after_runtime"] = record["checks"].get(
-        "inputs_immutable_after_all_phases", False
-    )
-    robot_plan_passed = bool(
-        isinstance(run_document, Mapping) and run_document.get("passed") is True
-    )
-    record["status"] = str(status)
-    record["passed"] = status is RunStatus.PREFLIGHT_ONLY or (
-        status is RunStatus.EXECUTED and robot_plan_passed
-    )
-    record["reason"] = reason
-    record["exit_code"] = EXIT_CODES[status]
-    record["evidence_dir"] = str(recorder.directory)
-    # This phase implements no retreat capability, so the retreat_clear
-    # boolean honestly mirrors the overall run result for a plan dispatch.
-    retreat_clear = True
-    if args.robot_operation_plan_path is not None:
-        retreat_clear = bool(record["passed"])
-        if isinstance(run_document, dict):
-            run_document["retreat_clear"] = retreat_clear
-            recorder.write_json(PLAN_RUN_NAME, run_document)
-    recorder.write_json("preflight.json", record)
-    result = FinalResult(
-        input_valid=status not in (RunStatus.INVALID_INPUT, RunStatus.INPUT_MUTATED),
-        tasks_complete=binding is not None,
-        structure_valid=binding is not None,
-        execution_safe=record["passed"],
-        retreat_clear=retreat_clear,
-        evidence_complete=True,
-        reason=reason,
-    )
-    recorder.finalize(result)
-    result_path = recorder.directory / "result.json"
-    result_document: dict[str, object] = {
-        "schema": RESULT_SCHEMA,
-        "status": str(status),
-        "passed": result.passed,
-        "exit_code": record["exit_code"],
-        "run_dir": str(run_dir),
-        "preflight_path": str(recorder.directory / "preflight.json"),
-        **asdict(result),
-    }
-    if args.robot_operation_plan_path is not None:
-        # Link the external plan record, the aggregated run document (which
-        # carries readiness, operations, layers, cancellations, resources,
-        # cleanup and the immutable input digests) and the runtime lifecycle
-        # from the run result document; the full documents live in the run
-        # directory.
-        result_document["robot_operation_plan"] = record.get("robot_operation_plan")
-        result_document["robot_operation_plan_run"] = record.get(
-            "robot_operation_plan_run"
-        )
-        result_document["runtime_session"] = record.get("runtime")
-    recorder.write_json("result.json", result_document)
-    recorder.append_event(
-        {
-            "phase": "result",
-            "status": str(status),
-            "passed": result.passed,
-            "reason": reason,
-            "exit_code": record["exit_code"],
-        }
-    )
-    return RunOutcome(
-        status=status,
-        reason=reason,
-        exit_code=EXIT_CODES[status],
-        run_dir=run_dir,
-        result_path=result_path,
-        passed=bool(record["passed"]),
-    )
+    args = _materialize_direct_defaults(args, run_dir)
+    return _run_robot_operation_plan_primary(args, run_dir, recorder)
 
 
 def _structure_start_path(value: object) -> Path | None:
-    """Resolve the optional structure start of a structure-only invocation.
+    """Resolve the optional structure start of a direct invocation.
 
     ``--structure-start`` is deliberately not declared with ``type=Path``: an
     omitted flag and the literal empty string both mean EMPTY initial
@@ -3571,15 +2785,12 @@ def _structure_start_path(value: object) -> Path | None:
 def _parse_arguments(argv: list[str] | None) -> _Arguments:
     """Parse the command line into an ``_Arguments`` value.
 
-    ``--robot-operation-plan`` without ``--task``/``--plan`` selects the
-    structure-bound direct path: it requires ``--structure-goal`` (never
-    defaulted) and, unless ``--preflight-only`` is passed, executes through
-    the real session with scene paths materialized into the run directory;
-    ``--preflight-only`` turns the same invocation into the no-runtime
-    preflight. With ``--task``/``--plan`` the established STAP path is
-    preserved unchanged, including its required ``--backend``, its full scene
-    option group when it also carries ``--robot-operation-plan`` and the
-    rejection of ``--preflight-only`` combinations with dispatch.
+    ``--robot-operation-plan`` and ``--structure-goal`` are both required: the
+    external plan is the only plan entry and the goal structure is never
+    inferred. ``--preflight-only`` turns the same invocation into the
+    no-runtime preflight. The obsolete ``--task``, ``--plan`` and
+    ``--structure-dir`` flags no longer exist, so passing one is an argparse
+    usage error (``INVALID_INPUT``) raised before any run directory exists.
 
     Args:
         argv: Raw arguments, or ``None`` to use ``sys.argv[1:]``.
@@ -3591,106 +2802,17 @@ def _parse_arguments(argv: list[str] | None) -> _Arguments:
         _UsageError: If the command line is invalid.
     """
     namespace = build_parser().parse_args(argv)
-    direct = namespace.robot_operation_plan is not None
-    if (
-        direct
-        and namespace.preflight_only
-        and (namespace.task is not None or namespace.plan is not None)
-    ):
+    if namespace.robot_operation_plan is None:
         raise _UsageError(
-            "--robot-operation-plan cannot be combined with --preflight-only"
+            "--robot-operation-plan is required: it is the only plan entry"
         )
-    structure_only = (
-        direct
-        and namespace.task is None
-        and namespace.plan is None
-        and namespace.preflight_only
-    )
-    if structure_only:
-        if namespace.structure_goal is None:
-            raise _UsageError(
-                "--structure-goal is required for a structure-only "
-                "--robot-operation-plan invocation; piper-run never defaults "
-                "the goal structure"
-            )
-        return _Arguments(
-            task_dir=None,
-            plan_path=None,
-            backend=namespace.backend or BACKENDS[0],
-            robot_id=namespace.robot_id,
-            run_dir=namespace.run_dir,
-            preflight_only=True,
-            robot_operation_plan_path=namespace.robot_operation_plan,
-            scene_manifest=namespace.scene_manifest,
-            scene_snapshot_out=namespace.scene_snapshot_out,
-            host_instance_id=namespace.host_instance_id,
-            config_path=namespace.config,
-            structure_dir=namespace.structure_dir,
-            structure_goal=namespace.structure_goal,
-            structure_start=_structure_start_path(namespace.structure_start),
-        )
-    if direct and namespace.task is None and namespace.plan is None:
-        if namespace.structure_goal is None:
-            raise _UsageError(
-                "direct robot-operation-plan execution requires "
-                "--structure-goal; the goal structure is never inferred"
-            )
-        return _Arguments(
-            task_dir=None,
-            plan_path=None,
-            backend=namespace.backend or BACKENDS[0],
-            robot_id=namespace.robot_id,
-            run_dir=namespace.run_dir,
-            preflight_only=False,
-            robot_operation_plan_path=namespace.robot_operation_plan,
-            scene_manifest=namespace.scene_manifest,
-            scene_snapshot_out=namespace.scene_snapshot_out,
-            host_instance_id=namespace.host_instance_id,
-            config_path=namespace.config,
-            structure_dir=None,
-            structure_goal=namespace.structure_goal,
-            structure_start=_structure_start_path(namespace.structure_start),
-        )
-    if namespace.task is None or namespace.plan is None:
+    if namespace.structure_goal is None:
         raise _UsageError(
-            "--task and --plan are required together; --robot-operation-plan "
-            "alone selects the structure-only preflight and then requires "
-            "--structure-goal"
-        )
-    if namespace.backend is None:
-        raise _UsageError("--backend is required")
-    if direct and (
-        namespace.scene_manifest is None
-        or namespace.scene_snapshot_out is None
-        or namespace.host_instance_id is None
-        or namespace.config is None
-    ):
-        raise _UsageError(
-            "--robot-operation-plan requires --scene-manifest, "
-            "--scene-snapshot-out, --host-instance-id and --config with "
-            "--task/--plan; there is no fake runtime fallback"
-        )
-    scene_fields = (
-        namespace.scene_manifest,
-        namespace.scene_snapshot_out,
-        namespace.host_instance_id,
-    )
-    if any(value is not None for value in scene_fields) and not all(
-        value is not None for value in scene_fields
-    ):
-        raise _UsageError(
-            "--scene-manifest, --scene-snapshot-out and --host-instance-id "
-            "must be provided together"
-        )
-    if namespace.scene_manifest is not None and namespace.config is None:
-        raise _UsageError(
-            "--config must be provided together with --scene-manifest, "
-            "--scene-snapshot-out and --host-instance-id"
+            "--structure-goal is required; piper-run never infers the goal "
+            "structure"
         )
     return _Arguments(
-        task_dir=namespace.task,
-        plan_path=namespace.plan,
-        backend=namespace.backend,
+        backend=namespace.backend or BACKENDS[0],
         robot_id=namespace.robot_id,
         run_dir=namespace.run_dir,
         preflight_only=namespace.preflight_only,
@@ -3699,7 +2821,8 @@ def _parse_arguments(argv: list[str] | None) -> _Arguments:
         scene_snapshot_out=namespace.scene_snapshot_out,
         host_instance_id=namespace.host_instance_id,
         config_path=namespace.config,
-        structure_dir=namespace.structure_dir,
+        structure_goal=namespace.structure_goal,
+        structure_start=_structure_start_path(namespace.structure_start),
     )
 
 

@@ -1234,7 +1234,7 @@ class MultiRobotIsaacMoveItSession:
         robots). An ``assembly-plan/v2`` document is validated by the frozen
         STAP contract; a ``robot-operation-plan/v1`` document is validated by
         the strict structure-only robot-operation contract with
-        ``source_plan=None`` (the external plan is immutable input that is
+        no second plan document (the external plan is immutable input that is
         never bound, reordered, or repaired here). Any other schema falls to
         the STAP parser and fails closed. The check happens BEFORE any
         process starts, and the plan contract module is imported lazily so
@@ -1260,9 +1260,7 @@ class MultiRobotIsaacMoveItSession:
             and document.get("schema") == ROBOT_OPERATION_PLAN_SCHEMA
         ):
             try:
-                operation_plan = parse_robot_operation_plan(
-                    document, source_plan=None
-                )
+                operation_plan = parse_robot_operation_plan(document)
             except ValueError as error:
                 raise self._fail(
                     "plan_robots", f"{type(error).__name__}: {error}"

@@ -398,13 +398,10 @@ def test_isaac_bridge_topics_match_official_xacro(artifact: dict) -> None:
     assert '<param name="joint_commands_topic">/isaac_joint_command</param>' in xacro
     assert '<param name="joint_states_topic">/isaac_joint_states</param>' in xacro
     assert topics["source"]["sha256"] == _sha256(MOVEIT_DIR / "piper_l.ros2_control.xacro")
-    # The P0.5 bridge and its probe must use exactly these topic names.
+    # The P0.5 bridge must use exactly these topic names.
     bridge = (ROOT / "isaac" / "p05_host_bridge.py").read_text(encoding="utf-8")
     assert 'TOPIC_JOINT_STATES = "/isaac_joint_states"' in bridge
     assert 'TOPIC_JOINT_COMMANDS = "/isaac_joint_command"' in bridge
-    probe = (ROOT / "maintenance" / "archived_tools" / "tools" / "p05_integration_probe.py").read_text(encoding="utf-8")
-    assert 'TOPIC_JOINT_STATES = "/isaac_joint_states"' in probe
-    assert 'TOPIC_JOINT_COMMANDS = "/isaac_joint_command"' in probe
 
 
 def test_planning_groups_match_official_srdf(artifact: dict) -> None:

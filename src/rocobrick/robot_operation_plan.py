@@ -29,33 +29,6 @@ Nothing is repaired, reordered, defaulted, or filled in: any deviation from
 the frozen shape, any ungrounded reference, or any internal inconsistency is
 rejected as-is.
 
-``source_plan``
----------------
-
-When the caller holds the authoritative ``assembly-plan/v2`` structural plan
-(a validated :class:`~rocobrick.stap_contract.StapPlan`, or its raw payload
-which is validated here), it must pass it. The operation plan is then
-additionally bound to it:
-
-* ``source_plan_id`` equals the StapPlan ``plan_id`` and ``robots`` is the
-  same set;
-* every ``source_task_id`` exists; a motion skill (PICK/TRANSIT/PLACE_DOWN)
-  must run on the task's allocated ``primary_robot`` with exactly the
-  primary/supporting participants bound to roles, while a ``WAIT`` is a
-  passive single-robot observation that may run on any declared robot;
-* every PICK or carried part is the source task's own part; TRANSIT part
-  references are the source task's part or one of its structural supports
-  (initial supports and predecessor-task parts);
-* a PLACE_DOWN target is grounded in the documented grid structure: the upper
-  part is the source task's part and the lower part is the directly beneath
-  goal part (same x/y, z-1) that is also an initial support or a predecessor
-  task's part;
-* connection ids are opaque labels, never derived: the STAP grammar carries
-  none. A connection id is accepted only when some PLACE_DOWN target in the
-  same plan binds it to exactly one ``(upper, lower)`` pair, that pair is
-  labelled by exactly one connection id, and every TRANSIT connection
-  reference is placed by its own source task.
-
 The scheduler contract also reads this parse result: ``execution_layers``
 determines real concurrency and barriers (a same-layer resource overlap is
 rejected here), while ``planned_schedule`` only fixes evidence display order.
@@ -65,8 +38,6 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-
-from rocobrick.stap_contract import StapContractError, StapPlan, parse_stap_plan
 
 ROBOT_OPERATION_PLAN_SCHEMA = "robot-operation-plan/v1"
 SKILLS = frozenset(
@@ -157,24 +128,6 @@ def _texts(value: object, path: str) -> tuple[str, ...]:
     if len(items) != len(set(items)):
         raise RobotOperationPlanError(f"{path} duplicates")
     return items
-
-
-def _authoritative_stap(source_plan: object) -> StapPlan | None:
-    """Return the authoritative StapPlan, validating raw payloads once."""
-    if source_plan is None:
-        return None
-    if isinstance(source_plan, StapPlan):
-        return source_plan
-    if isinstance(source_plan, Mapping):
-        try:
-            return parse_stap_plan(source_plan)
-        except StapContractError as error:
-            raise RobotOperationPlanError(
-                f"source_plan is not a valid assembly-plan/v2: {error}"
-            ) from error
-    raise RobotOperationPlanError(
-        "source_plan must be a validated StapPlan or an assembly-plan/v2 object"
-    )
 
 
 def _ref(value: object, path: str) -> Mapping:
@@ -464,159 +417,16 @@ def _bind_connections(operations: Mapping[str, RobotOperation]) -> None:
                 )
 
 
-def _supporting_instances(plan: StapPlan, task: object) -> set[str]:
-    supports = set(task.initial_supports)
-    for predecessor in task.predecessors:
-        predecessor_task = plan.tasks.get(predecessor)
-        if predecessor_task is not None:
-            supports.add(predecessor_task.physical_instance_id)
-    return supports
-
-
-def _bind_place_down(
-    operation: RobotOperation,
-    plan: StapPlan,
-    task: object,
-    supports: set[str],
-) -> str:
-    values = operation.target.values
-    upper = values["upper_physical_instance_id"]
-    lower = values["lower_physical_instance_id"]
-    if upper != task.physical_instance_id:
-        raise RobotOperationPlanError(
-            f"operation {operation.operation_id!r} PLACE_DOWN upper part {upper!r} "
-            f"is not source task part {task.physical_instance_id!r}"
-        )
-    if lower not in supports:
-        raise RobotOperationPlanError(
-            f"operation {operation.operation_id!r} PLACE_DOWN lower part {lower!r} "
-            "is not an initial support or predecessor part of the source task"
-        )
-    upper_part = plan.goal_parts.get(upper)
-    lower_part = plan.goal_parts.get(lower)
-    if upper_part is None or lower_part is None:
-        raise RobotOperationPlanError(
-            f"operation {operation.operation_id!r} PLACE_DOWN references an "
-            "unknown goal part"
-        )
-    if lower_part.z != upper_part.z - 1 or (lower_part.x, lower_part.y) != (
-        upper_part.x,
-        upper_part.y,
-    ):
-        raise RobotOperationPlanError(
-            f"operation {operation.operation_id!r} PLACE_DOWN lower part {lower!r} "
-            f"is not the goal part directly beneath {upper!r}"
-        )
-    return values["connection_id"]
-
-
-def _bind_to_stap(operations: Mapping[str, RobotOperation], plan: StapPlan) -> None:
-    placed: dict[str, set[str]] = {}
-    referenced: dict[str, set[str]] = {}
-    for operation in operations.values():
-        task = plan.tasks.get(operation.source_task_id)
-        if task is None:
-            raise RobotOperationPlanError(
-                f"operation {operation.operation_id!r} source_task_id "
-                f"{operation.source_task_id!r} is not a source plan task"
-            )
-        if operation.skill == "WAIT":
-            # WAIT is a passive single-robot observation: it names an existing
-            # source task but never claims that task's motion allocation, so
-            # any declared plan robot may observe it.
-            if set(operation.participants) != {operation.executor_robot_id}:
-                raise RobotOperationPlanError(
-                    f"operation {operation.operation_id!r} WAIT participants "
-                    f"{list(operation.participants)} must be exactly its executor"
-                )
-        else:
-            expected_participants = {task.primary_robot}
-            if task.supporting_robot is not None:
-                expected_participants.add(task.supporting_robot)
-            if operation.skill == "HANDOVER":
-                if set(operation.participants) != expected_participants:
-                    raise RobotOperationPlanError(
-                        f"operation {operation.operation_id!r} HANDOVER participants "
-                        f"{list(operation.participants)} do not match source task "
-                        f"allocation {sorted(expected_participants)}"
-                    )
-                if operation.executor_robot_id not in expected_participants:
-                    raise RobotOperationPlanError(
-                        f"operation {operation.operation_id!r} HANDOVER receiver "
-                        "is outside source task allocation"
-                    )
-            else:
-                if operation.executor_robot_id != task.primary_robot:
-                    raise RobotOperationPlanError(
-                        f"operation {operation.operation_id!r} executor "
-                        f"{operation.executor_robot_id!r} does not match source task "
-                        f"allocation {task.primary_robot!r}"
-                    )
-                if set(operation.participants) != expected_participants:
-                    raise RobotOperationPlanError(
-                        f"operation {operation.operation_id!r} participants "
-                        f"{list(operation.participants)} do not match source task "
-                        f"allocation {sorted(expected_participants)}"
-                    )
-        supports = _supporting_instances(plan, task)
-        if operation.skill == "PICK":
-            picked = operation.target.values["physical_instance_id"]
-            if picked != task.physical_instance_id:
-                raise RobotOperationPlanError(
-                    f"operation {operation.operation_id!r} PICK part {picked!r} "
-                    f"is not source task part {task.physical_instance_id!r}"
-                )
-        elif operation.skill == "HANDOVER":
-            values = operation.target.values
-            part = values["physical_instance_id"]
-            allowed = {task.physical_instance_id} | supports
-            if part not in allowed:
-                raise RobotOperationPlanError(
-                    f"operation {operation.operation_id!r} HANDOVER part {part!r} "
-                    "is neither the source task part nor one of its supports"
-                )
-            if operation.executor_robot_id != values["receiver_robot_id"]:
-                raise RobotOperationPlanError(
-                    f"operation {operation.operation_id!r} HANDOVER executor must "
-                    "be receiver_robot_id"
-                )
-            if set(operation.participants) != {
-                values["donor_robot_id"],
-                values["receiver_robot_id"],
-            }:
-                raise RobotOperationPlanError(
-                    f"operation {operation.operation_id!r} HANDOVER participants "
-                    "must exactly cover donor and receiver"
-                )
-        elif operation.skill == "PLACE_DOWN":
-            connection = _bind_place_down(operation, plan, task, supports)
-            placed.setdefault(task.task_id, set()).add(connection)
-        referenced.setdefault(task.task_id, set()).update(
-            _operation_connections(operation)
-        )
-    for task_id, connections in placed.items():
-        if len(connections) > 1:
-            raise RobotOperationPlanError(
-                f"source task {task_id!r} establishes multiple connections "
-                f"{sorted(connections)}"
-            )
-    for task_id, connections in referenced.items():
-        ungrounded = sorted(connections - placed.get(task_id, set()))
-        if ungrounded:
-            raise RobotOperationPlanError(
-                f"source task {task_id!r} references connections not placed by "
-                f"it: {ungrounded}"
-            )
-
-
-def parse_robot_operation_plan(payload, *, source_plan=None):
+def parse_robot_operation_plan(payload):
     """Validate and freeze one ``robot-operation-plan/v1`` document.
+
+    The formal ingress contract is self-contained: ``source_plan_id`` is a
+    required, validated field of the wire shape and is never cross-checked
+    against a second plan document. The structure-carrier binding is done by
+    the caller against the exact task structure bytes.
 
     Args:
         payload: Decoded plan document; it is never mutated.
-        source_plan: Authoritative ``StapPlan`` (or raw ``assembly-plan/v2``
-            payload) this plan must be bound to, or ``None`` for the
-            structural-only contract.
 
     Returns:
         The immutable ``RobotOperationPlan``, preserving input order.
@@ -634,17 +444,6 @@ def parse_robot_operation_plan(payload, *, source_plan=None):
     robots = _texts(root["robots"], "robots")
     if not robots:
         raise RobotOperationPlanError("robots must not be empty")
-    stap = _authoritative_stap(source_plan)
-    if stap is not None:
-        if sid != stap.plan_id:
-            raise RobotOperationPlanError(
-                f"source_plan_id {sid!r} does not equal source plan_id {stap.plan_id!r}"
-            )
-        if set(robots) != set(stap.robots):
-            raise RobotOperationPlanError(
-                f"robots {list(robots)} do not equal source plan robots "
-                f"{list(stap.robots)}"
-            )
     operations: dict[str, RobotOperation] = {}
     for index, value in enumerate(_arr(root["operations"], "operations")):
         path = f"operations[{index}]"
@@ -858,8 +657,6 @@ def parse_robot_operation_plan(payload, *, source_plan=None):
         evidence.append((operation_id, label))
 
     _bind_connections(operations)
-    if stap is not None:
-        _bind_to_stap(operations, stap)
 
     return RobotOperationPlan(
         ROBOT_OPERATION_PLAN_SCHEMA,

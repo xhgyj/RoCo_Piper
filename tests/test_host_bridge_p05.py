@@ -13,8 +13,7 @@ Fast DDS participants re-bound the host profile TCP 17650 listening port and
 aborted with "Address already in use". No OmniGraph is created. Also pinned:
 the Piper L USD prim at /World/Robot_0 with articulation root
 /World/Robot_0/root_joint, the readiness marker, the bounded
-external-validation hold, the orderly cleanup, and the smoke runner's
-host-background + container-probe orchestration.
+external-validation hold, and the orderly cleanup.
 """
 
 from __future__ import annotations
@@ -22,7 +21,6 @@ from __future__ import annotations
 import ast
 import asyncio
 import importlib.util
-import os
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -31,8 +29,6 @@ import pytest
 
 ROOT = Path(__file__).parents[1]
 BRIDGE_PATH = ROOT / "isaac" / "p05_host_bridge.py"
-PROBE_PATH = ROOT / "maintenance" / "archived_tools" / "tools" / "p05_integration_probe.py"
-RUNNER_PATH = ROOT / "maintenance" / "archived_tools" / "tools" / "smoke_p05_host_bridge.sh"
 ENV_SCRIPT_PATH = ROOT / "tools" / "isaac-ros-env.sh"
 USD_PATH = ROOT / "robot_assets" / "piper_l" / "USD" / "piper_l_gripper_d435.usd"
 
@@ -104,16 +100,6 @@ def bridge_tree(bridge_source: str):
         The bridge script AST.
     """
     return ast.parse(bridge_source)
-
-
-@pytest.fixture(scope="module")
-def runner_source() -> str:
-    """Return the raw smoke runner text.
-
-    Returns:
-        The smoke runner source.
-    """
-    return RUNNER_PATH.read_text(encoding="utf-8")
 
 
 @pytest.fixture(scope="module")
@@ -577,77 +563,6 @@ def test_no_mode_b_protocol(bridge_source: str, bridge_tree) -> None:
     assert imported.isdisjoint(MODE_B_FORBIDDEN_MODULES)
     assert "mode_b" not in bridge_source.lower()
     assert "mode-b" not in bridge_source.lower()
-
-
-def test_runner_profiles_and_host_background(runner_source: str) -> None:
-    """The runner must generate DDS profiles then background the host bridge."""
-    assert "tools/generate_dds_profiles.py" in runner_source
-    assert ".runtime/dds" in runner_source
-    assert "ROS_DOMAIN_ID:-73" in runner_source
-    assert "tools/isaac-ros-env.sh" in runner_source
-    assert "isaac/p05_host_bridge.py" in runner_source
-    assert '>"$HOST_LOG" 2>&1 &' in runner_source
-    assert "HOST_PID=$!" in runner_source
-
-
-def test_runner_waits_for_marker_then_runs_container_probe(runner_source: str) -> None:
-    """The runner must gate on the marker and validate via the ROS container."""
-    assert 'MARKER="p0.5_host_bridge_ready"' in runner_source
-    assert "readiness_marker_seen" in runner_source
-    assert "docker run --rm --name" in runner_source
-    assert '-p "$CONTAINER_PORT:$CONTAINER_PORT/tcp"' in runner_source
-    assert "FASTRTPS_DEFAULT_PROFILES_FILE=/dds/fastdds-container.xml" in runner_source
-    assert "maintenance/archived_tools/tools/p05_integration_probe.py" in runner_source
-    assert "probe.py" in runner_source
-
-
-def test_runner_stops_host_orderly_and_writes_aggregate(runner_source: str) -> None:
-    """The runner must wait/stop the host and aggregate both evidence sides."""
-    assert "stop_host" in runner_source
-    assert "kill -INT" in runner_source
-    assert "kill -KILL" in runner_source
-    assert 'wait "$HOST_PID"' in runner_source
-    assert "artifacts/phase0.5/p05-integration.json" in runner_source
-    assert "rocobrick-p05-integration/v1" in runner_source
-    assert "rocobrick-p05-integration-probe/v1" in runner_source
-
-
-def test_runner_is_bounded(runner_source: str) -> None:
-    """Every long-running process must be wrapped in timeout."""
-    assert "timeout --signal=INT --kill-after=30" in runner_source
-    assert "timeout --signal=INT --kill-after=15" in runner_source
-    assert "P05_SIM_TIMEOUT:-900" in runner_source
-    assert "P05_PROBE_TIMEOUT:-240" in runner_source
-    assert "P05_READY_WAIT:-600" in runner_source
-    assert "P05_STOP_WAIT:-150" in runner_source
-
-
-def test_runner_max_steps_pinned(runner_source: str) -> None:
-    """The runner must default the simulation bound to 12000 steps."""
-    assert "P05_MAX_STEPS:-1000000" in runner_source
-
-
-def test_runner_preflight_model_audit(runner_source: str) -> None:
-    """The runner must gate the GPU smoke on the offline model audit.
-
-    The preflight runs the deterministic tools/piper_l_model_audit.py into the
-    smoke output dir, so runtime USD/URDF drift from the pinned agx_arm_sim
-    fails before any GPU time is spent.
-    """
-    assert "tools/piper_l_model_audit.py" in runner_source
-    assert "preflight-model-audit.json" in runner_source
-
-
-def test_runner_cleans_up_processes_and_container(runner_source: str) -> None:
-    """The EXIT trap must clean the host process and the container."""
-    assert "trap cleanup EXIT" in runner_source
-    assert "docker rm -f" in runner_source
-
-
-def test_probe_file_exists_and_runner_is_executable() -> None:
-    """The probe script and the executable runner must be in place."""
-    assert PROBE_PATH.is_file()
-    assert os.access(RUNNER_PATH, os.X_OK)
 
 
 def test_exit_capture_rejects_foreign_windows(bridge_module, tmp_path):

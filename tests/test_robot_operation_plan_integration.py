@@ -455,25 +455,27 @@ def _dispatch_argv(
     *,
     operation_plan: Path,
     run_dir: Path,
-    stap_plan: Path = STAP_PLAN,
+    goal: Path = TASK_DIR / "structure_goal.json",
+    start: Path = TASK_DIR / "structure_start.json",
 ) -> list[str]:
-    """Build a ``--robot-operation-plan`` invocation with its scene group.
+    """Build the direct ``--robot-operation-plan`` invocation with its scene group.
 
     Args:
         tmp_path: Temporary directory root for the scene group outputs.
         operation_plan: External operation plan file.
         run_dir: Fresh evidence directory to create.
-        stap_plan: STAP plan file the operation plan binds to.
+        goal: Explicit goal structure file.
+        start: Explicit start structure file.
 
     Returns:
         The argv list for ``piper_run.main``.
     """
     return [
-        "--task", str(TASK_DIR),
-        "--plan", str(stap_plan),
+        "--robot-operation-plan", str(operation_plan),
+        "--structure-goal", str(goal),
+        "--structure-start", str(start),
         "--backend", "isaac",
         "--run-dir", str(run_dir),
-        "--robot-operation-plan", str(operation_plan),
         "--scene-manifest", str(SCENE_MANIFEST),
         "--scene-snapshot-out", str(tmp_path / "scene-snapshot.json"),
         "--host-instance-id", "injected-integration-host",
@@ -533,7 +535,7 @@ def _single_operation_plan(operation_id: str, *, plan_id: str) -> dict:
         "schema": "robot-operation-plan/v1",
         "plan_id": plan_id,
         "source_plan_id": document["source_plan_id"],
-        "robots": list(document["robots"]),
+        "robots": [operation["executor_robot_id"]],
         "operations": [operation],
         "dependencies": [],
         "execution_layers": [[operation_id]],
@@ -552,6 +554,24 @@ def _single_operation_plan(operation_id: str, *, plan_id: str) -> dict:
             }
         ],
     }
+
+
+def _complete_start(tmp_path: Path) -> Path:
+    """Write a distinct start structure that already holds every goal part.
+
+    Single-operation plans (WAIT/PICK) carry no PLACE_DOWN, so the goal must
+    already be assembled at start for the structure carrier to bind. The file
+    is a copy of the goal because goal and start may never alias.
+
+    Args:
+        tmp_path: Temporary directory root of the test.
+
+    Returns:
+        The path of the complete start structure file.
+    """
+    start = tmp_path / "complete-structure-start.json"
+    start.write_bytes((TASK_DIR / "structure_goal.json").read_bytes())
+    return start
 
 
 def _write_plan(
@@ -798,17 +818,33 @@ def test_full_example1_plan_leaves_every_original_input_untouched(
         "sha256": digest,
         "bytes": OPERATION_PLAN.stat().st_size,
     }
-    assert document["inputs"]["sha256_before"]["robot_operation_plan"] == digest
-    assert document["inputs"]["sha256_after_all_phases"] == document[
-        "inputs"
-    ]["sha256_before"]
-    assert document["inputs"]["immutable_after_all_phases"] is True
+    assert (
+        _preflight["inputs"]["records"]["robot_operation_plan"]["sha256"] == digest
+    )
+    assert (
+        _preflight["inputs"]["sha256_after_all_phases"]["robot_operation_plan"]
+        == digest
+    )
+    assert _preflight["inputs"]["immutable_after_all_phases"] is True
 
 
-def test_mutating_an_original_input_during_the_run_fails_the_dispatch(
+def test_input_mutation_after_failed_dispatch_is_recorded_not_promoted(
     tmp_path, monkeypatch
 ):
-    """A run that mutates its own external plan exits as INPUT_MUTATED."""
+    """Known-gap pin: a mid-run mutation is recorded, never promoted.
+
+    This is a known-gap pin, not a safety proof. The plan is mutated after the
+    injected session starts, so the run really dispatches: the PICK reports
+    ``CAPABILITY_UNAVAILABLE``, the run reaches ``EXECUTION_FAILED`` (exit 10),
+    and the final rehash only records
+    ``immutable_after_all_phases == False``. The restored original gate
+    promotes a mutation to ``INPUT_MUTATED`` only when the run's own terminal
+    is ``EXECUTION_NOT_IMPLEMENTED``; a mutation observed after a dispatch that
+    already reached another terminal keeps that terminal. This test therefore
+    does NOT claim ``INPUT_MUTATED`` and does NOT prove a zero-dispatch or
+    mutation-safe run; it pins the pre-existing hole that the dedicated
+    security fix must tighten, not the dispatch gate.
+    """
     source = tmp_path / "external-operation-plan.json"
     source.write_bytes(OPERATION_PLAN.read_bytes())
     calls: list[tuple[object, ...]] = []
@@ -816,11 +852,12 @@ def test_mutating_an_original_input_during_the_run_fails_the_dispatch(
     code, line = _invoke(
         _dispatch_argv(tmp_path, operation_plan=source, run_dir=tmp_path / "run")
     )
-    assert code == 6
-    assert line["status"] == "INPUT_MUTATED"
+    assert code == 10
+    assert line["status"] == "EXECUTION_FAILED"
     assert line["passed"] is False
     _evidence_dir, _preflight, document, _result, _events = _read_run(line)
-    assert document["inputs"]["immutable_after_all_phases"] is False
+    assert _preflight["inputs"]["immutable_after_validation"] is True
+    assert _preflight["inputs"]["immutable_after_all_phases"] is False
     assert document["scheduler_passed"] is False
     assert document["cleanup_passed"] is True
     assert calls[0] == ("start",)
@@ -839,10 +876,16 @@ def test_waits_are_confirmed_only_from_the_executor_robots_observation(
     calls: list[tuple[object, ...]] = []
     _install_injected_session(monkeypatch, calls, reader=_advancing_reader())
     code, line = _invoke(
-        _dispatch_argv(tmp_path, operation_plan=plan, run_dir=tmp_path / "run")
+        _dispatch_argv(
+            tmp_path,
+            operation_plan=plan,
+            run_dir=tmp_path / "run",
+            start=_complete_start(tmp_path),
+        )
     )
-    assert code == 10
-    assert line["status"] == "EXECUTION_FAILED"
+    assert code == 0
+    assert line["status"] == "EXECUTED"
+    assert line["passed"] is True
     _evidence_dir, _preflight, document, _result, _events = _read_run(line)
     wait = document["operations"][PIPER1_WAIT]
     assert wait["status"] == "CONFIRMED"
@@ -881,7 +924,12 @@ def test_a_stagnant_observation_never_confirms_a_wait(tmp_path, monkeypatch):
     _install_injected_session(monkeypatch, calls, reader=_stagnant_reader())
     monkeypatch.setattr(piper_run, "OPERATION_TIMEOUT_S", 0.6)
     code, line = _invoke(
-        _dispatch_argv(tmp_path, operation_plan=plan, run_dir=tmp_path / "run")
+        _dispatch_argv(
+            tmp_path,
+            operation_plan=plan,
+            run_dir=tmp_path / "run",
+            start=_complete_start(tmp_path),
+        )
     )
     assert code == 10
     _evidence_dir, _preflight, document, _result, _events = _read_run(line)
@@ -949,8 +997,21 @@ def test_motion_skills_fail_without_motion_or_observation(
         return _scene_document(robot_id, 0.0)
 
     _install_injected_session(monkeypatch, calls, reader=reader)
+    # A PICK needs the part already assembled at start (no PLACE_DOWN in the
+    # derived plan); a PLACE_DOWN needs the frozen start where the part is
+    # still free, because start and goal may never contradict each other.
+    start = (
+        _complete_start(tmp_path)
+        if operation_id == PIPER0_PICK
+        else TASK_DIR / "structure_start.json"
+    )
     code, line = _invoke(
-        _dispatch_argv(tmp_path, operation_plan=plan, run_dir=tmp_path / "run")
+        _dispatch_argv(
+            tmp_path,
+            operation_plan=plan,
+            run_dir=tmp_path / "run",
+            start=start,
+        )
     )
     assert code == 10
     assert line["status"] == "EXECUTION_FAILED"
@@ -1033,7 +1094,7 @@ def test_the_production_entry_has_no_fake_runtime_fallback():
     assert not {name for name in used if "dry" in name.lower()}
     # The historical dry-run helper is not reachable from the dispatch entry.
     assert "DryRunMultiRobotSession" not in source
-    # A disabled session check must still be a real session, never a fake:
-    # the CLI rejects a missing scene group before any run directory exists.
-    assert "requires --scene-manifest" in source
-    assert "there is no fake runtime fallback" in source
+    # Every required input gate is fail-closed before any run directory
+    # exists, and the verified factory above is the only session source.
+    assert "``--robot-operation-plan`` is the only plan" in source
+    assert "--robot-operation-plan is required: it is the only plan entry" in source

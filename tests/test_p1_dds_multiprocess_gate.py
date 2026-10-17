@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import re
+import shlex
 import subprocess
 import sys
 from pathlib import Path
@@ -23,7 +24,6 @@ GENERATOR_PATH = ROOT / "tools/generate_dds_profiles.py"
 TEMPLATE_PATH = ROOT / "config/dds/fastdds-rootless-tcp.xml.in"
 COMPOSE_PATH = ROOT / "compose.yaml"
 SMOKE_P1_PATH = ROOT / "tools/smoke_p1_dds_multiprocess.sh"
-SMOKE_ROOTLESS_PATH = ROOT / "maintenance/archived_tools/tools/smoke_rootless_dds.sh"
 HOST_PROBE_PATH = ROOT / "tools/p1_host_dds_probe.py"
 CONTAINER_PROBE_PATH = ROOT / "tools/p1_container_dds_probe.py"
 ARTIFACT_PATH = ROOT / "artifacts/phase1/dds-multiprocess-gate.json"
@@ -33,7 +33,6 @@ ACTIVE_FILES = (
     GENERATOR_PATH,
     TEMPLATE_PATH,
     SMOKE_P1_PATH,
-    SMOKE_ROOTLESS_PATH,
 )
 PARTICIPANTS = ("p1", "p2", "p3", "p4")
 RESTARTED = ("p2", "p3")
@@ -169,15 +168,93 @@ def test_compose_stops_publishing_a_container_port() -> None:
     assert 'test: ["CMD", "self-check"]' in compose  # runtime self-check kept
 
 
-def test_smoke_rootless_dds_uses_client_only_profiles() -> None:
-    smoke = _read(SMOKE_ROOTLESS_PATH)
-    assert "generate_dds_profiles.py" in smoke
-    # No container port is published: the old `-p "$PORT:$PORT/tcp"` flag and
-    # its variable are gone; only the client-only profile mount remains.
-    assert '"$CONTAINER_PORT:$CONTAINER_PORT/tcp"' not in smoke
-    assert "CONTAINER_PORT" not in smoke
-    assert not re.search(r"docker (run|create)[^\n]*\s-p\b", smoke)
-    assert "fastdds-container.xml" in smoke
+_REDIRECTION = re.compile(r"^\d*(?:[<>]{1,2}&?\d*|[<>]{1,2}[^\s&|;]+)$")
+
+
+def _smoke_docker_argv(script: str) -> list[str]:
+    """Return the unique docker run|create argv, rejecting ambiguous structure."""
+    body = re.sub(r"(?m)^\s*#.*$", "", script).replace("\\\n", " ")
+    commands = [line.strip() for line in body.splitlines() if line.strip()]
+    found = [c for c in commands if re.search(r"\bdocker\s+(?:run|create)\b", c)]
+    assert len(found) == 1, f"expected one docker run/create: {found}"
+    command = found[0]
+    for token in ("<<", "$(", "`", "&&", "||", ";", "|"):
+        assert token not in command, f"unsupported structure {token!r}: {command}"
+    words = shlex.split(command)
+    if words[:1] == ["timeout"]:
+        words = words[1:]
+        while words and (
+            words[0].startswith("-")
+            or re.fullmatch(r"\d+(?:\.\d+)?[smh]?", words[0])
+        ):
+            words = words[1:]
+    assert words[:1] == ["docker"] and words[1:2] in (["run"], ["create"]), command
+    argv = words[1:]
+    for word in argv:
+        assert _REDIRECTION.fullmatch(word) or not set(word) & set("&|;"), word
+    return argv
+
+
+def _published_port_flags(argv: list[str]) -> list[str]:
+    """Return publish flags in argv (``--expose`` is not a publish flag)."""
+    return [
+        word
+        for word in argv
+        if word in ("-p", "-P", "--publish", "--publish-all")
+        or word.startswith(("--publish=", "--publish-all="))
+        or (word.startswith("-p") and len(word) > 2)
+    ]
+
+
+def test_formal_smoke_docker_run_publishes_no_container_port() -> None:
+    """The formal P1 smoke must not publish any container port to the host.
+
+    The gate's contract is exactly one listening endpoint — the host listener
+    on TCP 17650 — and client-only container participants. Publishing a
+    container port would add a second boundary endpoint and silently change
+    the topology, so the property is checked against the real argv of the one
+    fixed ``docker run``/``docker create`` command, not against raw text
+    (unrelated commands such as ``mkdir -p`` legitimately use ``-p``).
+    """
+    smoke = _read(SMOKE_P1_PATH)
+    argv = _smoke_docker_argv(smoke)
+    assert argv[0] == "run"
+    assert argv[1] == "-d"
+    assert 'CONTAINER_NAME="rocobrick-p1-gate-$$"' in smoke
+    assert argv[argv.index("--name") + 1] == "$CONTAINER_NAME"
+    assert any(word.endswith(":/dds:ro") for word in argv), argv
+    assert _published_port_flags(argv) == []
+
+
+@pytest.mark.parametrize(
+    ("command", "expected"),
+    [
+        ("docker run -d -p 17650:17650/tcp img", ["-p"]),
+        ("timeout 60 docker run -d -p8080:80 img", ["-p8080:80"]),
+        ("docker create --publish=80:80 img", ["--publish=80:80"]),
+        ("docker run -d -P img", ["-P"]),
+        ("docker run --publish-all=true img", ["--publish-all=true"]),
+        ("docker run -d img 2>&1 -p 8080:80", ["-p"]),
+        ("docker run --expose 8080 img", []),
+    ],
+)
+def test_docker_publish_flag_detector(command: str, expected: list[str]) -> None:
+    """Detect every publish spelling; ``--expose`` and ``2>&1`` are not ports."""
+    assert _published_port_flags(_smoke_docker_argv(command)) == expected
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        "docker run -d img &",
+        "docker run -d $(id) img",
+        "timeout 60 docker run -d img && docker create img",
+    ],
+)
+def test_smoke_docker_argv_rejects_unsupported_structure(script: str) -> None:
+    """Ambiguous shell structure fails loudly instead of being silently ignored."""
+    with pytest.raises(AssertionError):
+        _smoke_docker_argv(script)
 
 
 # ---------------------------------------------------------------------------

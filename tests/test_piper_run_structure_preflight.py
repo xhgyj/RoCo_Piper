@@ -632,8 +632,8 @@ def test_complete_runtime_group_dispatches_direct_pick_without_stap(
     complete_start.write_bytes(TASK_GOAL.read_bytes())
     calls: list[object] = []
 
-    def dispatch(args, record, recorder, contract, stap_plan):
-        calls.append((args, record, recorder, contract, stap_plan))
+    def dispatch(args, record, recorder, contract):
+        calls.append((args, record, recorder, contract))
         return None
 
     monkeypatch.setattr(piper_run, "_robot_operation_plan_phase", dispatch)
@@ -653,7 +653,6 @@ def test_complete_runtime_group_dispatches_direct_pick_without_stap(
     assert line["status"] == "EXECUTED", line
     assert line["passed"] is True, line
     assert len(calls) == 1
-    assert calls[0][4] is None
     assert session_guard == []
     result_path = Path(str(line["result_path"]))
     assert result_path.is_file()
@@ -770,10 +769,11 @@ def test_direct_handover_routes_without_stap(
     complete_start.write_bytes(TASK_GOAL.read_bytes())
     calls: list[object] = []
 
-    def dispatch(args, record, recorder, contract, stap_plan):
-        calls.append(stap_plan)
+    def dispatch(args, record, recorder, contract):
+        calls.append(record["stap_authorization"])
         assert record["checks"]["direct_runtime_skills_supported"] is True
         assert record["checks"]["tcp_resolved"] is True
+        assert record["stap_authorization"] is None
         return (
             RunStatus.RUNTIME_START_FAILED,
             "offline dispatch sentinel; no runtime created",
@@ -874,6 +874,59 @@ def test_handover_profile_admission_prevents_all_runtime_creation(
     assert code == EXIT_CODES[expected]
     assert session_guard == []
     _assert_no_motion_claim(Path(line["result_path"]).parent)
+
+
+def test_real_direct_input_mutation_after_authorization_is_input_mutated(
+    tmp_path: Path,
+    session_guard: list[tuple[object, ...]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A real direct-path mutation after TCP authorization is promoted.
+
+    This drives the unmodified direct path with the unqualified coordinated
+    bottom HANDOVER profile: the plan is parsed and captured, the structure and
+    TCP gates run, the real ``_authorize_tcp_dispatch`` authorizes, HANDOVER
+    admission rejects with ``EXECUTION_NOT_IMPLEMENTED`` and the final rehash
+    sees the changed original bytes. Because the terminal is still
+    ``EXECUTION_NOT_IMPLEMENTED``, the restored gate promotes it to
+    ``INPUT_MUTATED``. Only the authorization seam is wrapped to append one
+    newline after the real authorization; dispatch and both rehashes are the
+    production functions.
+    """
+    document = _direct_handover_plan(with_pick=False)
+    plan = tmp_path / "handover.json"
+    plan.write_text(json.dumps(document), encoding="utf-8")
+    complete_start = tmp_path / "complete-start.json"
+    complete_start.write_bytes(TASK_GOAL.read_bytes())
+    real_authorize = piper_run._authorize_tcp_dispatch
+    state = {"mutated": False}
+
+    def authorize_then_mutate(*args: object, **kwargs: object) -> object:
+        result = real_authorize(*args, **kwargs)
+        if not state["mutated"]:
+            state["mutated"] = True
+            argv = args[0]
+            plan_path = argv.robot_operation_plan_path
+            plan_path.write_bytes(plan_path.read_bytes() + b"\n")
+        return result
+
+    monkeypatch.setattr(
+        piper_run, "_authorize_tcp_dispatch", authorize_then_mutate
+    )
+    run_dir = tmp_path / "run"
+    code, line, _ = _invoke(_structure_argv(
+        run_dir, goal=TASK_GOAL, start=complete_start,
+        plan=plan, preflight_only=False,
+    ))
+    assert state["mutated"] is True
+    assert line["status"] == "INPUT_MUTATED", line
+    assert code == EXIT_CODES[RunStatus.INPUT_MUTATED], line
+    assert line["passed"] is False, line
+    assert session_guard == []
+    evidence_dir = _assert_early_exit_evidence(line, run_dir)
+    preflight = _read_json(evidence_dir / "preflight.json")
+    assert preflight["inputs"]["immutable_after_validation"] is True
+    assert preflight["inputs"]["immutable_after_all_phases"] is False
 
 
 def test_profile_flag_cannot_activate_legacy_handover_handler(

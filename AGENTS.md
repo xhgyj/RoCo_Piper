@@ -32,19 +32,21 @@ Do not launch real Isaac/ROS/MoveIt or send robot motion from ordinary unit-test
 The production path is:
 
 ```text
-assembly-plan/v2
-  -> STAP parse and structural binding
+external robot-operation-plan/v1 + explicit structure goal/start
+  -> immutable input capture and aliasing audit
+  -> strict robot-operation-plan validation
+  -> structure-scene binding (physical instance ids only)
+  -> immutability rehash after validation
   -> TCP gate/authorization
-  -> external robot-operation-plan/v1
   -> multi-robot readiness
   -> layer scheduler
   -> RobotOperationExecutor
   -> operation/cleanup/evidence aggregation
 ```
 
-`piper-run --robot-operation-plan PATH` is the only operation dispatch entry. Do not reintroduce the old `--operation` or `--skill-request/v1` dispatch paths. `piper-run` must read and validate the external plan; it must not reorder, repair, or synthesize operations. Failed STAP, binding, TCP, plan, readiness, or cleanup gates must prevent motion and must produce an auditable failure.
+`piper-run --robot-operation-plan PATH --structure-goal PATH [--structure-start PATH]` is the only operation dispatch entry. The plan and the goal structure are required and never inferred; `--task`, `--plan`, `--structure-dir`, `--operation`, and `--skill-request/v1` are retired and must fail closed as invalid usage. `piper-run` must read and validate the external plan; it must not reorder, repair, or synthesize operations. The TCP gate is still in force on this direct path: it runs before any session exists, and the TCP geometry/calibration/frame/model validation stays owned by `rocobrick.tcp_contract` plus the model-audit artifact. Failed input, structure binding, TCP, plan, readiness, or cleanup gates must prevent motion and must produce an auditable failure.
 
-The external plan is immutable input. Preserve its original bytes and SHA-256 in the run directory, rehash all original inputs after execution, and keep `robot-operation-plan-run.json` JSON-safe. Final success requires all required assembly evidence and cleanup, not merely a command being sent.
+The external plan is immutable input. Preserve its original bytes and SHA-256 in the run directory, rehash all original inputs after execution, and keep `robot-operation-plan-run.json` JSON-safe. Final success requires cleanup and terminal-safe evidence, not merely a command being sent.
 
 The runtime topology is one Isaac host bridge plus one ROS/MoveIt container session for all plan robots. The host bridge has one DDS participant and one shared `/clock`; container ROS processes share the configured DDS domain. Robot endpoints are namespaced (`/piper_0/...`, `/piper_1/...`) and must never fall back to canonical `piper_0` names for another robot. Scene state is served globally at `/p05_host_bridge/scene_state` and is sliced by `robots[robot_id]` with no cross-robot or snapshot fallback.
 
@@ -89,7 +91,9 @@ package and skills package no longer eagerly re-export legacy APIs.
 
 The old gRPC planner, pregrasp/playback, phase backend, isolated single-session
 and legacy launch/fake-controller paths are retired. The sole dispatch entry
-remains piper-run with an external robot operation plan. Standalone validate/demo entries are retired; archived maintenance tools under maintenance/archived_tools/ are not production dispatch dependencies.
+remains piper-run with an external robot operation plan plus the explicit
+structure goal/start; assembly-plan/v2 STAP parsing and single-task structural binding
+are no longer part of the production chain. Standalone validate/demo entries are retired; the archived maintenance tools that used to live under maintenance/archived_tools/ have been moved out of the repository to the cold-storage archive `/home/mzictt/RoCo_Piper-maintenance-archive/phase3-20261017T053710Z` and are not production dispatch dependencies.
 
 Current capability boundary:
 
