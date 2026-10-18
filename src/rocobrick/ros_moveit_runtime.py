@@ -143,6 +143,15 @@ SERVICE_CALL_TIMEOUT_S = 5.0
 IK_SEARCH_TIMEOUT_S = 0.5
 IK_ATTEMPT_TIMEOUT_S = 0.05
 IK_SEED_ATTEMPTS = 24
+# Supervised contact goals (pick_descent / pick_entry) run on soft spring-drive
+# simulators whose joints follow the commanded position with a visible lag, so
+# the controller's own tracking tolerance must sit above that lag. Measured on
+# 2026-10-18 (runs/pick-entry-frame-headless-...): the JTC aborted a 1 mm/s
+# descent with "State tolerances failed for joint 5: Position Error: -0.010572"
+# against the old 0.01 rad bound. The contact truth is never this bound: the
+# live scene monitor plus the target's own admission tolerances decide.
+CONTACT_PATH_TOLERANCE_RAD = 0.05
+CONTACT_GOAL_TOLERANCE_RAD = 0.02
 COMBINED_ROBOT_DESCRIPTION_TOPIC = "/dual_arm/robot_description"
 # The single MoveGroup action of a dual-arm session: one combined MoveIt node
 # hosts both participants' prefixed groups, so no participant runtime owns a
@@ -3434,7 +3443,23 @@ class RosMoveItRuntime:
             > 0.002
         ):
             raise RuntimeError("contact trajectory start drifted from planned state")
-        start_fk = self.compute_tcp_fk(current, timeout_s=0.5)
+        if guard["mode"] in ("pick_descent", "pick_entry"):
+            from rocobrick.skills.observation import _pose, parse_pick_observation
+            from rocobrick.skills.placement_geometry import compose, inverse
+
+            def pick_live_fk():
+                sample = parse_pick_observation(
+                    self.query_scene_state(0.5), robot_id=self.robot_id,
+                    physical_instance_id=guard["region"]["physical_instance_id"],
+                    session_id=guard["session_id"],
+                    manifest_sha256=guard["manifest_sha256"],
+                )
+                local = compose(inverse(_pose(guard["region"]["base_in_world"], "base")), sample.tcp_pose)
+                return local.position_xyz, local.orientation_xyzw
+
+            start_fk = pick_live_fk()
+        else:
+            start_fk = self.compute_tcp_fk(current, timeout_s=0.5)
         if start_fk is None:
             raise RuntimeError("contact trajectory requires a measured TCP start pose")
         contact_distance_m = math.dist(start_fk[0], tuple(target.position))
@@ -3462,15 +3487,18 @@ class RosMoveItRuntime:
         # tracking tightness.
         goal.goal_tolerance = []
         goal.path_tolerance = []
+        contact_mode = guard["mode"] in ("pick_descent", "pick_entry")
+        goal_position = CONTACT_GOAL_TOLERANCE_RAD if contact_mode else 0.03
+        path_position = CONTACT_PATH_TOLERANCE_RAD if contact_mode else 0.05
         for name in self._arm_joint_names:
             end = factories.joint_tolerance_factory()
             end.name = name
-            end.position = 0.03
+            end.position = goal_position
             end.velocity = 0.05
             goal.goal_tolerance.append(end)
             path = factories.joint_tolerance_factory()
             path.name = name
-            path.position = 0.05
+            path.position = path_position
             goal.path_tolerance.append(path)
         goal.goal_time_tolerance = self._duration_message(5.0, factories)
         send_commands = self._command_count
@@ -3508,8 +3536,8 @@ class RosMoveItRuntime:
             ),
             "measured_joint_start": dict(current),
             "trajectory_duration_s": timing.duration_s,
-            "goal_tolerance_rad": 0.03,
-            "path_tolerance_rad": 0.05,
+            "goal_tolerance_rad": goal_position,
+            "path_tolerance_rad": path_position,
         }
         outcome = self._await_guarded_action(
             self._active_result_future, guard, deadline, details, send_commands
@@ -3537,7 +3565,8 @@ class RosMoveItRuntime:
                     },
                 )
             final = self.latest_isaac_state()
-            fk = self.compute_tcp_fk(final, timeout_s=0.5)
+            fk = (pick_live_fk() if guard["mode"] in ("pick_descent", "pick_entry")
+                  else self.compute_tcp_fk(final, timeout_s=0.5))
             if fk is None:
                 return replace(
                     outcome,
@@ -4643,6 +4672,7 @@ class RosMoveItRobotSession:
         }
         for runtime in self.runtimes.values():
             runtime._combined_start_state_reader = self.unified_start_state
+            runtime._combined_robot_description_reader = self.unified_robot_description
         if executor_factory is None:
             from rocobrick.ros_moveit_executor import RosMoveItExecutor
 
@@ -5165,24 +5195,58 @@ class RosMoveItRobotSession:
                 if callable(limit_reader):
                     limits = limit_reader(request.timeout_s)
             arm_limits = {joint: limits[joint] for joint in arm if joint in limits}
-            extra = (
-                ik_seed_candidates(
-                    seeds[robot_id],
-                    arm_limits,
-                    IK_SEED_ATTEMPTS - 1,
-                    f"{request.coordination_id}|{robot_id}",
+            extra: list[Mapping[str, float]] = []
+            if arm_limits:
+                extra.extend(
+                    ik_seed_candidates(
+                        seeds[robot_id],
+                        arm_limits,
+                        IK_SEED_ATTEMPTS - 1,
+                        f"{request.coordination_id}|{robot_id}",
+                    )
                 )
-                if arm_limits
-                else ()
-            )
+                # A parked arm sits on the elbow-straight joint limit, where the
+                # single Newton descent behind the IK service stalls, and a
+                # large tool reorientation then exhausts the whole random
+                # budget. Offer the locally solved pose first; an unavailable
+                # description or an unsolved pose leaves the budget unchanged.
+                local = self._local_ik_seed(robot_id, target, seeds[robot_id])
+                if local is not None:
+                    extra.insert(0, local)
             solved[robot_id] = self.runtimes[robot_id].solve_tcp_ik(
                 robot_id,
                 target,
                 seeds[robot_id],
                 request.timeout_s,
-                extra_seeds=extra,
+                extra_seeds=tuple(extra),
             )
         return solved
+
+    def _local_ik_seed(
+        self,
+        robot_id: str,
+        target: Mapping[str, object],
+        seed: Mapping[str, float],
+    ) -> Mapping[str, float] | None:
+        """Solve one arm pose locally to seed the unified IK query.
+
+        Returns:
+            One arm joint candidate on the combined model, or ``None`` when the
+            local solver, the description or the pose is unavailable. The
+            unified IK service still owns the authoritative answer.
+        """
+        if not isinstance(target.get("tcp_pose"), Mapping):
+            return None
+        description = getattr(self, "unified_robot_description", None)
+        if not callable(description):
+            return None
+        from rocobrick.clearance.local_ik import seed_tcp_ik
+
+        try:
+            model = description(5.0)
+            return seed_tcp_ik(model, robot_id, seed, target)
+        except (ImportError, ModuleNotFoundError, RuntimeError, ValueError):
+            return None
 
     @property
     def unified_planning_scene_version(self) -> int:

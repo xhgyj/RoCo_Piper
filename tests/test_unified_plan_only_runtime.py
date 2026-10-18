@@ -489,6 +489,10 @@ def test_unified_joint_targets_composes_ik_and_measured_holds():
     session = RosMoveItRobotSession.__new__(RosMoveItRobotSession)
     session.robot_ids = ROBOTS
     session.runtimes = {"piper_0": mover, "piper_1": holder}
+    # The local IK seed reads the planner's own model; this offline session
+    # carries an empty one, so only the existing restart budget is offered.
+    session._robot_description_cache = None
+    session.unified_robot_description = lambda timeout_s=5.0: "<robot/>"
     session._joint_limits_cache = {
         **{f"piper_0_joint{i}": (-1.0, 1.0) for i in range(1, 7)},
         **{f"piper_1_joint{i}": (-1.0, 1.0) for i in range(1, 7)},
