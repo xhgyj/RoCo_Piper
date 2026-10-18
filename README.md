@@ -1,145 +1,276 @@
-# RoCo_Piper — formal operation-plan runtime
+# RoCo Piper
 
-This fork runs the Piper_L multi-robot Isaac/ROS/MoveIt operation-plan platform.
-The upstream challenge documentation below is retained as historical project
-context, not as the current deployment or evaluation interface.
+RoCo Piper is the formal multi-robot operation-plan runtime for the Piper L Isaac Sim, ROS 2, and MoveIt environment.
 
-## Current entry and cleanup boundary
+This README describes the current production workflow. Older challenge examples, standalone policy demos, validation entrypoints, historical runs, and diagnostic probes are not supported production interfaces.
 
-- Use `uv sync --locked` for the existing dependency set and `uv run --no-sync piper-run --help` for explicit immutable input flags.
-- `piper-run --robot-operation-plan PATH` is the only production dispatch entry; provide the corresponding structure/STAP, config and authorization inputs. Do not synthesize or reorder the external plan.
-- The live topology is one Isaac host, one ROS container session, the combined `dual_arm_move_group.launch.py`, per-robot namespaced channels, and the persistent ROS worker.
-- Keep all formal skill branches and cancel/terminal/cleanup gates, not just Task C. Static tests and clean builds are not live execution evidence.
-- The old gRPC planner, pregrasp/playback, phase backend, single-session and isolated/fake launch paths have been retired from this candidate. Import classified package owners directly rather than old compatibility forwarding modules.
-- Historical runs are outputs, not deployed startup inputs. Offline fixtures carry exact historical plan bytes; TCP provenance byte objects are test-only audit inputs. The production DDS prerequisite report remains required.
-- Original uncommitted functional changes and immutable model/calibration/plan bytes must be preserved. See `AGENTS.md` for safety and test rules.
-- The old standalone validate/demo entries are retired. Non-production maintenance and diagnostic tools are preserved under maintenance/archived_tools/ and are not supported deployment commands.
+## Current Scope
 
-## Historical upstream challenge README (not the current launch contract)
+The supported production workflow starts from an external robot-operation-plan/v1 document and executes it through the multi-robot runtime:
 
-# RoCo-BrickAssembly
+    external robot-operation-plan/v1
+      -> multi-robot readiness
+      -> execution layers and scheduler
+      -> RobotOperationExecutor
+      -> operation, cleanup, and evidence aggregation
 
-Welcome to the official simulation repository for the **Brick Assembly** track of the [RoCo Challenge @ IROS26](https://rocochallenge.github.io/RoCo-IROS2026/). 
+The formal execution surface does not use the former assembly-plan/v2, STAP, or TCP-gate workflow as its production entry path. Those names may still occur in historical artifacts or offline compatibility code; they are not instructions for starting a current production run.
 
----
+The formal skill surface is:
 
-## 💻 Prerequisites
+- WAIT
+- PICK
+- PLACE_DOWN
+- HANDOVER
+- SUPPORT_TOP
+- PLACE_UP
 
-Before you begin, please make sure you have confirmed your participation in this track with the organizers.
+A valid plan must preserve its declared operation order and layer semantics. The runtime does not invent, reorder, or silently repair operations.
 
-Ensure your system meets the following requirements:
-* **OS:** Ubuntu 22.04 or higher
-* **Hardware:** NVIDIA GPU
+## Requirements
 
-## 🚀 Getting Started
+The supported environment is:
 
-Follow these steps to install dependencies and run the example demo:
+- Linux x86_64
+- Python 3.11
+- Isaac Sim 5.1
+- ROS 2 Humble and MoveIt
+- NVIDIA GPU and compatible drivers
+- Docker
+- The project ROS image, normally roco-piper-ros:humble
+- A configured DDS environment and an unused host listener port
 
-```bash
-# 1. Install uv (Python package installer and resolver)
-curl -LsSf [https://astral.sh/uv/install.sh](https://astral.sh/uv/install.sh) | sh
+Offline contract tests do not require Isaac Sim, ROS, Docker, or robot hardware. A real runtime check requires all of those runtime dependencies and a clean, isolated evidence directory.
 
-# 2. Setup Environment
-uv sync --locked
+## Installation
 
-# 3. Execute Example Demo
-# Historical demo command retired; use piper-run for the supported runtime.
-```
+The dependency set is locked with uv:
 
-## 📂 Repository Structure
+    uv sync --locked
 
-```text
-RoCo-BrickAssembly/
-├── README.md                      # This file: repository instructions
-├── uv.lock                        # venv configuration
-├── config/                        # Configuration files
-│   ├── README.md                  # Configuration descriptions
-│   ├── lego_library.json          # Definitions of `brick_id`
-│   ├── system_config.json         # Configuration of BrickSim
-│   └── user_config.json           # Your configurations (TODOs)
-├── robot_assets/                  # Robot models (URDF, USD, visual/collision meshes)
-├── tasks/                         # Brick assembly tasks
-│   ├── README.md                  # Task descriptions
-│   ├── type1/                     # Type-1 tasks
-│   └── type2/                     # Type-2 tasks
-├── src/                       
-│   └── rocobrick/                 # RoCo-BrickAssembly source code
-│       ├── env/                   # BrickSim environment
-│       ├── policy/                
-│       │   ├── NaivePolicy.py     # Example rule-based policy (uses privileged info)
-│       │   └── Policy.py          # Your robot policy implementation (TODOs)
-│       ├── robot/                 # Pinocchio robot model (FK, IK, etc.)
-│       ├── task_config/           # Task loader and parser
-│       └── utils.py               # Helper functions
-└── run/
-    ├── demo.py                    # Example script using NaivePolicy 
-    └── main.py                    # Main script to evaluate your policy
-```
+Use the repository environment for commands:
 
----
+    PYTHONPATH="$PWD" uv run --no-sync piper-run --help
 
-## 🛠️ Build Your Policy
+The project requires Python >=3.11,<3.12. Do not update the lockfile or replace the Isaac/ROS dependency set as part of a runtime run.
 
-Your objective is to build an intelligent robot policy capable of successfully constructing as many assembly structures as possible. 
+## Production Entry Point
 
-* **Implementation:** Your custom policy code must be written in `RoCo-BrickAssembly/src/rocobrick/policy/Policy.py`. 
-  * **Input**: Observations, including camera and robot feedback.
-  * **Output**: robot joint positions, a 23-dimensional array. *Format*: [Lift, torso_flip, L_arm_j1 to L_arm_j7, L_gripper_joint, Unused, R_arm_j1 to R_arm_j7, R_gripper_joint, Unused, head_j1, head_j2, head_j3].
-* **Evaluation:** The historical standalone policy entry was retired; production uses the operation-plan interface above.
+The only production dispatch command is:
 
-### Example Policy
-We have provided a naive example policy in `src/rocobrick/policy/NaivePolicy.py` to demonstrate how to interact with BrickSim. You can test it by running the `demo.py` script.
+    piper-run \
+      --robot-operation-plan PATH_TO_ROBOT_OPERATION_PLAN_JSON \
+      --structure-goal PATH_TO_GOAL_JSON \
+      --run-dir PATH_TO_NEW_EVIDENCE_DIRECTORY
 
-### ⚠️ Rules & Restrictions
+Use an explicit initial structure when the operation requires one:
 
-> **What You Can Do:**
-> * **Modify specific files:** You are only allowed to modify files explicitly labeled with **(TODOs)** or add new files that support your TODO implementations. If you believe modifying other core files is necessary, you must confirm with the committee first.
-> * **Create custom tests:** Feel free to design additional assembly structures to thoroughly test and evaluate your policy.
-> * **Collect data freely:** You may use any method for data collection and training, including the use of privileged information, teleoperation, and synthetic generation. 
-> * **Be creative:** We do not restrict the underlying method, architecture, or algorithm you choose. Build the best brick builder possible!
-> 
-> **What You Cannot Do:**
-> * **Do NOT use privileged information during inference:** During inference/runtime, your policy may *only* rely on realistic observations (e.g., camera feeds and robot proprioceptive feedback). The `NaivePolicy` demo uses privileged information (like exact ground-truth brick states) for illustration purposes, but relying on this for your final evaluation is **strictly forbidden**.
-> * **Do NOT use human intervention:** Fully autonomous execution is required. No human intervention or teleoperation is allowed during inference runtime.
+    piper-run \
+      --robot-operation-plan PATH_TO_ROBOT_OPERATION_PLAN_JSON \
+      --structure-start PATH_TO_START_JSON \
+      --structure-goal PATH_TO_GOAL_JSON \
+      --config PATH_TO_USER_CONFIG_JSON \
+      --run-dir PATH_TO_NEW_EVIDENCE_DIRECTORY
 
----
+Useful optional inputs include:
 
-## 🏆 Scoring & Leaderboard
+- --scene-manifest PATH
+- --scene-snapshot-out PATH
+- --host-instance-id ID
+- --robot-id ID
+- --config USER_CONFIG_JSON
 
-* **Scoring Metric:** Evaluation follows the official metric outlined in the [Task Description](./tasks/README.md). Note that your score will be evaluated against both the released tasks **and** an unreleased, hidden set of tasks. The tasks used during the onsite competition will be drawn from this complete set.
-* **Leaderboard:** We maintain an active [Leaderboard](https://rocochallenge.github.io/RoCo-IROS2026/brick_assembly_overview.html) on our website. Rankings are always based on your **latest submission**.
+The run directory must be new. The runtime records the input plan and execution evidence there and must never overwrite an existing run directory or mutate the source plan.
 
-## 📤 Submission Instructions
+Run help from the locked environment to see the exact options available in the checked-out revision:
 
-When you are ready to submit, please compile the following files into a single zip file named `TeamName.zip`:
-1.  `./config/user_config.json`
-2.  `./src/rocobrick/policy/Policy.py`
-3.  Additional files if needed.
-4.  A `README` detailing the instructions to run your policy, e.g., where to put the files, additional commands needed to run.
+    PYTHONPATH="$PWD" uv run --no-sync piper-run --help
 
-**Submit your file here:** [Official Submission Portal](https://forms.gle/AaxqVhRHTegXYSab7)
+The retired rocobrick-validate, run/demo.py, run/main.py, and run/validate_plan.py commands are not supported and must not be restored as compatibility wrappers.
 
-> **Note:** Each team is allowed **one submission per week**. Please test thoroughly before submitting!
+## Runtime Topology
 
----
+A production run uses one Isaac host bridge and one ROS/MoveIt container session for the plan's robots.
 
-## 🧱 Tasks
-You can download the tasks at this link: [brick assembly tasks download](https://drive.google.com/file/d/1GREvEKAZtgpM3r-xb9umneN6-EzCg3IU/view?usp=sharing). Modify the task path in `./config/user_config.json` to assemble different structures.
+- The combined dual-arm MoveIt launch is the supported ROS launch path.
+- Robot topics and action channels are namespaced per robot, including /piper_0 and /piper_1 where applicable.
+- The Isaac host uses one DDS participant and one shared clock source.
+- Container ROS processes use the configured DDS domain and project Fast DDS profiles.
+- Persistent ROS worker channels remain owned by the runtime session and are cleaned up with the run.
+- Scene state is selected by robot identity; a robot must not fall back to another robot's state or to an old snapshot.
 
----
+The production implementation lives primarily in:
 
-## 🤖 Hardware
+- src/rocobrick/runtime_session.py
+- src/rocobrick/ros_session_entry.py
+- src/rocobrick/multi_robot_scheduler.py
+- src/rocobrick/execution/
+- src/rocobrick/skills/
+- src/rocobrick/adapters/moveit/
+- isaac/p05_host_bridge.py
+- ros_ws/src/rocobrick_piper_l_moveit_config/
 
-The Brick Assembly track will use the **[DexMate Vega U](https://www.dexmate.ai/product/vega-u)** as the official robot platform. Simulation assets are provided in `robot_assets/DexMate` to support your team's development and preparation.
+## Execution and Evidence
 
-We are excited to give participants hands-on access to state-of-the-art robotic embodiments through meaningful and challenging assembly tasks, advancing the future of embodied AI!
+The scheduler treats execution layers as dispatch and barrier units. Operations in the same layer may run concurrently when their resources do not conflict. Later layers remain blocked when a required operation fails.
 
----
+Resources are acquired before dispatch and released only after confirmed terminal-safe evidence. Cancellation is not proof that physical motion stopped. Unknown or unsafe terminal state fails closed and retains affected resources.
 
-## 💬 Contact & Support
+A successful run requires:
 
-If you have any questions, run into issues, or just want to chat with fellow competitors, feel free to drop into our [Discord Channel](https://discord.gg/BvxEN5vAh3) or reach out to the organizers:
+- Readiness for every participating robot
+- Valid operation identity and resource ownership
+- Terminal action evidence
+- Skill-specific physical evidence
+- Cleanup and session shutdown evidence
+- A JSON-safe run summary
 
-* **RoCo Committee:** [Challenge Website](https://rocochallenge.github.io/RoCo-IROS2026/)
-* **Ruixuan Liu:** ruixuanl@andrew.cmu.edu
-* **Haowei Wen:** haoweiw@andrew.cmu.edu
+Primary run artifacts include:
+
+- robot-operation-plan.json - captured external input bytes
+- robot-operation-plan-run.json - execution, readiness, cleanup, and result evidence
+- Session, scheduler, and skill evidence files produced during the run
+
+Rehash original inputs after execution. Preserve the original plan and configuration bytes as provenance.
+
+## Formal Skills
+
+### WAIT
+
+Confirms fresh observation from the executing robot. Simulation time must advance and the requested measured object must remain stable. A stale or cross-robot observation is not valid evidence.
+
+### PICK
+
+Keeps pregrasp, approach, gripper feedback, grasp, lift, and holding evidence separate. A gripper opening or object-height change alone does not prove that the robot is holding the object.
+
+### PLACE_DOWN
+
+Separately proves connection, release, and retreat before publishing an assembled state. A command or successful action result alone does not establish placement.
+
+### HANDOVER
+
+Coordinates donor and receiver ownership, observation freshness, local geometry, attachment state, and cleanup. The ledger must confirm the requested holding state before carrying or release actions are admitted.
+
+### SUPPORT_TOP
+
+Uses the support-top operation contract and its dedicated readiness, planning, execution, and evidence gates. Do not replace those gates with generic motion success.
+
+### PLACE_UP
+
+Uses the place-up operation contract and requires its release, retreat, and final evidence conditions. Do not mark completion from a command publication alone.
+
+All formal skills must retain fail-closed behavior, independent action handles, robot identity, terminal state, motion status, and JSON-safe evidence.
+
+## Repository Layout
+
+    src/rocobrick/                         Runtime, scheduler, skills, contracts
+    isaac/                                  Isaac host bridge and simulator-side tools
+    ros_ws/src/rocobrick_piper_l_moveit_config/
+                                            Dual-arm MoveIt package and sampler/plugin
+    config/                                 Runtime configuration and user inputs
+    tasks/                                  Task and structure data
+    robot_assets/                           Robot models and scene assets
+    artifacts/model-audit/                  Model and TCP provenance artifacts
+    artifacts/phase1/                       DDS prerequisite evidence
+    tests/                                  Offline and runtime-contract tests
+    maintenance/archived_tools/             Retired diagnostic and maintenance tools
+    maintenance/archived_tests/             Tests for archived tools
+    runs/                                   Local generated evidence; do not commit by default
+    ros_ws/build/                           Generated ROS build output
+    ros_ws/install/                         Generated ROS install output
+    ros_ws/log/                             Generated ROS logs
+
+The formal production closure includes the runtime session, scheduler, executor, all six formal skills, dual-arm MoveIt package, sampler/plugin, Docker self-check, DDS gate evidence, and immutable model/TCP/calibration/scene inputs.
+
+## Required Production Inputs
+
+Treat these inputs as immutable provenance during a run:
+
+- External robot-operation-plan/v1 JSON
+- Structure start and goal data when required by the selected plan
+- User/runtime configuration
+- Scene manifest and scene assets
+- Robot model and calibration data
+- Model-audit and TCP evidence artifacts
+- DDS prerequisite report at artifacts/phase1/dds-multiprocess-gate.json
+
+Formal maintenance tools supporting this boundary include:
+
+- tools/isaac-ros-env.sh
+- tools/generate_dds_profiles.py
+- tools/smoke_p1_dds_multiprocess.sh
+- tools/p1_host_dds_probe.py
+- tools/p1_container_dds_probe.py
+- tools/piper_l_model_audit.py
+- tools/sim_collision_hulls.py
+- tools/validate_piper_assets.py
+
+These tools support validation or prerequisite generation; they are not alternate production dispatch entries.
+
+## Testing
+
+Run the repository's offline test suite with the locked environment:
+
+    PYTHONPATH="$PWD" uv run --no-sync pytest -q -p no:cacheprovider tests/
+
+Run focused contract tests when changing the corresponding boundary:
+
+    PYTHONPATH="$PWD" uv run --no-sync pytest -q -p no:cacheprovider \
+      tests/test_piper_run.py \
+      tests/test_tcp_structural_binding.py \
+      tests/test_p1_dds_multiprocess_gate.py \
+      tests/test_dual_robot_profile_launch.py \
+      tests/test_host_bridge_p05.py \
+      tests/test_piper_l_model_contract.py
+
+Run formatting and lint checks when applicable:
+
+    uv run ruff check
+    uv run ruff format --check
+
+Tests that require ROS package dependencies may need to run inside the ROS build environment. Offline tests must not launch Isaac Sim, ROS, MoveIt, Docker, or robot motion.
+
+## Real Runtime Safety
+
+Before a real runtime check:
+
+1. Confirm NVIDIA, Isaac Sim, Docker, ROS, MoveIt, and DDS prerequisites.
+2. Use a unique new run directory.
+3. Confirm that plan, configuration, model, calibration, and scene inputs are the intended immutable files.
+4. Confirm that the ROS image and required host ports are available.
+5. Start only the session owned by this run.
+6. Preserve logs and evidence.
+7. Confirm orderly container, process, worker, and session cleanup.
+
+Never send motion from a unit-test command. Never stop or delete another run's containers or processes. Never reuse an existing evidence directory for a new execution.
+
+## Archived and Historical Material
+
+The following are intentionally outside the production dispatch path:
+
+- Retired validation and demo entrypoints
+- Old single-session and fake-controller launch paths
+- P1/R2/P5 live probes and smoke runners
+- Legacy DDS diagnostic scripts under the archived maintenance tree
+- Historical run outputs
+- The original upstream challenge README and submission instructions
+
+Archived tools are retained for historical inspection or separately controlled maintenance work. They are not supported deployment commands and are not evidence that the current production runtime is healthy.
+
+## Known Limits
+
+- A clean offline test run does not prove that Isaac Sim, ROS, MoveIt, DDS, or robot hardware is available.
+- ROS package tests may require a sourced ROS environment and a built workspace.
+- Runtime success requires physical and terminal evidence, not merely a successful process return code.
+- The HANDOVER implementation has known issues tracked by the existing tests; this README does not change or waive those contracts.
+- Generated run evidence, ROS build/install/log trees, vendor state, and simulator outputs are local state unless explicitly requested for archival.
+
+## Further Documentation
+
+- AGENTS.md - engineering rules, production architecture, and safety boundaries
+- config/README.md - configuration and input descriptions
+- docs/cleanup-session-handoff.md - cleanup history and current boundary
+- docs/live-code-cleanup-analysis.md - live-code classification and rationale
+- artifacts/model-audit/ - model and TCP provenance
+
+When documentation and runtime behavior disagree, verify the checked-out piper-run --help, the operation-plan schema, and the owning production module before changing an interface.
