@@ -8,6 +8,31 @@
 
 namespace
 {
+TEST(GraspRegionDiagnostics, RejectionsAndAcceptanceReconcile)
+{
+  rocobrick::grasp_diag::Counters counters;
+  counters.calls = 1;
+  counters.attempts_budget = 4;
+  counters.attempts_run = 3;
+  counters.reject(rocobrick::grasp_diag::kGeometry);
+  counters.reject(rocobrick::grasp_diag::kIk);
+  counters.accepted = 1;
+  counters.accept_attempt_sum = 3;
+  const auto summary = counters.summary();
+  EXPECT_NE(summary.find("attempts_run=3 accepted=1 first_reject_total=2"), std::string::npos);
+  EXPECT_NE(summary.find("accepted_attempt_avg=3"), std::string::npos);
+  EXPECT_EQ(counters.first[rocobrick::grasp_diag::kGeometry], 1u);
+  EXPECT_EQ(counters.first[rocobrick::grasp_diag::kIk], 1u);
+}
+
+TEST(GraspRegionDiagnostics, AttemptPreservesFirstRejection)
+{
+  rocobrick::grasp_diag::Attempt attempt;
+  attempt.note(rocobrick::grasp_diag::kGeometry);
+  attempt.note(rocobrick::grasp_diag::kIk);
+  EXPECT_EQ(attempt.stage, rocobrick::grasp_diag::kGeometry);
+}
+
 TEST(GraspRegion, DecodesContinuousRegionAndRejectsMalformedBindings)
 {
   std::vector<rocobrick::GraspRegionSampler::Region> regions;

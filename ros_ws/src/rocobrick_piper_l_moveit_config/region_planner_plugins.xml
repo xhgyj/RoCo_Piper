@@ -1,0 +1,5 @@
+<library path="rocobrick_clean_reference_sampler">
+  <class name="rocobrick/RegionPlannerManager" type="rocobrick::RegionPlannerManager" base_class_type="planning_interface::PlannerManager">
+    <description>Request-scoped region transport and mandatory sampler-selection gate around OMPL.</description>
+  </class>
+</library>

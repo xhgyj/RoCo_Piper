@@ -21,6 +21,7 @@ class Factory:
     def motion_plan_request_factory(self):
         return SimpleNamespace(
             goal_constraints=[],
+            pipeline_id="",
             start_state=SimpleNamespace(
                 joint_state=SimpleNamespace(name=[], position=[])
             ),
@@ -280,3 +281,12 @@ def test_trajectory_hold_is_checked_at_interior_waypoints():
         runtime()._validate_held_joints(held_request(), names, points)
     points[1] = {"positions": (0.201, 0.1)}
     runtime()._validate_held_joints(held_request(), names, points)
+
+
+def test_non_region_goal_keeps_default_pipeline():
+    """Only region requests opt into the mandatory binding planner."""
+    goal = runtime()._build_goal(
+        request({"piper_0": pose("piper_0", 0.1), "piper_1": pose("piper_1", 0.2)}),
+        Factory(),
+    )
+    assert goal.request.pipeline_id == ""

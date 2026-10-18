@@ -97,6 +97,7 @@ def test_region_converts_every_ros_double_without_mutating_input(integer_inputs)
         },
     )
     goal = runtime()._build_goal(query, StrictRegionFactory())
+    assert goal.request.pipeline_id == "rocobrick_region"
     constraints = goal.request.goal_constraints[0]
     for pc, oc in zip(
         constraints.position_constraints, constraints.orientation_constraints

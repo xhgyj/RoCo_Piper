@@ -49,3 +49,22 @@ def test_dual_startup_rebuilds_config_only_install_without_sampler():
     assert " || " in guard
     assert "timeout 300 colcon build" in DUAL_CONTAINER_LAUNCH_SCRIPT
     assert "--symlink-install" in DUAL_CONTAINER_LAUNCH_SCRIPT
+
+
+def test_region_pipeline_is_mandatory_planner_with_existing_safety_adapters():
+    """Region routing must not depend on an optional adapter that can be skipped."""
+    config = (PACKAGE / "config/rocobrick_region_planning.yaml").read_text()
+    assert "planning_plugin: rocobrick/RegionPlannerManager" in config
+    for adapter in (
+        "AddTimeOptimalParameterization", "ResolveConstraintFrames", "FixWorkspaceBounds",
+        "FixStartStateBounds", "FixStartStateCollision", "FixStartStatePathConstraints",
+    ):
+        assert f"default_planner_request_adapters/{adapter}" in config
+    xml = ElementTree.parse(PACKAGE / "region_planner_plugins.xml").getroot()
+    assert xml.find("class").attrib["base_class_type"] == "planning_interface::PlannerManager"
+    assert '"rocobrick_region"' in (PACKAGE / "launch/dual_arm_move_group.launch.py").read_text()
+    assert xml.attrib["path"] == "rocobrick_clean_reference_sampler"
+    cmake = (PACKAGE / "CMakeLists.txt").read_text()
+    # One DSO ensures planner and sampler share the very same registry instance.
+    assert "src/region_binding.cpp src/region_planner_manager.cpp" in cmake
+    assert "lib/librocobrick_clean_reference_sampler.so" in DUAL_CONTAINER_LAUNCH_SCRIPT

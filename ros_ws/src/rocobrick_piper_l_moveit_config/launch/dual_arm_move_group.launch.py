@@ -58,7 +58,10 @@ def _moveit_config(paths):
         .robot_description_kinematics(file_path=str(paths.kinematics))
         .joint_limits(file_path=str(paths.joint_limits))
         .trajectory_execution(file_path=str(paths.moveit_controllers))
-        .planning_pipelines(pipelines=["ompl", "pilz_industrial_motion_planner"])
+        .planning_pipelines(
+            pipelines=["ompl", "rocobrick_region", "pilz_industrial_motion_planner"],
+            default_planning_pipeline="ompl",
+        )
         .to_moveit_configs()
     )
 

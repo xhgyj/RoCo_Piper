@@ -13,6 +13,8 @@
   <buildtool_depend>ament_cmake</buildtool_depend>
   <depend>moveit_core</depend>
   <depend>pluginlib</depend>
+  <depend>rclcpp</depend>
+  <exec_depend>moveit_planners_ompl</exec_depend>
   <test_depend>ament_cmake_gtest</test_depend>
 
   <exec_depend>agx_arm_description</exec_depend>

@@ -235,6 +235,7 @@ class CoordinatedMoveItPlanRuntime:
                 or regions[0] != regions[1]
             ):
                 raise ValueError("both arms must bind the same coupled region")
+            motion.pipeline_id = "rocobrick_region"
             self._append_region_constraints(constraints, regions[0], request, factories)
             motion.goal_constraints.append(constraints)
             motion.path_constraints = path_constraints
@@ -247,7 +248,12 @@ class CoordinatedMoveItPlanRuntime:
         roll_links: set[str] = set()
         for robot_id, target in planning_targets.items():
             if "grasp_region" in target:
-                if set(target) != {"grasp_region"}:
+                selection_only = (
+                    request.plan_only
+                    and target.get("pick_endpoint_selection_only") is True
+                    and set(target) == {"grasp_region", "pick_endpoint_selection_only"}
+                )
+                if set(target) != {"grasp_region"} and not selection_only:
                     raise ValueError(
                         "grasp_region cannot carry fixed joint/pose targets"
                     )
@@ -355,6 +361,7 @@ class CoordinatedMoveItPlanRuntime:
                 f"target {robot_id} must carry exact tcp_pose or joint_positions"
             )
         if grasp_regions:
+            motion.pipeline_id = "rocobrick_region"
             constraints.name = self._grasp_sampler_binding(grasp_regions)
         motion.goal_constraints.append(constraints)
         if roll_links:
