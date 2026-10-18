@@ -34,6 +34,7 @@ class PadContactFrame:
     contacts: tuple[PadContact, ...]
     finger_contacts: tuple[Mapping[str, object], ...] = ()
     dt_s: float = 0.0
+    diagnostic_contacts: tuple[Mapping[str, object], ...] = ()
 
     def __post_init__(self) -> None:
         """Reject invalid times and untyped or mutable contact buffers."""
@@ -218,6 +219,7 @@ class PhysxPadContactReader:
         headers, data = report[:2]
         contacts = []
         finger_contacts = []
+        diagnostic_contacts = []
         for header in headers:
             if getattr(header, "type") == self._lost:
                 continue
@@ -255,6 +257,21 @@ class PhysxPadContactReader:
                 # PhysX normals point shape1 -> shape0. Make all emitted
                 # normals object -> pad irrespective of actor ordering.
                 force = abs(sum(a * b for a, b in zip(impulse, normal))) / dt
+                if self._include_finger_contacts:
+                    diagnostic_contacts.append({
+                        "link_a": self._pads[actor0][1]
+                        if actor0 in self._pads else actor0,
+                        "link_b": self._pads[actor1][1]
+                        if actor1 in self._pads else actor1,
+                        "position_world_m": list(
+                            _triple(getattr(point, "position"), "contact position")
+                        ),
+                        "normal_force_n": force,
+                        "impulse_ns": list(impulse),
+                        "separation_m": finite(
+                            getattr(point, "separation"), "contact separation"
+                        ),
+                    })
                 if object_actor is None:
                     finger_contacts.append(
                         {
@@ -287,4 +304,7 @@ class PhysxPadContactReader:
                         force,
                     )
                 )
-        return PadContactFrame(time, tuple(contacts), tuple(finger_contacts), dt)
+        return PadContactFrame(
+            time, tuple(contacts), tuple(finger_contacts), dt,
+            tuple(diagnostic_contacts),
+        )

@@ -184,7 +184,7 @@ def test_pick_planning_scene_includes_protected_ground_box() -> None:
         manifest_sha256="a" * 64,
     )
     admission = asyncio.run(handler.preflight(operation()))
-    context = SimpleNamespace(ground=GroundSpec(
+    context = SimpleNamespace(feeding_platforms=(), ground=GroundSpec(
         center_xy_m=(0.0, -0.2), size_xy_m=(2.0, 2.0),
         top_z_m=-0.001, thickness_m=0.02,
     ))

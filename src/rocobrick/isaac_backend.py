@@ -139,6 +139,7 @@ class OperationKind(StrEnum):
     LINK6_POSE = "LINK6_POSE"
     TCP_POSE = "TCP_POSE"
     GUARDED_TCP_POSE = "GUARDED_TCP_POSE"
+    PICK_CONTACT = "PICK_CONTACT"
     GRIPPER_TARGET = "GRIPPER_TARGET"
     APPLY_PLANNING_SCENE = "APPLY_PLANNING_SCENE"
     ATTACH_PLANNING_SCENE = "ATTACH_PLANNING_SCENE"
@@ -453,6 +454,21 @@ def guarded_tcp_operation(
     admitted = tcp_pose_operation(target, timeout_s, request_id)
     validate_guard(guard)
     return RuntimeOperation(OperationKind.GUARDED_TCP_POSE,
+                            {"target": admitted.payload, "guard": dict(guard)},
+                            admitted.timeout_s, admitted.request_id)
+
+
+def pick_contact_operation(target, guard, timeout_s, request_id):
+    """Build the dedicated no-planner PICK entry operation.
+
+    Returns:
+        A strict TCP-admitted operation with a PICK-only guard.
+    """
+    from rocobrick.skills.pick_contact import validate_pick_guard
+
+    admitted = tcp_pose_operation(target, timeout_s, request_id)
+    validate_pick_guard(guard)
+    return RuntimeOperation(OperationKind.PICK_CONTACT,
                             {"target": admitted.payload, "guard": dict(guard)},
                             admitted.timeout_s, admitted.request_id)
 

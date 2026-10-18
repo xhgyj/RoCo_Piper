@@ -81,6 +81,7 @@ def terminal_safe(result: RosSessionResult) -> bool:
             "LINK6_POSE",
             "TCP_POSE",
             "GUARDED_TCP_POSE",
+            "PICK_CONTACT",
             "GRIPPER_TARGET",
         }:
             if execution.get("terminal") is not True:

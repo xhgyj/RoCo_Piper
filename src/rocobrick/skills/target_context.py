@@ -18,6 +18,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
+from rocobrick.feeding_platforms import FeedingPlatform, parse_feeding_platforms
 from rocobrick.skills.targets import (
     RobotBaseFrame,
     SkillParams,
@@ -45,6 +46,7 @@ class TargetContext:
     provenance: TcpProvenance
     params: SkillParams
     ground: GroundSpec | None = None
+    feeding_platforms: tuple[FeedingPlatform, ...] = ()
 
 
 def load_target_contexts(
@@ -115,6 +117,12 @@ def load_target_contexts(
                             top_z_m=float(top),
                             thickness_m=float(thickness),
                         )
+    environment = raw_config.get("Env_Config", {})
+    configured_robots = raw_config.get("Robot_Config", {}).get("Robots", [])
+    platforms = parse_feeding_platforms(
+        environment.get("Feeding_Platforms"),
+        tuple(robot["Name"] for robot in configured_robots),
+    )
     contexts: dict[str, TargetContext] = {}
     for robot_id in robot_ids:
         if not isinstance(robot_id, str) or not robot_id:
@@ -127,6 +135,7 @@ def load_target_contexts(
             ),
             params=params,
             ground=ground,
+            feeding_platforms=platforms,
         )
     return contexts
 

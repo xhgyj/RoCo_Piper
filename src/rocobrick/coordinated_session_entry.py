@@ -4,16 +4,17 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 
-from rocobrick.coordinated_session import (
-    CoordinatedSessionRequest,
-    CoordinatedSessionResult,
-)
-from rocobrick.dual_arm_coordinator import DualArmPlanOnlyCoordinator
 from rocobrick.clearance import (
     ClearanceReport,
     attachment_box,
     gate_trajectory,
 )
+from rocobrick.clearance.grasp_approach import grasp_approach_clearance
+from rocobrick.coordinated_session import (
+    CoordinatedSessionRequest,
+    CoordinatedSessionResult,
+)
+from rocobrick.dual_arm_coordinator import DualArmPlanOnlyCoordinator
 
 # Minimal cross-robot separation the simulator's own convex-hull colliders must
 # keep for a commanded combined motion.  The offset12 support pre-phase staged
@@ -127,6 +128,7 @@ def perform_coordinated_plan(
     from dataclasses import replace
 
     execution_attempted = False
+    trajectory = {}
     if request.operation:
         try:
             from rocobrick.skills.pre_phase_targets import derive_wire_targets
@@ -165,10 +167,10 @@ def perform_coordinated_plan(
         if not request.scene_snapshot:
             raise ValueError("combined plan requires a bound shared scene snapshot")
         for target in request.targets.values():
-            if "grasp_region" in target:
+            if "grasp_region" in target or "grasp_approach_region" in target:
                 from rocobrick.skills.grasp_region import validate_grasp_scene
 
-                validate_grasp_scene(target["grasp_region"], request.scene_snapshot)
+                validate_grasp_scene(target.get("grasp_region", target.get("grasp_approach_region")), request.scene_snapshot)
         if not request.physical_facts or set(request.physical_facts) != set(
             request.participants
         ):
@@ -259,6 +261,11 @@ def perform_coordinated_plan(
         }
         coordinator = DualArmPlanOnlyCoordinator(binding)
         readiness = coordinator.admit_readiness(readiness_document, request)
+        selection_only = any(t.get("pick_endpoint_selection_only") is True for t in request.targets.values())
+        if selection_only and (not request.plan_only or participants_executor is not None
+                               or len(request.participants) != 1
+                               or not all("grasp_region" in t for t in request.targets.values())):
+            raise ValueError("PICK endpoint selection must be single-arm non-dispatch planning")
         runtime = runtime_fn()
         raw = runtime.plan(request, timeout_s=request.timeout_s)
         validate_scene = getattr(session, "validate_unified_scene", None)
@@ -276,6 +283,43 @@ def perform_coordinated_plan(
             "scene_digest": operation.scene_digest,
             "planning_scene": dict(scene_proof),
         }
+        if selection_only:
+            from rocobrick.skills.grasp_region import planned_grasp_endpoints
+
+            trajectory["selected_grasp_endpoints"] = planned_grasp_endpoints(
+                session, request, raw["joint_names"], raw["points"]
+            )
+            endpoint = {"joint_names": raw["joint_names"], "points": [raw["points"][-1]]}
+            try:
+                trajectory["grasp_endpoint_clearance"] = grasp_approach_clearance(
+                    session.unified_robot_description(), request, endpoint
+                )
+            except ValueError as error:
+                # Only this specific endpoint geometry rejection may request a
+                # new plan-only candidate. Readiness/planning errors never do.
+                if str(error).startswith("GRASP_APPROACH_WORLD_CLEARANCE:"):
+                    trajectory["candidate_rejection"] = {
+                        "code": "GRASP_APPROACH_WORLD_CLEARANCE",
+                        "stage": "endpoint_geometry",
+                        "reason": str(error),
+                    }
+                raise
+            endpoint_cross = clearance_gate(session, request, endpoint)
+            if not endpoint_cross.passed:
+                raise ValueError("PICK selected endpoint cross-robot clearance failed")
+            trajectory["selection_only_discard_path"] = True
+            return CoordinatedSessionResult(
+                coordination_id=request.coordination_id, robots=request.robots,
+                participants=request.participants, readiness=readiness.__dict__,
+                trajectory=trajectory,
+                lifecycle={"plan_only": True, "physical_execution": False,
+                           "prepared": False, "started": False, "terminal": True,
+                           "safe_to_release": False,
+                           "dispatch_attempted": False}, passed=True,
+            )
+        trajectory["grasp_approach_clearance"] = grasp_approach_clearance(
+            session.unified_robot_description(), request, raw
+        )
         clearance = clearance_gate(session, request, raw)
         trajectory["clearance_gate"] = clearance.evidence
         if not clearance.passed:
@@ -331,6 +375,7 @@ def perform_coordinated_plan(
             request,
             f"{type(exc).__name__}: {exc}",
             execution_attempted=execution_attempted,
+            trajectory=trajectory,
         )
 
 
@@ -339,6 +384,7 @@ def _failed(
     error: str,
     *,
     execution_attempted: bool = False,
+    trajectory: Mapping | None = None,
 ) -> CoordinatedSessionResult:
     """Attest no dispatch only before entering the physical executor.
 
@@ -350,7 +396,7 @@ def _failed(
         robots=request.robots,
         participants=request.participants,
         readiness={},
-        trajectory={},
+        trajectory=dict(trajectory or {}),
         lifecycle={
             "coordination_id": request.coordination_id,
             "prepared": False,

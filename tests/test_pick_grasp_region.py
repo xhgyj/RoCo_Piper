@@ -237,6 +237,7 @@ def test_two_grasp_regions_share_one_combined_sampler_binding():
     )
     goal = runtime()._build_goal(item, Factory())
     constraints = goal.request.goal_constraints[0]
+    assert goal.request.pipeline_id == "rocobrick_region"
     assert len(goal.request.goal_constraints) == 1
     assert constraints.name.startswith("rocobrick-grasp-region/v1;2;")
     assert len(constraints.position_constraints) == 2
@@ -315,6 +316,7 @@ def test_region_plus_nonparticipant_hold_is_one_combined_goal():
     item = query({"piper_0": {"grasp_region": region()}})
     goal = runtime()._build_goal(item, Factory())
     assert goal.request.group_name == "dual_arm"
+    assert goal.request.pipeline_id == "rocobrick_region"
     assert len(goal.request.goal_constraints) == 1
     combined = goal.request.goal_constraints[0]
     assert combined.name.startswith("rocobrick-grasp-region/v1;1;piper_0;")
@@ -508,14 +510,25 @@ def test_cancelled_coroutine_retains_addressable_physical_request():
     assert handler._active_free_space[operation().operation_id] == "pick-1:region"
 
 
-def test_place_up_pick_handler_sends_region_once_and_closes_at_actual_endpoint():
-    """Preserve normal PICK phases without host pose scans or extra waypoints."""
+@pytest.mark.parametrize("reject_first", [False, True])
+@pytest.mark.parametrize("hover_z_error_m", [0.0, 0.003, 0.006])
+@pytest.mark.parametrize("hover_angle_error_rad", [0.0, 0.016, 0.03])
+def test_place_up_pick_handler_stages_hover_descent_entry_then_closes(
+    hover_z_error_m, reject_first, hover_angle_error_rad
+):
+    """Incidental contact planning never executes; entry is handler-owned."""
     shared = document()
     ledger = OperationStateLedger(("piper_0", "piper_1"))
     ledger.confirm(
         "piper_0", "robot_at_pick_region", {"physical_instance_id": "brick-a"}
     )
-    phases, requests = [], []
+    phases, requests, selection_regions = [], [], []
+    measured_orientation = (
+        0.0,
+        math.sin(math.pi / 4 + hover_angle_error_rad / 2),
+        0.0,
+        math.cos(math.pi / 4 + hover_angle_error_rad / 2),
+    )
 
     async def capture(participants):
         return shared, 1, {"piper_0_joint1": 0.0, "piper_1_joint1": 0.0}
@@ -537,6 +550,11 @@ def test_place_up_pick_handler_sends_region_once_and_closes_at_actual_endpoint()
         requests.append((phase, value))
         if phase == "open_gripper":
             shared["robots"]["piper_0"]["opening_m"] = value.payload["opening_m"]
+        if phase in ("pick_descent", "pick_entry"):
+            assert value.kind.value == "PICK_CONTACT"
+            assert value.payload["guard"]["start"] == shared["robots"]["piper_0"]["tcp_pose"]
+            assert value.payload["guard"]["end"]["orientation_xyzw"] == measured_orientation
+            shared["robots"]["piper_0"]["tcp_pose"] = value.payload["guard"]["end"]
         return SimpleNamespace(
             passed=phase != "close_gripper",
             terminal=True,
@@ -548,11 +566,13 @@ def test_place_up_pick_handler_sends_region_once_and_closes_at_actual_endpoint()
 
     async def approach(item, **kwargs):
         phases.append(kwargs["phase_id"])
-        assert set(kwargs["targets"]["piper_0"]) == {"grasp_region"}
-        selected = endpoint().tcp_pose
+        assert "grasp_region" not in kwargs["targets"]["piper_0"]
+        assert kwargs["targets"]["piper_0"]["grasp_approach_region"] is selection_regions[-1]
+        selected = replace(endpoint().tcp_pose, position_xyz=(
+            *endpoint().tcp_pose.position_xyz[:2], endpoint().tcp_pose.position_xyz[2] + 0.06 + hover_z_error_m))
         shared["robots"]["piper_0"]["tcp_pose"] = {
             "position_xyz": selected.position_xyz,
-            "orientation_xyzw": selected.orientation_xyzw,
+            "orientation_xyzw": measured_orientation,
         }
         return SimpleNamespace(
             planned=True,
@@ -567,14 +587,45 @@ def test_place_up_pick_handler_sends_region_once_and_closes_at_actual_endpoint()
             reason=None,
         )
 
+    async def plan(request):
+        phases.append("select_grasp_endpoint")
+        assert request.targets["piper_0"]["pick_endpoint_selection_only"] is True
+        selection_regions.append(request.targets["piper_0"]["grasp_region"])
+        if reject_first and len(selection_regions) == 1:
+            return SimpleNamespace(passed=False, error="endpoint clearance", lifecycle={
+                "plan_only": True, "physical_execution": False,
+                "dispatch_attempted": False, "prepared": False, "started": False,
+                "terminal": True,
+            }, trajectory={"candidate_rejection": {
+                "code": "GRASP_APPROACH_WORLD_CLEARANCE", "stage": "endpoint_geometry"
+            }})
+        from dataclasses import asdict
+        return SimpleNamespace(passed=True, error=None, lifecycle={
+            "plan_only": True, "physical_execution": False,
+            "dispatch_attempted": False, "prepared": False, "started": False,
+            "terminal": True,
+        }, trajectory={
+            "selection_only_discard_path": True,
+            "selected_grasp_endpoints": {"piper_0": {"tcp_pose": asdict(endpoint().tcp_pose)}},
+            "grasp_endpoint_clearance": {"checked_pairs": 1},
+        })
+
+    handler._free_space.plan_free_space = plan
     handler._dispatch = dispatch
     handler.execute_free_space_phase = approach
     item = replace(operation(), parameters={"successor_skill": "PLACE_UP"})
     result = asyncio.run(handler.execute(item))
+    assert result.evidence["hover_measured_arrival"]["position_error_m"] == pytest.approx(hover_z_error_m)
+    assert result.evidence["hover_measured_arrival"]["position_gate"] == "measured_start_path_admission"
+    assert result.evidence["hover_measured_arrival"]["orientation_error_rad"] == pytest.approx(hover_angle_error_rad, abs=1e-7)
+    assert result.evidence["hover_measured_arrival"]["orientation_gate"] == "measured_start_path_admission"
     assert phases == [
         "plan_grasp",
         "open_gripper",
+        *(["select_grasp_endpoint"] * (2 if reject_first else 1)),
         "precontact_boundary",
+        "pick_descent",
+        "pick_entry",
         "allow_grasp_contact",
         "close_gripper",
     ], result.reason
@@ -583,10 +634,10 @@ def test_place_up_pick_handler_sends_region_once_and_closes_at_actual_endpoint()
         0.02 - context().params.squeeze_m
     )
     assert (
-        result.evidence["successor_grasp"]["mode"] == "moveit_continuous_grasp_region"
+        result.evidence["successor_grasp"]["mode"] == "handler_staged_region_pick"
     )
     assert result.evidence["lift_geometry"]["selected_orientation_xyzw"] == list(
-        endpoint().tcp_pose.orientation_xyzw
+        measured_orientation
     )
     assert ledger.owner_of_object("brick-a") is None
     assert not hasattr(handler, "_select_successor_grasp")

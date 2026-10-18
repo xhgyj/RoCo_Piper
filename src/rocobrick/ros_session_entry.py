@@ -868,6 +868,22 @@ def perform_operation(
                 evidence=evidence,
                 error=None,
             )
+        if operation.kind is OperationKind.PICK_CONTACT:
+            from rocobrick.adapters.moveit.pick_entry import execute_pick_entry
+
+            outcome = execute_pick_entry(runtime, operation.payload, operation.timeout_s)
+            record = execution_record(outcome)
+            passed = (outcome.status.value == "SUCCEEDED" and outcome.terminal is True
+                      and outcome.safe_to_release is True
+                      and outcome.details.get("contact_stop_reason") is None
+                      and bool(outcome.details.get("contact_trace")))
+            record["is_success"] = passed
+            return RuntimeOperationResult(
+                request_id=operation.request_id, kind=operation.kind,
+                passed=passed, execution=record,
+                evidence={**evidence, "motion_sent": outcome.command_messages > 0},
+                error=None if passed else "PICK supervised entry failed",
+            )
         if operation.kind is OperationKind.GUARDED_TCP_POSE:
             from rocobrick.isaac_backend import tcp_pose_target_from_payload
             from rocobrick.skills.contact import validate_guard

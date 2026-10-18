@@ -27,6 +27,13 @@ from rocobrick.skills.targets import (
 )
 
 GRASP_REGION_SCHEMA = "rocobrick-grasp-region/v1"
+# Measured-arrival admission bound.  The position-controlled arm settles
+# 10-16 mrad off the orientation it was commanded (2026-10-18 evidence), so the
+# closing-axis alignment check has to admit that residual instead of 15 mrad.
+ARRIVAL_ANGLE_TOLERANCE_RAD = 0.05
+# Experimental PICK-only platform allowance: retain 4 mm positive clearance.
+# This is not a calibrated physical safety guarantee or a global scene padding.
+PICK_PLATFORM_MARGIN_M = 0.004
 CALIBRATION_PATH = (
     Path(__file__).resolve().parents[3]
     / "artifacts/model-audit/piper_l_tcp_calibration.json"
@@ -70,6 +77,47 @@ def calibrated_pad_geometry(path: Path, expected_sha256: str) -> dict[str, objec
     return {"pad_vertices_tcp": vertices, "flange_to_tcp_m": translation[2]}
 
 
+def supporting_surface_top(sample: PickObservation, context) -> float:
+    """Resolve the measured brick's support, never a lower floor beneath it.
+
+    Configured platforms use the same boxes as simulator initialization. A
+    1 mm observation tolerance permits settling noise, not a different level.
+    Without platform configuration the existing ground-only contract remains.
+
+    Returns:
+        The world Z of the unique measured supporting surface.
+    """
+    platforms = context.feeding_platforms
+    if not platforms:
+        return context.ground.top_z_m if context.ground else sample.aabb_min[2]
+    candidates = []
+    for platform in platforms:
+        if (
+            all(
+                sample.aabb_min[i] >= platform.minimum_m[i] - 0.001
+                and sample.aabb_max[i] <= platform.maximum_m[i] + 0.001
+                for i in (0, 1)
+            )
+            and abs(sample.aabb_min[2] - platform.top_z_m) <= 0.001
+        ):
+            candidates.append(platform.top_z_m)
+    ground = context.ground
+    if (
+        ground is not None
+        and all(
+            abs((sample.aabb_min[i] + sample.aabb_max[i]) / 2 - ground.center_xy_m[i])
+            + (sample.aabb_max[i] - sample.aabb_min[i]) / 2
+            <= ground.size_xy_m[i] / 2 + 0.001
+            for i in (0, 1)
+        )
+        and abs(sample.aabb_min[2] - ground.top_z_m) <= 0.001
+    ):
+        candidates.append(ground.top_z_m)
+    if len(candidates) != 1:
+        raise ValueError("PICK_SUPPORT_UNRESOLVED_OR_AMBIGUOUS")
+    return candidates[0]
+
+
 def place_up_grasp_region(sample: PickObservation, context, *, geometry=None):
     """Build one continuous side-pinch region without relocating the brick.
 
@@ -90,6 +138,11 @@ def place_up_grasp_region(sample: PickObservation, context, *, geometry=None):
     minimum = [min(p[i] for p in corners) for i in range(3)]
     maximum = [max(p[i] for p in corners) for i in range(3)]
     base = Pose(context.base.position_xyz, context.base.orientation_xyzw)
+    support_top = supporting_surface_top(sample, context)
+    on_platform = any(
+        abs(platform.top_z_m - support_top) <= 1e-9
+        for platform in context.feeding_platforms
+    )
     region = {
         "schema": GRASP_REGION_SCHEMA,
         "robot_id": sample.robot_id,
@@ -101,11 +154,9 @@ def place_up_grasp_region(sample: PickObservation, context, *, geometry=None):
         "object_in_base": asdict(compose(inverse(base), sample.object_pose)),
         "center": [(a + b) / 2.0 for a, b in zip(minimum, maximum, strict=True)],
         "half_extents": [(b - a) / 2.0 for a, b in zip(minimum, maximum, strict=True)],
-        "ground_top_world_m": context.ground.top_z_m
-        if context.ground
-        else sample.aabb_min[2],
+        "ground_top_world_m": support_top,
         "base_in_world": asdict(base),
-        "floor_margin_m": 0.005,
+        "floor_margin_m": PICK_PLATFORM_MARGIN_M if on_platform else 0.005,
         "contact_margin_m": min(0.001, (maximum[2] - minimum[2]) * 0.1),
         "pad_vertices_tcp": geometry["pad_vertices_tcp"],
         "flange_to_tcp_m": geometry["flange_to_tcp_m"],
@@ -215,14 +266,25 @@ def validate_grasp_scene(region, scene_snapshot) -> None:
 
 
 def admit_grasp_endpoint(
-    region, sample: PickObservation, *, tolerance_m=0.001, angle_tolerance_rad=0.015
+    region,
+    sample: PickObservation,
+    *,
+    tolerance_m=0.001,
+    angle_tolerance_rad=0.015,
+    center_tolerance_m=None,
 ):
     """Check actual pad centroids, floor envelope and exposed stud corridor.
+
+    ``tolerance_m`` stays the object-drift and floor-envelope bound; the
+    centring checks use ``center_tolerance_m`` (defaulting to it) because the
+    measured arrival cannot be tighter than the servo residual.
 
     Returns:
         The actual brick span on the measured closing axis, not holding proof.
     """
     validate_grasp_region(region)
+    if center_tolerance_m is None:
+        center_tolerance_m = tolerance_m
     if (
         sample.robot_id != region["robot_id"]
         or sample.physical_instance_id != region["physical_instance_id"]
@@ -246,9 +308,9 @@ def admit_grasp_endpoint(
     tangent = 1 - axis
     margin = region["contact_margin_m"]
     if (
-        abs(delta[axis]) > tolerance_m
-        or abs(delta[tangent]) > extents[tangent] * 0.5 + tolerance_m
-        or abs(delta[2]) > extents[2] - margin + tolerance_m
+        abs(delta[axis]) > center_tolerance_m
+        or abs(delta[tangent]) > extents[tangent] * 0.5 + center_tolerance_m
+        or abs(delta[2]) > extents[2] - margin + center_tolerance_m
     ):
         raise ValueError("TCP pad centroids miss the graspable side-wall region")
     approach = _quat_rotate_vector(relative.orientation_xyzw, (0.0, 0.0, 1.0))
@@ -280,7 +342,15 @@ def targets_from_grasp_endpoint(region, sample, context, original: PickTargets):
     Returns:
         Existing PICK targets updated from the actual arrived TCP.
     """
-    span = admit_grasp_endpoint(region, sample)
+    # The pads still close onto the wall while the finger centre sits offset by
+    # less than the closing squeeze, so that is the physical centring bound for
+    # a measured arrival (the servo holds it several millimetres off target).
+    span = admit_grasp_endpoint(
+        region,
+        sample,
+        center_tolerance_m=context.params.squeeze_m,
+        angle_tolerance_rad=ARRIVAL_ANGLE_TOLERANCE_RAD,
+    )
     position = world_position_to_base(sample.tcp_pose.position_xyz, context.base)
     orientation = world_orientation_to_base(
         sample.tcp_pose.orientation_xyzw, context.base

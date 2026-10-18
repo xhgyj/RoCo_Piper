@@ -2150,6 +2150,7 @@ def test_the_read_only_whitelist_covers_every_operation_kind():
         "LINK6_POSE",
         "TCP_POSE",
         "GUARDED_TCP_POSE",
+        "PICK_CONTACT",
         "GRIPPER_TARGET",
         "APPLY_PLANNING_SCENE",
         "ATTACH_PLANNING_SCENE",

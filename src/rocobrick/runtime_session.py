@@ -2155,6 +2155,7 @@ class MultiRobotIsaacMoveItSession:
                 OperationKind.LINK6_POSE,
                 OperationKind.TCP_POSE,
                 OperationKind.GUARDED_TCP_POSE,
+                OperationKind.PICK_CONTACT,
                 OperationKind.GRIPPER_TARGET,
                 OperationKind.APPLY_PLANNING_SCENE,
                 OperationKind.ATTACH_PLANNING_SCENE,

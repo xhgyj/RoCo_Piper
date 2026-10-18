@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import math
+import time
 from collections.abc import Mapping
 from dataclasses import asdict, dataclass, replace
 from typing import Protocol
@@ -18,6 +19,7 @@ from rocobrick.isaac_backend import (
     RuntimeOperation,
     attached_planning_scene_operation,
     gripper_operation,
+    pick_contact_operation,
     planning_scene_operation,
     tcp_pose_operation,
 )
@@ -30,6 +32,7 @@ from rocobrick.multi_robot_scheduler import (
 from rocobrick.planning_scene import PlanningSceneUpdate, box_from_aabb, scene_digest
 from rocobrick.robot_operation_plan import RobotOperation
 from rocobrick.skills.grasp_region import (
+    ARRIVAL_ANGLE_TOLERANCE_RAD,
     admit_grasp_endpoint,
     place_up_grasp_region,
     targets_from_grasp_endpoint,
@@ -37,9 +40,11 @@ from rocobrick.skills.grasp_region import (
 from rocobrick.skills.observation import (
     PickObservation,
     Pose,
+    _pose,
     parse_pick_observation,
     verify_pick_following,
 )
+from rocobrick.skills.placement_geometry import pose_error
 from rocobrick.skills.target_context import TargetContext
 from rocobrick.skills.targets import (
     pick_targets,
@@ -75,6 +80,19 @@ PICK_APPROACH_EXTRA_OPENING_M = 0.01
 # The hover keeps the wrist rotation out of the brick's zone and the short
 # straight descent follows the modeled path closely at low speed.
 PICK_TOPDOWN_HOVER_M = 0.06
+# Bounded plan-only proposals share the original 60 s selection phase budget.
+PICK_ENDPOINT_CANDIDATE_LIMIT = 4
+PICK_ENDPOINT_SELECTION_TIMEOUT_S = 60.0
+# Live controller residual admitted at the two handler-owned contact
+# endpoints.  The sim's joints are the soft spring drives described above, so a
+# commanded pose settles a few millimetres and a few milliradians short of its
+# spline however tight the goal tolerance is (2026-10-18 evidence: the hover
+# arrived 4.1 mm / 10.3 mrad off, a second run 3.2 mm / 15.8 mrad).  A 1 mm
+# endpoint demand therefore failed every PICK with contact_endpoint_not_reached
+# before the pads ever moved, so these admit the servo residual that the open
+# finger corridor already tolerates.
+PICK_CONTACT_POSITION_TOLERANCE_M = 0.008
+PICK_CONTACT_ORIENTATION_TOLERANCE_RAD = 0.03
 
 
 def _tcp_relative_aabb(
@@ -274,6 +292,260 @@ class PickHandler:
             self._active_free_space.pop(operation.operation_id, None)
         return result
 
+    async def _select_region_hover(
+        self,
+        operation,
+        scene,
+        version,
+        state,
+        region,
+        original,
+        *,
+        selection_evidence=None,
+    ):
+        """Admit a full-gripper endpoint before any hover/contact dispatch.
+
+        Native pad sampling proposes only; the same full-gripper world gate
+        used by hover and local entry is authoritative. Only its structured,
+        strictly nonphysical endpoint rejection permits another proposal.
+
+        Returns:
+            Hover target, contact/hover world poses and candidate admission proof.
+        """
+        if self._free_space is None:
+            raise ValueError("PICK selection transport unavailable")
+        robot = operation.executor_robot_id
+        baseline = parse_pick_observation(
+            scene,
+            robot_id=robot,
+            physical_instance_id=region["physical_instance_id"],
+            session_id=self._session_id,
+            manifest_sha256=self._manifest_sha256,
+        )
+        attempts = []
+        audit = selection_evidence if selection_evidence is not None else {}
+        audit.update(
+            {
+                "stop_reason": "aborted",
+                "candidate_limit": PICK_ENDPOINT_CANDIDATE_LIMIT,
+                "timeout_s": PICK_ENDPOINT_SELECTION_TIMEOUT_S,
+                "arbiter": "full_gripper_world_clearance",
+                "baseline_object_pose": asdict(baseline.object_pose),
+                "support_top_world_m": region["ground_top_world_m"],
+                "attempts": attempts,
+            }
+        )
+        deadline = time.monotonic() + PICK_ENDPOINT_SELECTION_TIMEOUT_S
+        for index in range(PICK_ENDPOINT_CANDIDATE_LIMIT):
+            if index:
+                # Never resubmit an old scene/state or silently rebind an
+                # already moved object just to make a rejected candidate pass.
+                scene, version, state = await self._free_space.free_space_context(
+                    tuple(operation.participants)
+                )
+                measured = parse_pick_observation(
+                    scene,
+                    robot_id=robot,
+                    physical_instance_id=baseline.physical_instance_id,
+                    session_id=self._session_id,
+                    manifest_sha256=self._manifest_sha256,
+                )
+                displacement, angle = pose_error(
+                    baseline.object_pose, measured.object_pose
+                )
+                if displacement > 0.001 or angle > 0.015:
+                    audit["stop_reason"] = "object_moved"
+                    raise ValueError("brick moved during PICK endpoint selection")
+                region = place_up_grasp_region(measured, self._context)
+                if region["ground_top_world_m"] != audit["support_top_world_m"]:
+                    audit["stop_reason"] = "support_changed"
+                    raise ValueError("PICK support changed during endpoint selection")
+                if abs(measured.opening_m - region["approach_opening_m"]) > 0.001:
+                    raise ValueError(
+                        "gripper opening changed during endpoint selection"
+                    )
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                audit["stop_reason"] = "time_budget_exhausted"
+                raise ValueError("PICK endpoint selection budget exhausted")
+            selection = FreeSpaceMotionRequest(
+                motion_id=f"{operation.operation_id}:select_grasp_endpoint:{index + 1}",
+                session_robots=tuple(self._free_space.robot_ids),
+                participants=tuple(operation.participants),
+                scene_snapshot=scene,
+                scene_version=version,
+                start_state=state,
+                timeout_s=remaining,
+                targets={
+                    robot: {
+                        "grasp_region": region,
+                        "pick_endpoint_selection_only": True,
+                    }
+                },
+            )
+            planned = await self._free_space.plan_free_space(selection)
+            lifecycle = planned.lifecycle
+            nonphysical = (
+                lifecycle.get("plan_only") is True
+                and lifecycle.get("physical_execution") is False
+                and lifecycle.get("dispatch_attempted") is False
+                and lifecycle.get("prepared") is False
+                and lifecycle.get("started") is False
+                and lifecycle.get("terminal") is True
+            )
+            attempt = {
+                "motion_id": selection.motion_id,
+                "scene_version": version,
+                "scene_digest": planned.trajectory.get("scene_digest"),
+                "scene_sequence": scene.get("sequence"),
+                "scene_sim_time_s": scene.get("sim_time_s"),
+                "region": region,
+                "start_state": dict(state),
+                "passed": planned.passed,
+                "error": planned.error,
+                "lifecycle": dict(lifecycle),
+                "trajectory": dict(planned.trajectory),
+            }
+            attempts.append(attempt)
+            if not nonphysical:
+                audit["stop_reason"] = "no_dispatch_proof_missing"
+                raise ValueError(
+                    "PICK endpoint selection lacks strict no-dispatch proof"
+                )
+            if time.monotonic() >= deadline:
+                audit["stop_reason"] = "time_budget_exhausted"
+                raise ValueError("PICK endpoint selection budget exhausted")
+            if not planned.passed:
+                rejection = planned.trajectory.get("candidate_rejection", {})
+                retryable = (
+                    isinstance(rejection, Mapping)
+                    and rejection.get("code") == "GRASP_APPROACH_WORLD_CLEARANCE"
+                    and rejection.get("stage") == "endpoint_geometry"
+                )
+                if retryable and index + 1 < PICK_ENDPOINT_CANDIDATE_LIMIT:
+                    continue
+                audit["stop_reason"] = (
+                    "candidate_limit_exhausted"
+                    if retryable
+                    else "non_retryable_failure"
+                )
+                if retryable:
+                    raise ValueError(
+                        "PICK endpoint selection candidate limit exhausted: "
+                        f"{planned.error}"
+                    )
+                raise ValueError(f"PICK endpoint selection failed: {planned.error}")
+            if planned.trajectory.get("selection_only_discard_path") is not True:
+                raise ValueError("PICK endpoint selection lacks discarded-path proof")
+            selected = _pose(
+                planned.trajectory["selected_grasp_endpoints"][robot]["tcp_pose"],
+                "selected grasp",
+            )
+            hover = Pose(
+                (
+                    *selected.position_xyz[:2],
+                    selected.position_xyz[2] + PICK_TOPDOWN_HOVER_M,
+                ),
+                selected.orientation_xyzw,
+            )
+            target = replace(
+                original,
+                position=world_position_to_base(hover.position_xyz, self._context.base),
+                orientation_xyzw=world_orientation_to_base(
+                    hover.orientation_xyzw, self._context.base
+                ),
+            )
+            audit["stop_reason"] = "accepted"
+            audit["accepted_attempt"] = index + 1
+            return (
+                target,
+                selected,
+                hover,
+                {
+                    "mode": "handler_staged_region_pick",
+                    "region": region,
+                    "selected_contact_world": asdict(selected),
+                    "hover_world": asdict(hover),
+                    "selection_only": True,
+                    "incidental_selection_path_executed": False,
+                    "endpoint_geometry": planned.trajectory["grasp_endpoint_clearance"],
+                    "candidate_selection": audit,
+                },
+            )
+        raise ValueError("PICK endpoint selection candidate limit exhausted")
+
+    async def _enter_region_contact(
+        self, operation, admission, region, selected, hover, original, evidence
+    ):
+        """Own two guarded controller segments, with no MoveIt contact planning."""
+        contact_orientation = None
+        for phase, end in (
+            (
+                "pick_descent",
+                Pose(
+                    (*selected.position_xyz[:2], selected.position_xyz[2] + 0.003),
+                    selected.orientation_xyzw,
+                ),
+            ),
+            ("pick_entry", selected),
+        ):
+            sample = parse_pick_observation(
+                await self._observations.observe(admission.robot_id),
+                robot_id=admission.robot_id,
+                physical_instance_id=admission.physical_instance_id,
+                session_id=self._session_id,
+                manifest_sha256=self._manifest_sha256,
+            )
+            if phase == "pick_descent":
+                distance, angle = pose_error(sample.tcp_pose, hover)
+                evidence["hover_measured_arrival"] = {
+                    "position_error_m": distance,
+                    "orientation_error_rad": angle,
+                    "measured_start": asdict(sample.tcp_pose),
+                    "requested_hover": asdict(hover),
+                    "position_gate": "measured_start_path_admission",
+                    "orientation_gate": "measured_start_path_admission",
+                }
+                contact_orientation = sample.tcp_pose.orientation_xyzw
+                evidence["contact_orientation_reference"] = {
+                    "source": "measured_hover",
+                    "orientation_xyzw": contact_orientation,
+                    "sequence": sample.sequence,
+                    "sim_time_s": sample.sim_time_s,
+                }
+            # Freeze the measured hover orientation across BOTH segments. Do
+            # not chase the sampled ideal, or silently rebase later drift.
+            # Local IK, clearance and live tracking certify this actual path.
+            end = replace(end, orientation_xyzw=contact_orientation)
+            target = replace(
+                original,
+                position=world_position_to_base(end.position_xyz, self._context.base),
+                orientation_xyzw=world_orientation_to_base(
+                    end.orientation_xyzw, self._context.base
+                ),
+                position_tolerance_m=PICK_CONTACT_POSITION_TOLERANCE_M,
+                orientation_tolerance_rad=PICK_CONTACT_ORIENTATION_TOLERANCE_RAD,
+            )
+            guard = {
+                "mode": phase,
+                "robot_id": admission.robot_id,
+                "session_id": self._session_id,
+                "manifest_sha256": self._manifest_sha256,
+                "region": region,
+                "start": asdict(sample.tcp_pose),
+                "end": asdict(end),
+            }
+            result = await self._dispatch(
+                operation,
+                phase,
+                pick_contact_operation(
+                    target, guard, 120.0, f"{operation.operation_id}:{phase}"
+                ),
+            )
+            evidence[phase] = dict(result.evidence)
+            if not (result.passed and result.terminal and result.safe):
+                raise ValueError(f"{phase} failed: {result.reason}")
+
     async def preflight(self, operation: RobotOperation) -> PickAdmission:
         """Validate target identity, ownership, arrival and fresh scene."""
         if operation.skill != "PICK" or operation.target is None:
@@ -365,6 +637,17 @@ class PickHandler:
                     ),
                 )
             )
+        # Physical platform boxes stay forbidden to every robot link, including
+        # contact-enabled grasp phases. Never exempt a whole support surface.
+        boxes.extend(
+            box_from_aabb(
+                object_id=platform.prim_path,
+                frame_id=frame_id,
+                minimum_m=platform.minimum_m,
+                maximum_m=platform.maximum_m,
+            )
+            for platform in getattr(context, "feeding_platforms", ())
+        )
         links = [
             (object_id, f"{admission.robot_id}_gripper_link1"),
             (object_id, f"{admission.robot_id}_gripper_link2"),
@@ -627,6 +910,8 @@ class PickHandler:
         try:
             context = self._context
             grasp_region = None
+            selected_region_contact = None
+            selected_region_hover = None
             top_binding = self._top_offset_grasps.get(operation.operation_id)
             top_contact = None
             top_hover = None
@@ -645,6 +930,16 @@ class PickHandler:
                     )
                 if top_binding is None:
                     grasp_region = place_up_grasp_region(admission.sample, context)
+                    evidence["grasp_support"] = {
+                        "source": "configured_surface_matching_measured_brick",
+                        "support_top_world_m": grasp_region["ground_top_world_m"],
+                        "observed_brick_bottom_world_m": admission.sample.aabb_min[2],
+                        "global_ground_top_world_m": (
+                            context.ground.top_z_m if context.ground else None
+                        ),
+                        "floor_margin_m": grasp_region["floor_margin_m"],
+                        "platforms": [asdict(p) for p in context.feeding_platforms],
+                    }
             # Extra clearance only while approaching: keep grasp compression
             # and placement/release openings unchanged. Respect finger travel.
             original_reach_opening = targets.reach_opening_m
@@ -904,7 +1199,14 @@ class PickHandler:
                             "lift_height_m": context.params.lift_height_m,
                         }
                     if grasp_region is not None:
-                        admit_grasp_endpoint(grasp_region, preclose)
+                        # Measured arrival: admit the servo residual the pads
+                        # still close across, not a 1 mm ideal pose.
+                        admit_grasp_endpoint(
+                            grasp_region,
+                            preclose,
+                            center_tolerance_m=context.params.squeeze_m,
+                            angle_tolerance_rad=ARRIVAL_ANGLE_TOLERANCE_RAD,
+                        )
                     contact_scene = planning_scene_operation(
                         self._planning_payload(
                             admission, context, preclose, allow_contact=True
@@ -970,16 +1272,41 @@ class PickHandler:
                                 manifest_sha256=self._manifest_sha256,
                             )
                             grasp_region = place_up_grasp_region(sample, context)
-                            target = {
-                                admission.robot_id: {"grasp_region": grasp_region}
-                            }
+                            (
+                                hover_target,
+                                selected_region_contact,
+                                selected_region_hover,
+                                selection_proof,
+                            ) = await self._select_region_hover(
+                                operation,
+                                scene,
+                                version,
+                                start_state,
+                                grasp_region,
+                                targets.precontact_boundary,
+                                selection_evidence=evidence.setdefault(
+                                    "successor_grasp_selection", {}
+                                ),
+                            )
+                            grasp_region = selection_proof["region"]
+                            evidence["successor_grasp"] = selection_proof
+                            # Selection may synchronize the scene. Rebind before
+                            # planning ONLY the safe hover, never its contact path.
+                            (
+                                scene,
+                                version,
+                                start_state,
+                            ) = await self._free_space.free_space_context(
+                                tuple(operation.participants)
+                            )
+                            target = self._free_space_target(
+                                admission.robot_id, hover_target
+                            )
+                            target[admission.robot_id]["grasp_approach_region"] = (
+                                grasp_region
+                            )
                             for peer in operation.participants:
                                 target.setdefault(peer, {"maintain_pose": True})
-                            evidence["successor_grasp"] = {
-                                "mode": "moveit_continuous_grasp_region",
-                                "region": grasp_region,
-                                "physical_validation": "lift_following_required",
-                            }
                         free_result = await self.execute_free_space_phase(
                             operation,
                             scene_snapshot=scene,
@@ -1040,6 +1367,17 @@ class PickHandler:
                     and dispatched_free_space
                 ):
                     try:
+                        # Hover is terminal before the handler starts its
+                        # locally generated descent and final 3 mm entry.
+                        await self._enter_region_contact(
+                            operation,
+                            admission,
+                            grasp_region,
+                            selected_region_contact,
+                            selected_region_hover,
+                            targets.precontact_boundary,
+                            evidence,
+                        )
                         arrived = parse_pick_observation(
                             await self._observations.observe(admission.robot_id),
                             robot_id=admission.robot_id,

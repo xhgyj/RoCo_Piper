@@ -105,6 +105,10 @@ def validate_guard(document: object) -> Mapping[str, object]:
     """
     if not isinstance(document, Mapping):
         raise ValueError("contact guard must be a mapping")
+    if document.get("mode") in ("pick_descent", "pick_entry"):
+        from rocobrick.skills.pick_contact import validate_pick_guard
+
+        return validate_pick_guard(document)
     mode = document.get("mode")
     if mode == "support_top":
         expected = SUPPORT_GUARD_KEYS
@@ -372,6 +376,10 @@ def inspect_contact(scene: Mapping[str, object], guard: Mapping[str, object]):
         Stop reason (or None) and JSON-safe measurements of this observation.
     """
     validate_guard(guard)
+    if guard["mode"] in ("pick_descent", "pick_entry"):
+        from rocobrick.skills.pick_contact import inspect_pick_contact
+
+        return inspect_pick_contact(scene, guard)
     if guard["mode"] == "support_top":
         from rocobrick.skills.support_evidence import verify_support_contact
 
