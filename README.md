@@ -27,6 +27,14 @@ The formal skill surface is:
 
 A valid plan must preserve its declared operation order and layer semantics. The runtime does not invent, reorder, or silently repair operations.
 
+## Offline Architecture Migration
+
+`src/rocobrick/task_plan/`, `src/rocobrick/contracts/`, and
+`src/rocobrick/scheduling/` contain the first offline event-driven foundation.
+The new `robot-task-plan/v2` parser is **not a production CLI input** yet.
+Production dispatch and motion behavior are unchanged. See
+[implementation status and remaining safety gates](docs/event-driven-foundation-status.md).
+
 ## Requirements
 
 The supported environment is:

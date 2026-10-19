@@ -122,6 +122,27 @@ Current capability boundary:
   successful request return. Do not release a resource or mark an assembly
   complete without terminal, connection, release, and retreat evidence.
 
+## Event-driven Migration Boundary
+
+The new `task_plan/`, `contracts/`, and `scheduling/` packages are offline
+foundations only. See `docs/event-driven-foundation-status.md` for implemented
+scope and remaining gates. `robot-task-plan/v2` is not accepted by the production
+CLI yet; the production chain and v1 layer semantics above remain unchanged.
+
+- Keep the new core framework-free; `contracts/` is a leaf, `task_plan/` may
+  consume contracts, and `scheduling/` may consume both. No core adapter imports.
+- Admission is permission to request coordination, not motion authorization.
+  Parsed evidence and motion DTOs do not prove physical truth or confer ownership.
+- No resource release on success, timeout or cancellation without independent
+  terminal-safe and continuing-obligation verification. Carrying/supporting
+  transitions require explicit physical-continuity lease transfer, not release.
+- The current reducer is single-event-loop, one-attempt, in-memory and offline.
+  Do not wire it to controllers before execution ownership, trusted physical
+  verification, scene binding and migration exclusivity are implemented.
+- `tests/task_plan/`, `tests/contracts/`, `tests/scheduling/`, and
+  `tests/architecture/` cover the new slice; retain existing production regressions.
+  Static boundary tests cover migrated packages, not legacy skills or all senders.
+
 ## Editing Rules
 
 - Preserve unrelated dirty worktree changes; do not reset, checkout, or delete them.
